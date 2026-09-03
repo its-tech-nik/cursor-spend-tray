@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QGuiApplication
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRectF, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QProgressBar,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -116,74 +115,130 @@ class BrowserHelpBanner(QFrame):
         self.command.set_command(command)
 
 
-class UsageBar(QWidget):
+class UsageRing(QWidget):
+    """Circular usage gauge with a short label underneath."""
+
     def __init__(
         self,
         title: str,
-        subtitle: str,
-        bar_color: str,
+        fill: str,
+        *,
+        warn_at_70: bool = False,
+        tooltip: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._ring = _RingGlyph(fill, warn_at_70=warn_at_70)
         self._title = QLabel(title)
-        self._pct = QLabel("—")
-        self._bar = QProgressBar()
-        self._sub = QLabel(subtitle)
 
         title_font = QFont()
         title_font.setPointSize(11)
         title_font.setWeight(QFont.Weight.DemiBold)
+        title_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
         self._title.setFont(title_font)
-        self._title.setStyleSheet("color: #ECECEC;")
-        self._title.setWordWrap(True)
+        self._title.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self._title.setFixedHeight(22)
+        self._title.setStyleSheet("color: #ECECEC; background: transparent; border: none;")
 
-        self._pct.setFont(title_font)
-        self._pct.setStyleSheet("color: #ECECEC;")
-        self._pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        if tooltip:
+            self.setToolTip(tooltip)
+            self._ring.setToolTip(tooltip)
 
-        self._bar.setRange(0, 100)
-        self._bar.setValue(0)
-        self._bar.setTextVisible(False)
-        self._bar.setFixedHeight(8)
-        self._bar.setStyleSheet(
-            f"""
-            QProgressBar {{
-                background: #2A2A2A;
-                border: none;
-                border-radius: 4px;
-            }}
-            QProgressBar::chunk {{
-                background: {bar_color};
-                border-radius: 4px;
-            }}
-            """
-        )
-
-        sub_font = QFont()
-        sub_font.setPointSize(9)
-        self._sub.setFont(sub_font)
-        self._sub.setStyleSheet("color: #8B8B8B;")
-        self._sub.setWordWrap(True)
-
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        head.addWidget(self._title, stretch=1)
-        head.addWidget(self._pct)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(160)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addLayout(head)
-        layout.addWidget(self._bar)
-        layout.addWidget(self._sub)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._ring, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self._title)
 
     def set_percent(self, value: int | None) -> None:
-        if value is None:
-            self._pct.setText("—")
-            self._bar.setValue(0)
-            return
-        self._pct.setText(f"{value}% used")
-        self._bar.setValue(value)
+        self._ring.set_percent(value)
+
+
+class _RingGlyph(QWidget):
+    """Donut chart with the percentage in the center."""
+
+    def __init__(
+        self,
+        fill: str,
+        *,
+        warn_at_70: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._fill = QColor(fill)
+        self._warn_at_70 = warn_at_70
+        self._pct: int | None = None
+        self.setFixedSize(136, 136)
+
+    def set_percent(self, value: int | None) -> None:
+        self._pct = value
+        self.update()
+
+    def _arc_color(self) -> QColor:
+        pct = self._pct
+        if pct is None:
+            return self._fill
+        if pct >= 90:
+            return QColor("#D9897A")
+        if self._warn_at_70 and pct >= 70:
+            return QColor("#D0B56C")
+        return self._fill
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        stroke = 12.0
+        margin = stroke / 2.0 + 3.0
+        rect = QRectF(margin, margin, self.width() - 2 * margin, self.height() - 2 * margin)
+
+        track = QPen(
+            QColor("#2A2A2A"),
+            stroke,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+        )
+        painter.setPen(track)
+        painter.drawEllipse(rect)
+
+        if self._pct is not None:
+            clamped = max(0, min(100, self._pct))
+            if clamped > 0:
+                fill = QPen(
+                    self._arc_color(),
+                    stroke,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.FlatCap if clamped >= 97 else Qt.PenCapStyle.RoundCap,
+                )
+                painter.setPen(fill)
+                if clamped >= 100:
+                    painter.drawEllipse(rect)
+                else:
+                    painter.drawArc(rect, 90 * 16, int(-360 * 16 * clamped / 100))
+
+        painter.setPen(QColor("#ECECEC"))
+        pct_font = QFont()
+        pct_font.setPointSize(18)
+        pct_font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(pct_font)
+        label = "—" if self._pct is None else f"{max(0, min(100, self._pct))}%"
+        text_rect = QRectF(0, self.height() * 0.28, self.width(), 36)
+        painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), label)
+
+        caption = QFont()
+        caption.setPointSize(8)
+        painter.setFont(caption)
+        painter.setPen(QColor("#8B8B8B"))
+        used = "" if self._pct is None else "used"
+        used_rect = QRectF(0, self.height() * 0.52, self.width(), 20)
+        painter.drawText(used_rect, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), used)
+        painter.end()
 
 
 class CountdownLabel(QLabel):
@@ -280,25 +335,33 @@ class SpendPopup(QFrame):
         heading_font.setPointSize(12)
         heading_font.setWeight(QFont.Weight.DemiBold)
         self._heading.setFont(heading_font)
+        self._heading.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self._heading.setStyleSheet("color: #F2F2F2; background: transparent; border: none;")
 
-        self.cursor_bar = UsageBar(
-            "Cursor Models · Includes Cursor Grok and Composer",
-            "Additional usage beyond limits consumes Other Models quota or on-demand spend.",
+        self.cursor_ring = UsageRing(
+            "AUTO",
             "#8BA4C7",
+            tooltip="Cursor Models — includes Cursor Grok and Composer. Extra usage consumes API quota or on-demand spend.",
         )
-        self.other_bar = UsageBar(
-            "Other Models",
-            "Additional usage beyond limits consumes on-demand spend.",
+        self.other_ring = UsageRing(
+            "API",
             "#B0B0B0",
+            warn_at_70=True,
+            tooltip="Other Models — additional usage beyond limits consumes on-demand spend.",
         )
+
+        rings = QHBoxLayout()
+        rings.setContentsMargins(0, 8, 0, 4)
+        rings.setSpacing(16)
+        rings.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        rings.addWidget(self.cursor_ring, stretch=1)
+        rings.addWidget(self.other_ring, stretch=1)
 
         card_layout = QVBoxLayout(self._card)
         card_layout.setContentsMargins(16, 16, 16, 16)
-        card_layout.setSpacing(16)
+        card_layout.setSpacing(8)
         card_layout.addWidget(self._heading)
-        card_layout.addWidget(self.cursor_bar)
-        card_layout.addWidget(self.other_bar)
+        card_layout.addLayout(rings)
 
         self.browser_help = BrowserHelpBanner()
 
@@ -394,8 +457,8 @@ class SpendPopup(QFrame):
         super().hideEvent(event)
 
     def apply_snapshot(self, snap: UsageSnapshot) -> None:
-        self.cursor_bar.set_percent(snap.cursor_models_pct)
-        self.other_bar.set_percent(snap.other_models_pct)
+        self.cursor_ring.set_percent(snap.cursor_models_pct)
+        self.other_ring.set_percent(snap.other_models_pct)
 
     def set_browser_inaccessible(self, inaccessible: bool, launch_command: str = "") -> None:
         """Show or hide the Browser inaccessible banner with a copyable launch command."""
