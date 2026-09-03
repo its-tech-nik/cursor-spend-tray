@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import shutil
 from pathlib import Path
 
@@ -28,8 +29,16 @@ def zen_binary() -> str:
     return "zen-browser"
 
 
+def zen_profile_dir() -> Path:
+    """Dedicated Zen profile so scraping does not attach to the daily session."""
+    path = data_dir() / "zen-profile"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def zen_is_running() -> bool:
-    """True when a Zen main process is up (not content helpers)."""
+    """True when the tray's dedicated Zen instance is up (not the daily browser)."""
+    profile = str(zen_profile_dir())
     proc = Path("/proc")
     if not proc.is_dir():
         return False
@@ -49,7 +58,9 @@ def zen_is_running() -> bool:
         if "-contentproc" in joined:
             continue
         exe = Path(parts[0]).name.lower()
-        if exe in {"zen", "zen-browser"} or "zen-browser" in parts[0].lower():
+        if exe not in {"zen", "zen-browser"} and "zen-browser" not in parts[0].lower():
+            continue
+        if profile in parts or f"--profile={profile}" in parts:
             return True
     return False
 
@@ -79,16 +90,20 @@ class AppConfig(BaseModel):
         return f"http://{self.bidi_host}:{self.bidi_port}"
 
     def zen_launch_argv(self) -> list[str]:
-        """Argv to start Zen with Remote Agent enabled for scraping."""
+        """Argv to start an isolated Zen with Remote Agent enabled for scraping."""
         return [
             zen_binary(),
+            "--new-instance",
+            "--profile",
+            str(zen_profile_dir()),
+            "--headless",
             f"--remote-debugging-port={self.bidi_port}",
             "--remote-allow-hosts=localhost",
         ]
 
     def zen_launch_command(self) -> str:
-        """Shell command to start Zen with Remote Agent enabled for scraping."""
-        return " ".join(self.zen_launch_argv())
+        """Shell command to start an isolated Zen with Remote Agent enabled for scraping."""
+        return shlex.join(self.zen_launch_argv())
 
     def save(self) -> None:
         config_path().write_text(self.model_dump_json(indent=2), encoding="utf-8")

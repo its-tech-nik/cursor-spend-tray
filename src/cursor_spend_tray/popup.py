@@ -91,7 +91,7 @@ class BrowserHelpBanner(QFrame):
         self._title.setStyleSheet("color: #E8DCC8; background: transparent; border: none;")
 
         self._hint = QLabel(
-            "Quit Zen fully, then start it with remote debugging so the tray can read spending:"
+            "Start the dedicated Zen profile with remote debugging so the tray can read spending:"
         )
         hint_font = QFont()
         hint_font.setPointSize(9)

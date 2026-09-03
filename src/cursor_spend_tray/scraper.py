@@ -98,9 +98,8 @@ class SpendingScraper:
             if not available:
                 err = (
                     f"No Remote Agent on {client.http_base}. "
-                    "Start Zen temporarily with "
-                    "`zen-browser --remote-debugging-port=9222` "
-                    "(seamless launcher comes later)."
+                    "Start the dedicated Zen profile with remote debugging "
+                    "(copy the command from the tray popup, or use Launch Browser)."
                 )
                 print(f"[scrape] abort: {err}", flush=True)
                 return UsageSnapshot(
