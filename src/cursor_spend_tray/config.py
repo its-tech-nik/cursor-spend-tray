@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -9,6 +10,48 @@ APP_NAME = "cursor-spend-tray"
 SPENDING_URL = "https://cursor.com/dashboard/spending"
 DEFAULT_POLL_SECONDS = 10 * 60
 DEFAULT_BIDI_PORT = 9222
+
+
+def zen_binary() -> str:
+    """Resolve the Zen launcher / binary on PATH or common install paths."""
+    for name in ("zen-browser", "zen"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for candidate in (
+        "/opt/zen-browser-bin/zen",
+        "/usr/bin/zen-browser",
+        "/usr/bin/zen",
+    ):
+        if Path(candidate).is_file():
+            return candidate
+    return "zen-browser"
+
+
+def zen_is_running() -> bool:
+    """True when a Zen main process is up (not content helpers)."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return False
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        parts = [p.decode(errors="ignore") for p in raw.split(b"\0") if p]
+        if not parts:
+            continue
+        joined = " ".join(parts)
+        if "-contentproc" in joined:
+            continue
+        exe = Path(parts[0]).name.lower()
+        if exe in {"zen", "zen-browser"} or "zen-browser" in parts[0].lower():
+            return True
+    return False
 
 
 def data_dir() -> Path:
@@ -35,12 +78,17 @@ class AppConfig(BaseModel):
     def bidi_http_base(self) -> str:
         return f"http://{self.bidi_host}:{self.bidi_port}"
 
+    def zen_launch_argv(self) -> list[str]:
+        """Argv to start Zen with Remote Agent enabled for scraping."""
+        return [
+            zen_binary(),
+            f"--remote-debugging-port={self.bidi_port}",
+            "--remote-allow-hosts=localhost",
+        ]
+
     def zen_launch_command(self) -> str:
         """Shell command to start Zen with Remote Agent enabled for scraping."""
-        return (
-            f"zen-browser --remote-debugging-port={self.bidi_port} "
-            "--remote-allow-hosts=localhost"
-        )
+        return " ".join(self.zen_launch_argv())
 
     def save(self) -> None:
         config_path().write_text(self.model_dump_json(indent=2), encoding="utf-8")

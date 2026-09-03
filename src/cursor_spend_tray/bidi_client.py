@@ -27,6 +27,7 @@ class BidiClient:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: asyncio.Task[None] | None = None
+        self._session_active = False
 
     @property
     def http_base(self) -> str:
@@ -84,9 +85,43 @@ class BidiClient:
         if parsed.hostname in {"localhost", "127.0.0.1"}:
             ws_url = parsed._replace(netloc=f"{self.host}:{parsed.port or self.port}").geturl()
 
-        log.info("Connecting BiDi websocket %s", ws_url)
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                await self._connect_once(ws_url, attempt=attempt)
+                return
+            except BidiError as exc:
+                last_exc = exc
+                await self._force_disconnect()
+                if not _is_session_limit_error(exc) or attempt == 3:
+                    break
+                # Orphaned BiDi sessions (no session.end) block new ones briefly.
+                log.warning(
+                    "BiDi session busy (%s); retrying in %.1fs (%d/3)",
+                    exc,
+                    attempt * 1.5,
+                    attempt,
+                )
+                await asyncio.sleep(attempt * 1.5)
+
+        raise BidiError(
+            f"Could not start a WebDriver BiDi session at {self.http_base}: {last_exc}. "
+            "Quit other automation clients, or fully restart Zen with "
+            "--remote-debugging-port=9222, then try again."
+        ) from last_exc
+
+    async def _connect_once(self, ws_url: str, *, attempt: int) -> None:
+        log.info("Connecting BiDi websocket %s (attempt %d)", ws_url, attempt)
         self._ws = await websockets.connect(ws_url, max_size=8 * 1024 * 1024)
         self._reader_task = asyncio.create_task(self._read_loop(), name="bidi-reader")
+        self._session_active = False
+
+        status: dict[str, Any] = {}
+        try:
+            status = await self.call("session.status", {})
+        except BidiError as exc:
+            log.debug("session.status failed before session.new: %s", exc)
+
         try:
             await self.call(
                 "session.new",
@@ -99,14 +134,37 @@ class BidiClient:
                 },
             )
         except BidiError as exc:
-            # Some Firefox builds expose a session-bound socket where session.new is rejected.
-            log.info("session.new skipped/failed (%s); continuing", exc)
+            if _is_session_limit_error(exc):
+                raise BidiError(
+                    f"session not created: Maximum number of active sessions "
+                    f"(status={status!r})"
+                ) from exc
+            # Some builds expose a session-bound socket where session.new is rejected
+            # after the session is already attached to this connection.
+            log.info("session.new skipped/failed (%s); probing commands", exc)
             try:
-                await self.call("session.status", {})
-            except BidiError:
-                pass
+                await self.call("browsingContext.getTree", {"maxDepth": 0})
+            except BidiError as probe_exc:
+                raise BidiError(
+                    f"No usable BiDi session after session.new failure: {exc}"
+                ) from probe_exc
+
+        self._session_active = True
+        log.info("BiDi session ready (status before new=%s)", status)
 
     async def close(self) -> None:
+        if self._ws and self._session_active:
+            try:
+                await asyncio.wait_for(self.call("session.end", {}), timeout=3)
+                log.info("BiDi session.end ok")
+            except Exception as exc:
+                log.warning("session.end failed during close: %s", exc)
+            finally:
+                self._session_active = False
+        await self._force_disconnect()
+
+    async def _force_disconnect(self) -> None:
+        self._session_active = False
         if self._reader_task:
             self._reader_task.cancel()
             try:
@@ -115,7 +173,10 @@ class BidiClient:
                 pass
             self._reader_task = None
         if self._ws:
-            await self._ws.close()
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
             self._ws = None
         for fut in self._pending.values():
             if not fut.done():
@@ -240,6 +301,11 @@ class BidiClient:
         if "value" in remote:
             return remote["value"]
         return remote
+
+
+def _is_session_limit_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "maximum number of active sessions" in text or "session already started" in text
 
 
 def _deserialize_bidi_object(remote: dict[str, Any]) -> Any:

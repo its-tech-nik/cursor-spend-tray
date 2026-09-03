@@ -222,6 +222,9 @@ class CountdownLabel(QLabel):
         if refreshing:
             self.setText("Refreshing… · click to retry")
             return
+        if seconds < 0:
+            self.setText("Updates paused · click to retry")
+            return
         minutes, secs = divmod(max(0, seconds), 60)
         self.setText(f"Next update in {minutes:02d}:{secs:02d} · click to refresh")
 
@@ -397,10 +400,14 @@ class SpendPopup(QFrame):
     def set_browser_inaccessible(self, inaccessible: bool, launch_command: str = "") -> None:
         """Show or hide the Browser inaccessible banner with a copyable launch command."""
         if inaccessible:
+            self._card.hide()
             self.browser_help.set_launch_command(launch_command)
             self.browser_help.show()
+            self.countdown.hide()
         else:
+            self._card.show()
             self.browser_help.hide()
+            self.countdown.show()
         self.adjustSize()
 
     def set_status(self, text: str) -> None:

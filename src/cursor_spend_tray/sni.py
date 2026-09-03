@@ -127,6 +127,7 @@ class StatusNotifierItem(QObject):
         self._icon_dir = Path(tempfile.mkdtemp(prefix="cursor-spend-tray-icons-"))
         self.icon_theme_path = str(self._icon_dir)
         self._icon_file = self._icon_dir / f"{self.icon_name}.png"
+        self._icon_gen = 0
         self._registered = False
         self._bus = QDBusConnection.sessionBus()
         self._adaptor = _StatusNotifierAdaptor(self)
@@ -177,12 +178,24 @@ class StatusNotifierItem(QObject):
         if pix.isNull():
             pix = QPixmap(size, size)
             pix.fill()
-        if not pix.save(str(self._icon_file), "PNG"):
-            log.warning("Failed to write tray icon to %s", self._icon_file)
+        # Rotate IconName + file so Plasma reloads instead of caching the old glyph.
+        self._icon_gen = (self._icon_gen + 1) % 10000
+        self.icon_name = f"{self.item_id}-{self._icon_gen}"
+        new_file = self._icon_dir / f"{self.icon_name}.png"
+        if not pix.save(str(new_file), "PNG"):
+            log.warning("Failed to write tray icon to %s", new_file)
             return
+        old = self._icon_file
+        self._icon_file = new_file
+        if old != new_file and old.exists():
+            try:
+                old.unlink()
+            except OSError:
+                pass
         os.utime(self._icon_file, None)
         if self._registered:
             self._emit(_SNI_IFACE, "NewIcon")
+            self._emit(_SNI_IFACE, "NewIconThemePath")
 
     def set_tooltip(self, text: str, title: str | None = None) -> None:
         self.tooltip = text

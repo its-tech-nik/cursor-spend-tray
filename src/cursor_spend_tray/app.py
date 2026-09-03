@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 
-from PyQt6.QtCore import QPoint, QRect, QRectF, Qt
+from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QWidget
 
-from .config import AppConfig, UsageSnapshot
+from .config import AppConfig, UsageSnapshot, zen_is_running
 from .popup import SpendPopup
 from .scheduler import RefreshScheduler
 from .sni import StatusNotifierItem
@@ -17,6 +18,8 @@ log = logging.getLogger(__name__)
 _PANEL_EDGE_PX = 96
 _GAP_PX = 6
 _ICON_PAD = 12
+_LAUNCH_SETTLE_MS = 10_000
+_LAUNCH_RETRY_MS = 5_000  # retry interval while waiting for BiDi after launch
 
 
 def bidi_unavailable(snap: UsageSnapshot) -> bool:
@@ -29,20 +32,12 @@ def bidi_unavailable(snap: UsageSnapshot) -> bool:
 
 def tray_tooltip(snap: UsageSnapshot) -> tuple[str, str]:
     """Return (title, body) for the StatusNotifierItem hover tooltip."""
-    usage = _usage_phrase(snap)
     if bidi_unavailable(snap):
-        title = "Cursor Spend — Browser inaccessible"
-        if usage:
-            body = (
-                f"Usage not updating ({usage}). "
-                "Quit Zen and restart with remote debugging (see popup), then refresh."
-            )
-        else:
-            body = (
-                "Usage not updating. "
-                "Quit Zen and restart with remote debugging (see popup), then refresh."
-            )
-        return title, body
+        return (
+            "Cursor Spend — Browser inaccessible",
+            "Usage hidden until Zen is reachable with remote debugging (see popup).",
+        )
+    usage = _usage_phrase(snap)
     if usage:
         return "Cursor Spend", usage
     return "Cursor Spend", "Waiting for first reading…"
@@ -72,48 +67,43 @@ def make_tray_icon(
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    margin_x = 6
-    margin_y = 12
-    gap = 8
-    bar_h = (size - 2 * margin_y - gap) // 2
-    track_w = size - 2 * margin_x
-
-    tracks = (
-        (cursor_pct, QColor("#8BA4C7"), QColor("#2A3340")),
-        (other_pct, QColor("#B0B0B0"), QColor("#333333")),
-    )
-    for i, (pct, fill, track) in enumerate(tracks):
-        y = margin_y + i * (bar_h + gap)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(track)
-        painter.drawRoundedRect(margin_x, y, track_w, bar_h, 4, 4)
-        if pct is None:
-            painter.setBrush(QColor(fill.red(), fill.green(), fill.blue(), 70))
-            painter.drawRoundedRect(margin_x, y, max(4, track_w // 12), bar_h, 4, 4)
-            continue
-        fill_w = max(4, int(track_w * max(0, min(100, pct)) / 100))
-        color = fill
-        if pct >= 90:
-            color = QColor("#D9897A")
-        elif pct >= 70 and i == 1:
-            color = QColor("#D0B56C")
-        painter.setBrush(color)
-        painter.drawRoundedRect(margin_x, y, fill_w, bar_h, 4, 4)
-
     if disconnected:
         _draw_slash_overlay(painter, size)
+    else:
+        margin_x = 6
+        margin_y = 12
+        gap = 8
+        bar_h = (size - 2 * margin_y - gap) // 2
+        track_w = size - 2 * margin_x
+
+        tracks = (
+            (cursor_pct, QColor("#8BA4C7"), QColor("#2A3340")),
+            (other_pct, QColor("#B0B0B0"), QColor("#333333")),
+        )
+        for i, (pct, fill, track) in enumerate(tracks):
+            y = margin_y + i * (bar_h + gap)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(track)
+            painter.drawRoundedRect(margin_x, y, track_w, bar_h, 4, 4)
+            if pct is None:
+                painter.setBrush(QColor(fill.red(), fill.green(), fill.blue(), 70))
+                painter.drawRoundedRect(margin_x, y, max(4, track_w // 12), bar_h, 4, 4)
+                continue
+            fill_w = max(4, int(track_w * max(0, min(100, pct)) / 100))
+            color = fill
+            if pct >= 90:
+                color = QColor("#D9897A")
+            elif pct >= 70 and i == 1:
+                color = QColor("#D0B56C")
+            painter.setBrush(color)
+            painter.drawRoundedRect(margin_x, y, fill_w, bar_h, 4, 4)
 
     painter.end()
     return QIcon(pix)
 
 
 def _draw_slash_overlay(painter: QPainter, size: int) -> None:
-    """Monochrome ⊘ (slash-circle) over the usage bars — remote debugging off."""
-    # Soften bars so the glyph reads at tray size.
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(0, 0, 0, 130))
-    painter.drawRoundedRect(2, 2, size - 4, size - 4, 8, 8)
-
+    """Monochrome ⊘ (slash-circle) — remote debugging off; no usage bars."""
     cx = cy = size / 2.0
     r = size * 0.30
     ink = QColor("#E8E8E8")
@@ -122,7 +112,6 @@ def _draw_slash_overlay(painter: QPainter, size: int) -> None:
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
 
-    # Diagonal slash (bottom-left → top-right), inset so it meets the ring cleanly.
     inset = r * 0.55
     painter.drawLine(
         QPoint(int(cx - inset), int(cy + inset)),
@@ -142,22 +131,22 @@ class TrayApp(QWidget):
         self._anchor_pos = QPoint()
 
         self.tray = StatusNotifierItem("Cursor Spend", "cursor-spend-tray", self)
-        self._apply_snapshot(self.snapshot)
         self.tray.activated.connect(self._on_activated)
         self.tray.context_menu_requested.connect(self._on_context_menu)
 
         self._ctx = QMenu()
-        refresh_action = QAction("Refresh now", self)
-        refresh_action.triggered.connect(self._refresh_now)
-        open_action = QAction("Show browser setup…", self)
-        open_action.triggered.connect(self._show_connect_hint)
+        self._refresh_action = QAction("Refresh now", self)
+        self._refresh_action.triggered.connect(self._refresh_now)
+        self._launch_action = QAction("Launch Browser", self)
+        self._launch_action.triggered.connect(self._launch_browser)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
-        self._ctx.addAction(refresh_action)
-        self._ctx.addAction(open_action)
+        self._ctx.addAction(self._refresh_action)
+        self._ctx.addAction(self._launch_action)
         self._ctx.addSeparator()
         self._ctx.addAction(quit_action)
 
+        self._apply_snapshot(self.snapshot)
         self.tray.show()
 
         self.scheduler = RefreshScheduler(config, self)
@@ -173,6 +162,8 @@ class TrayApp(QWidget):
         self.popup.set_browser_inaccessible(
             disconnected, self.config.zen_launch_command()
         )
+        self._refresh_action.setVisible(not disconnected)
+        self._launch_action.setVisible(not zen_is_running())
         self.tray.set_icon(
             make_tray_icon(
                 snap.cursor_models_pct,
@@ -205,6 +196,8 @@ class TrayApp(QWidget):
 
     def _on_context_menu(self, pos: QPoint) -> None:
         self._anchor_pos = QPoint(pos)
+        # Re-check Zen each time the menu opens so Launch Browser stays accurate.
+        self._launch_action.setVisible(not zen_is_running())
         self._ctx.popup(pos)
 
     def _anchor_rect(self) -> QRect:
@@ -264,12 +257,54 @@ class TrayApp(QWidget):
         )
         return QPoint(x, y)
 
-    def _show_connect_hint(self) -> None:
-        cmd = self.config.zen_launch_command()
-        self.popup.set_browser_inaccessible(True, cmd)
+    def _launch_browser(self) -> None:
+        if zen_is_running():
+            self._launch_action.setVisible(False)
+            self.popup.set_status(
+                "Zen is already running — quit it fully, then use Launch Browser "
+                "so remote debugging can start."
+            )
+            if not self.popup.isVisible():
+                self.popup.show_at(self._popup_position())
+            return
+
+        argv = self.config.zen_launch_argv()
+        try:
+            subprocess.Popen(
+                argv,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            log.exception("Failed to launch Zen")
+            self.popup.set_status(f"Could not launch Zen: {exc}")
+            self.popup.set_browser_inaccessible(True, self.config.zen_launch_command())
+            self._launch_action.setVisible(not zen_is_running())
+            if not self.popup.isVisible():
+                self.popup.show_at(self._popup_position())
+            return
+
+        self._launch_action.setVisible(False)
         self.popup.set_status(
-            "Browser inaccessible — quit Zen, run the command below (click to copy), "
-            "then click the countdown to refresh."
+            "Launching Zen with remote debugging… checking in 10 seconds."
         )
         if not self.popup.isVisible():
             self.popup.show_at(self._popup_position())
+        if not hasattr(self, "_launch_retry_timer"):
+            self._launch_retry_timer = QTimer(self)
+            self._launch_retry_timer.setSingleShot(True)
+            self._launch_retry_timer.timeout.connect(self._refresh_after_launch)
+        self._launch_retry_timer.start(_LAUNCH_SETTLE_MS)
+
+    def _refresh_after_launch(self) -> None:
+        """Probe BiDi; if up run a full scrape, otherwise retry every 5s."""
+        self.popup.set_status("Checking browser connection…")
+        self._launch_action.setVisible(not zen_is_running())
+        self.scheduler.probe_or_refresh(
+            on_unavailable=self._reschedule_launch_retry
+        )
+
+    def _reschedule_launch_retry(self) -> None:
+        self.popup.set_status("Browser starting… checking again in 5 seconds.")
+        self._launch_retry_timer.start(_LAUNCH_RETRY_MS)
