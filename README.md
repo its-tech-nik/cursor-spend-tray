@@ -6,7 +6,7 @@ Track your **Cursor Pro** spending from the Linux system tray, without a public 
 
 Cursor’s Pro tier exposes usage on [cursor.com/dashboard/spending](https://cursor.com/dashboard/spending), but not through an official API. This app keeps a small tray icon (with live mini usage bars) and a popup that mirrors the **Included in Pro** view — **Cursor Models** and **Other Models** percentages — by reading that page through a dedicated **Zen Browser** profile (Firefox Remote Agent / WebDriver BiDi), separate from your daily session.
 
-It polls every **10 minutes**, caches the last good snapshot, and lets you refresh immediately by clicking the countdown in the popup.
+It polls on a configurable interval (default **8 minutes**; choose 1 / 2 / 4 / 8 / 16 from the tray menu), caches the last good snapshot, and lets you refresh immediately by clicking the countdown in the popup.
 
 ## How it works
 
@@ -75,6 +75,12 @@ Right-click the tray icon and check **Launch at login**. That writes
 `~/.config/autostart/cursor-spend-tray.desktop` (XDG autostart; Plasma, GNOME, and most
 other desktops pick it up on the next graphical login). Uncheck to remove it.
 
+## Refresh interval
+
+Right-click the tray icon → **Refresh interval** and pick 1, 2, 4, 8, or 16 minutes.
+The choice is saved in `~/.local/share/cursor-spend-tray/config.json` (`poll_seconds`) and
+restored the next time the app starts.
+
 ## Config / cache
 
 - `~/.local/share/cursor-spend-tray/config.json` — poll interval, host/port
@@ -82,4 +88,4 @@ other desktops pick it up on the next graphical login). Uncheck to remove it.
 - `~/.local/share/cursor-spend-tray/zen-profile` — dedicated Zen profile (cookies / Cursor login)
 - `~/.config/autostart/cursor-spend-tray.desktop` — optional launch-at-login entry
 
-Default poll interval: **10 minutes**.
+Default poll interval: **8 minutes**.

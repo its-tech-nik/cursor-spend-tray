@@ -106,6 +106,15 @@ class RefreshScheduler(QObject):
         self._worker.finished_err.connect(self._on_err)
         self._worker.start()
 
+    def set_poll_seconds(self, seconds: int) -> None:
+        """Update the poll interval, persist it, and re-arm the countdown."""
+        seconds = max(60, int(seconds))
+        self.config.poll_seconds = seconds
+        self.config.save()
+        if not self._paused and not (self._worker and self._worker.isRunning()):
+            self._deadline = time.monotonic() + seconds
+            self._emit_seconds()
+
     def _arm_next(self) -> None:
         self._paused = False
         self._stop_probe()

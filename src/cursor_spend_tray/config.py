@@ -9,8 +9,15 @@ from pydantic import BaseModel, Field
 
 APP_NAME = "cursor-spend-tray"
 SPENDING_URL = "https://cursor.com/dashboard/spending"
-DEFAULT_POLL_SECONDS = 10 * 60
+# Context-menu choices (minutes). Default is 8; older installs may still have 10.
+POLL_INTERVAL_MINUTES: tuple[int, ...] = (1, 2, 4, 8, 16)
+DEFAULT_POLL_SECONDS = 8 * 60
 DEFAULT_BIDI_PORT = 9222
+
+
+def poll_interval_label(minutes: int) -> str:
+    """Human label for a poll interval, e.g. '8 minutes'."""
+    return "1 minute" if minutes == 1 else f"{minutes} minutes"
 
 
 def zen_binary() -> str:

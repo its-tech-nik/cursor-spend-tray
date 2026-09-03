@@ -26,7 +26,13 @@ from PyQt6.QtWidgets import (
 )
 
 from . import autostart
-from .config import AppConfig, UsageSnapshot, zen_is_running
+from .config import (
+    POLL_INTERVAL_MINUTES,
+    AppConfig,
+    UsageSnapshot,
+    poll_interval_label,
+    zen_is_running,
+)
 from .popup import SpendPopup
 from .scheduler import RefreshScheduler
 from .sni import StatusNotifierItem
@@ -40,6 +46,33 @@ _ICON_PAD = 12
 _LAUNCH_SETTLE_MS = 10_000
 _LAUNCH_RETRY_MS = 5_000      # retry interval while waiting for BiDi after launch
 _SPIN_INTERVAL_MS = 80        # icon animation frame interval (~12 fps)
+_CTX_ROW_STYLE = """
+QFrame#ctxRow {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+}
+QFrame#ctxRow:hover {
+    background: #3A3A3A;
+}
+QLabel {
+    background: transparent;
+    border: none;
+}
+"""
+_CTX_MENU_STYLE = """
+TrayContextMenu, TrayContextSubmenu {
+    background: #2B2B2B;
+    border: 1px solid #3A3A3A;
+    border-radius: 10px;
+}
+QFrame#ctxSep {
+    background: #3A3A3A;
+    border: none;
+    max-height: 1px;
+    margin: 6px 10px;
+}
+"""
 
 
 def bidi_unavailable(snap: UsageSnapshot) -> bool:
@@ -188,6 +221,7 @@ class TrayContextMenu(QFrame):
         self._arm_timer.timeout.connect(self._arm_dismiss)
         self._outside_filter = _CtxOutsideClickFilter(self)
         self._rows: list[QWidget] = []
+        self._submenus: list[TrayContextSubmenu] = []
 
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -197,21 +231,7 @@ class TrayContextMenu(QFrame):
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumWidth(220)
-        self.setStyleSheet(
-            """
-            TrayContextMenu {
-                background: #2B2B2B;
-                border: 1px solid #3A3A3A;
-                border-radius: 10px;
-            }
-            QFrame#ctxSep {
-                background: #3A3A3A;
-                border: none;
-                max-height: 1px;
-                margin: 6px 10px;
-            }
-            """
-        )
+        self.setStyleSheet(_CTX_MENU_STYLE)
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(6, 6, 6, 6)
@@ -226,6 +246,14 @@ class TrayContextMenu(QFrame):
         self._rows.append(row)
         return row
 
+    def add_submenu(self, title: str, actions: list[QAction]) -> QWidget:
+        submenu = TrayContextSubmenu(actions, self)
+        self._submenus.append(submenu)
+        row = _CtxSubmenuRow(title, submenu, self)
+        self._layout.addWidget(row)
+        self._rows.append(row)
+        return row
+
     def add_separator(self) -> QFrame:
         sep = QFrame(self)
         sep.setObjectName("ctxSep")
@@ -234,6 +262,10 @@ class TrayContextMenu(QFrame):
         self._layout.addWidget(sep)
         self._rows.append(sep)
         return sep
+
+    def close_submenus(self) -> None:
+        for submenu in self._submenus:
+            submenu.hide()
 
     @staticmethod
     def _sync_row(row: QWidget, action: QAction) -> None:
@@ -244,6 +276,7 @@ class TrayContextMenu(QFrame):
         """Show near the tray icon; dismiss when focus leaves or user clicks away."""
         self._dismiss_armed = False
         self._arm_timer.stop()
+        self.close_submenus()
         # Drop empty separators left by hidden actions (e.g. Launch Browser).
         self._refresh_separator_visibility()
         self.adjustSize()
@@ -290,15 +323,33 @@ class TrayContextMenu(QFrame):
             )
             widget.setVisible(above and below)
 
+    def _owns_window(self, window) -> bool:  # noqa: ANN001
+        if window is None:
+            return False
+        if window is self.windowHandle():
+            return True
+        return any(
+            submenu.isVisible() and window is submenu.windowHandle()
+            for submenu in self._submenus
+        )
+
+    def _contains_global(self, global_pos: QPoint) -> bool:
+        if self.frameGeometry().contains(global_pos):
+            return True
+        return any(
+            submenu.isVisible() and submenu.frameGeometry().contains(global_pos)
+            for submenu in self._submenus
+        )
+
     def _arm_dismiss(self) -> None:
         self._dismiss_armed = True
-        if self.isVisible() and QGuiApplication.focusWindow() is not self.windowHandle():
+        if self.isVisible() and not self._owns_window(QGuiApplication.focusWindow()):
             self.hide()
 
     def _on_focus_window_changed(self, window) -> None:  # noqa: ANN001
         if not self._dismiss_armed or not self.isVisible():
             return
-        if window is self.windowHandle():
+        if self._owns_window(window):
             return
         self.hide()
 
@@ -307,6 +358,7 @@ class TrayContextMenu(QFrame):
             event.type() == QEvent.Type.WindowDeactivate
             and self.isVisible()
             and self._dismiss_armed
+            and not self._owns_window(QGuiApplication.focusWindow())
         ):
             self.hide()
         super().changeEvent(event)
@@ -314,6 +366,7 @@ class TrayContextMenu(QFrame):
     def hideEvent(self, event) -> None:  # noqa: ANN001
         self._arm_timer.stop()
         self._dismiss_armed = False
+        self.close_submenus()
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self._outside_filter)
@@ -322,6 +375,53 @@ class TrayContextMenu(QFrame):
             except TypeError:
                 pass
         super().hideEvent(event)
+
+
+class TrayContextSubmenu(QFrame):
+    """Flyout panel for nested context-menu choices."""
+
+    def __init__(self, actions: list[QAction], parent_menu: TrayContextMenu) -> None:
+        super().__init__(None)
+        self._parent_menu = parent_menu
+        self.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMinimumWidth(160)
+        self.setStyleSheet(_CTX_MENU_STYLE)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(2)
+        for action in actions:
+            row = _CtxMenuRow(action, self)
+            action.changed.connect(lambda r=row, a=action: TrayContextMenu._sync_row(r, a))
+            action.triggered.connect(parent_menu.hide)
+            TrayContextMenu._sync_row(row, action)
+            layout.addWidget(row)
+
+    def popup_beside(self, anchor: QWidget) -> None:
+        self.adjustSize()
+        screen = QApplication.screenAt(anchor.mapToGlobal(QPoint(0, 0))) or QApplication.primaryScreen()
+        bounds = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        w = max(self.sizeHint().width(), 160)
+        h = max(self.sizeHint().height(), 1)
+        top_left = anchor.mapToGlobal(QPoint(0, 0))
+        # Prefer opening to the right; flip left if it would clip.
+        x = top_left.x() + self._parent_menu.width() - 4
+        if x + w > bounds.right() - 4:
+            x = self._parent_menu.x() - w + 4
+        y = top_left.y() - 6
+        x = min(max(x, bounds.left() + 4), bounds.right() - w - 4)
+        y = min(max(y, bounds.top() + 4), bounds.bottom() - h - 4)
+        self.setFixedWidth(w)
+        self.setGeometry(x, y, w, h)
+        self.show()
+        self.move(x, y)
+        self.raise_()
 
 
 class _CtxMenuRow(QFrame):
@@ -334,22 +434,7 @@ class _CtxMenuRow(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(34)
-        self.setStyleSheet(
-            """
-            QFrame#ctxRow {
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-            }
-            QFrame#ctxRow:hover {
-                background: #3A3A3A;
-            }
-            QLabel {
-                background: transparent;
-                border: none;
-            }
-            """
-        )
+        self.setStyleSheet(_CTX_ROW_STYLE)
 
         self._label = QLabel(action.text())
         label_font = self._label.font()
@@ -389,6 +474,61 @@ class _CtxMenuRow(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class _CtxSubmenuRow(QFrame):
+    """Parent-menu row that opens a flyout submenu."""
+
+    def __init__(
+        self,
+        title: str,
+        submenu: TrayContextSubmenu,
+        parent: TrayContextMenu,
+    ) -> None:
+        super().__init__(parent)
+        self._submenu = submenu
+        self._parent_menu = parent
+        self.setObjectName("ctxRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(34)
+        self.setStyleSheet(_CTX_ROW_STYLE)
+
+        self._label = QLabel(title)
+        label_font = self._label.font()
+        label_font.setPointSize(10)
+        self._label.setFont(label_font)
+        self._label.setStyleSheet("color: #F2F2F2; padding-left: 10px;")
+        self._label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        trailing = QLabel("›")
+        trailing.setFixedWidth(22)
+        trailing.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        trailing.setStyleSheet("color: #A0A0A0; padding-right: 10px;")
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(8)
+        row.addWidget(self._label, stretch=1)
+        row.addWidget(trailing)
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        self._parent_menu.close_submenus()
+        self._submenu.popup_beside(self)
+        super().enterEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._submenu.isVisible():
+                self._submenu.hide()
+            else:
+                self._parent_menu.close_submenus()
+                self._submenu.popup_beside(self)
+        super().mouseReleaseEvent(event)
+
+
 class _CtxOutsideClickFilter(QObject):
     """Dismiss the tray menu when a press lands outside its geometry."""
 
@@ -408,7 +548,7 @@ class _CtxOutsideClickFilter(QObject):
             global_pos = event.globalPosition().toPoint()
         except AttributeError:
             global_pos = event.globalPos()
-        if self._menu.frameGeometry().contains(global_pos):
+        if self._menu._contains_global(global_pos):
             return False
         self._menu.hide()
         return False
@@ -441,11 +581,22 @@ class TrayApp(QWidget):
         self._autostart_action.setCheckable(True)
         self._autostart_action.setChecked(autostart.is_enabled())
         self._autostart_action.toggled.connect(self._on_autostart_toggled)
+        self._poll_actions: list[QAction] = []
+        for minutes in POLL_INTERVAL_MINUTES:
+            action = QAction(poll_interval_label(minutes), self)
+            action.setCheckable(True)
+            action.setData(minutes * 60)
+            action.triggered.connect(
+                lambda checked=False, m=minutes: self._on_poll_interval_chosen(m)
+            )
+            self._poll_actions.append(action)
+        self._sync_poll_actions()
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         self._ctx.add_action(self._refresh_action)
         self._ctx.add_action(self._launch_action)
         self._ctx.add_separator()
+        self._ctx.add_submenu("Refresh interval", self._poll_actions)
         self._ctx.add_action(self._autostart_action)
         self._ctx.add_separator()
         self._ctx.add_action(quit_action)
@@ -531,6 +682,7 @@ class TrayApp(QWidget):
         self._autostart_action.blockSignals(True)
         self._autostart_action.setChecked(autostart.is_enabled())
         self._autostart_action.blockSignals(False)
+        self._sync_poll_actions()
         self._ctx.popup_at(pos)
 
     def _on_autostart_toggled(self, enabled: bool) -> None:
@@ -546,6 +698,22 @@ class TrayApp(QWidget):
                 "Cursor Spend Tray",
                 f"Could not update launch at login:\n{exc}",
             )
+
+    def _sync_poll_actions(self) -> None:
+        current = self.config.poll_seconds
+        for action in self._poll_actions:
+            action.blockSignals(True)
+            action.setChecked(action.data() == current)
+            action.blockSignals(False)
+
+    def _on_poll_interval_chosen(self, minutes: int) -> None:
+        seconds = minutes * 60
+        if self.config.poll_seconds == seconds:
+            self._sync_poll_actions()
+            return
+        self.scheduler.set_poll_seconds(seconds)
+        self._sync_poll_actions()
+        self.popup.set_status(f"Refresh every {poll_interval_label(minutes)}")
 
     def _anchor_rect(self) -> QRect:
         """Icon rect from Plasma Activate(x, y). Those are screen coordinates."""
