@@ -7,11 +7,13 @@ arch=('any')
 url="https://github.com/its-tech-nik/cursor-spend-tray"
 license=('MIT')
 depends=(
+  'hicolor-icon-theme'
   'python'
   'python-httpx'
   'python-pydantic'
   'python-pyqt6'
   'python-websockets'
+  'qt6-svg'
 )
 makedepends=(
   'python-build'
@@ -34,4 +36,12 @@ package() {
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 packaging/cursor-spend-tray.desktop \
     "$pkgdir/usr/share/applications/cursor-spend-tray.desktop"
+  install -Dm644 src/cursor_spend_tray/resources/cursor-spend-tray.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/cursor-spend-tray.svg"
+  install -Dm644 packaging/icons/hicolor/48x48/apps/cursor-spend-tray.png \
+    "$pkgdir/usr/share/icons/hicolor/48x48/apps/cursor-spend-tray.png"
+  install -Dm644 packaging/icons/hicolor/128x128/apps/cursor-spend-tray.png \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/cursor-spend-tray.png"
+  install -Dm644 packaging/icons/hicolor/256x256/apps/cursor-spend-tray.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/cursor-spend-tray.png"
 }

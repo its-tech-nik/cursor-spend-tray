@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Cursor Spend Tray">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#242424"/>
+      <stop offset="1" stop-color="#141414"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)"/>
+  <rect x="8.75" y="8.75" width="110.5" height="110.5" rx="27.25" fill="none" stroke="#3A3A3A" stroke-width="1.5"/>
+  <rect x="24" y="38" width="80" height="20" rx="7" fill="#2A3340"/>
+  <rect x="24" y="38" width="58" height="20" rx="7" fill="#8BA4C7"/>
+  <rect x="24" y="70" width="80" height="20" rx="7" fill="#333333"/>
+  <rect x="24" y="70" width="44" height="20" rx="7" fill="#B0B0B0"/>
+</svg>

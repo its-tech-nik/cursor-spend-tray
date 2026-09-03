@@ -2,10 +2,12 @@
 [Desktop Entry]
 Type=Application
 Name=Cursor Spend Tray
+GenericName=Spending Monitor
 Comment=Track Cursor Pro spending from the system tray
 Exec=cursor-spend-tray
-Icon=utilities-system-monitor
+Icon=cursor-spend-tray
 Terminal=false
 Categories=Utility;Monitor;
+Keywords=cursor;spend;usage;pro;tray;billing;
 StartupNotify=false
 X-GNOME-Autostart-enabled=true

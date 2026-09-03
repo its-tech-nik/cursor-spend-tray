@@ -37,10 +37,6 @@ echo "Built packages:"
 ls -1 "$WORKDIR"/*.pkg.tar.*
 mkdir -p "$ROOT/dist"
 cp -v "$WORKDIR"/*.pkg.tar.* "$ROOT/dist/"
-# Refresh .SRCINFO next to the repo PKGBUILD for AUR submits (uses GitHub source URL).
-if command -v makepkg >/dev/null; then
-  (
-    cd "$ROOT/packaging/aur"
-    makepkg --printsrcinfo > .SRCINFO
-  )
-fi
+echo "Install locally (no AUR) with:"
+echo "  yay -U $ROOT/dist/$pkgname-$pkgver-*.pkg.tar.*"
+echo "  # or: sudo pacman -U $ROOT/dist/$pkgname-$pkgver-*.pkg.tar.*"

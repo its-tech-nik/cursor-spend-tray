@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from pathlib import Path
 
 
 def _prefer_xcb_on_wayland() -> None:
@@ -26,6 +27,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication, QMessageBox
 
     from .app import TrayApp
@@ -35,6 +37,9 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Cursor Spend Tray")
     app.setOrganizationName("cursor-spend-tray")
+    icon_path = Path(__file__).resolve().parent / "resources" / "cursor-spend-tray.svg"
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     config = AppConfig.load()
     try:

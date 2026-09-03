@@ -18,20 +18,28 @@ It polls every **10 minutes**, caches the last good snapshot, and lets you refre
 
 ## Install
 
-### Arch Linux (AUR)
+### Arch Linux (local package)
 
-Once published to the AUR:
+The app is not on the AUR. Build from this repo and install with `yay` or `pacman` so Plasma/KRunner can launch **Cursor Spend Tray** like any other app (`/usr/share/applications/cursor-spend-tray.desktop`).
 
 ```bash
-yay -S cursor-spend-tray
-# or: paru -S cursor-spend-tray
+./packaging/aur/install-local.sh
+# same as: ./packaging/aur/build-local.sh && yay -U dist/cursor-spend-tray-*.pkg.tar.zst
 ```
 
-Build the package locally from this repo (no AUR account needed):
+After install, open KRunner and type `cursor`, `spend`, or `Cursor Spend Tray`.
+
+Undo (remove the local package and launcher):
 
 ```bash
-./packaging/aur/build-local.sh
-sudo pacman -U dist/cursor-spend-tray-*.pkg.tar.zst
+sudo pacman -Rns cursor-spend-tray
+# or: yay -Rns cursor-spend-tray
+```
+
+That deletes `/usr/bin/cursor-spend-tray`, the `.desktop` entry, and the hicolor icons. It does **not** remove `~/.local/share/cursor-spend-tray/` (config, cache, dedicated Zen profile). To wipe those too:
+
+```bash
+rm -rf ~/.local/share/cursor-spend-tray
 ```
 
 ### From source (any distro)
@@ -45,8 +53,8 @@ On Wayland (e.g. Plasma), the app defaults to **XWayland (`QT_QPA_PLATFORM=xcb`)
 
 ### Packaging notes
 
-- **AUR:** `packaging/aur/PKGBUILD` installs a system `cursor-spend-tray` command plus a `.desktop` entry, using Arch’s `python-pyqt6` / `python-httpx` / etc.
-- **AUR CI:** publishing a GitHub Release runs [`.github/workflows/aur.yml`](.github/workflows/aur.yml), which bumps `pkgver`/`sha256sums`, regenerates `.SRCINFO`, and pushes to `aur.archlinux.org`. Requires repo secret `AUR_SSH_PRIVATE_KEY` (and a one-time empty AUR package). Optional secrets: `AUR_USERNAME`, `AUR_EMAIL`. You can also run the workflow manually via **Actions → Publish AUR**.
+- **Local Arch package:** `packaging/aur/PKGBUILD` installs `cursor-spend-tray`, a `.desktop` entry, and hicolor icons. Use `./packaging/aur/install-local.sh` (no AUR account).
+- **AUR publish:** skipped for now (registration). [`.github/workflows/aur.yml`](.github/workflows/aur.yml) is unused until an AUR package exists.
 - **Debian/Ubuntu (.deb):** not packaged yet; same app can be wrapped later with a `debian/` package or something like `fpm` once an Arch package is solid.
 
 ## Dedicated Zen profile
