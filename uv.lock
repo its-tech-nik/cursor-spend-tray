@@ -47,9 +47,9 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "pydantic", specifier = ">=2.13.5" },
+    { name = "pydantic", specifier = ">=2.13.0" },
     { name = "pyqt6", specifier = ">=6.11.0" },
-    { name = "websockets", specifier = ">=17.1" },
+    { name = "websockets", specifier = ">=14.0" },
 ]
 
 [[package]]

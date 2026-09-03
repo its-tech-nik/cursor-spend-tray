@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Cursor Spend Tray
+Comment=Track Cursor Pro spending from the system tray
+Exec=cursor-spend-tray
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Utility;Monitor;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

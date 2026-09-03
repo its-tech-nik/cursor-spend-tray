@@ -1,0 +1,37 @@
+# Maintainer: technik <m.nik1997@hotmail.com>
+pkgname=cursor-spend-tray
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Linux tray app that tracks Cursor Pro spending via Zen Browser"
+arch=('any')
+url="https://github.com/its-tech-nik/cursor-spend-tray"
+license=('MIT')
+depends=(
+  'python'
+  'python-httpx'
+  'python-pydantic'
+  'python-pyqt6'
+  'python-websockets'
+)
+makedepends=(
+  'python-build'
+  'python-hatchling'
+  'python-installer'
+  'python-wheel'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/its-tech-nik/cursor-spend-tray/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  find "$pkgdir" -type d -name '__pycache__' -exec rm -rf {} +
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 packaging/cursor-spend-tray.desktop \
+    "$pkgdir/usr/share/applications/cursor-spend-tray.desktop"
+}

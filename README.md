@@ -16,15 +16,37 @@ It polls every **10 minutes**, caches the last good snapshot, and lets you refre
 - **Dedicated spending tab:** the app reuses/reloads that tab
 - **Countdown:** popup shows time until next poll; **click the timer to refresh now**
 
-## Run
+## Install
+
+### Arch Linux (AUR)
+
+Once published to the AUR:
 
 ```bash
-cd /home/technik/Documents/Projects/cursor-spend-tray
+yay -S cursor-spend-tray
+# or: paru -S cursor-spend-tray
+```
+
+Build the package locally from this repo (no AUR account needed):
+
+```bash
+./packaging/aur/build-local.sh
+sudo pacman -U dist/cursor-spend-tray-*.pkg.tar.zst
+```
+
+### From source (any distro)
+
+```bash
 uv sync
 uv run cursor-spend-tray
 ```
 
 On Wayland (e.g. Plasma), the app defaults to **XWayland (`QT_QPA_PLATFORM=xcb`)** so the popup can be moved and dismissed on outside click. Icon position comes from Plasma’s `Activate(x, y)` (Qt’s `QSystemTrayIcon.geometry()` is always empty on Linux). The popup opens under a top panel icon and above a bottom panel icon.
+
+### Packaging notes
+
+- **AUR:** `packaging/aur/PKGBUILD` installs a system `cursor-spend-tray` command plus a `.desktop` entry, using Arch’s `python-pyqt6` / `python-httpx` / etc.
+- **Debian/Ubuntu (.deb):** not packaged yet; same app can be wrapped later with a `debian/` package or something like `fpm` once an Arch package is solid.
 
 ## Temporary Zen connection (until seamless setup)
 
