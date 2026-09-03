@@ -69,10 +69,17 @@ Sign into Cursor once in that profile; the login persists across restarts of the
 
 Without the Remote Agent listening, the tray still runs and shows last cached values / a connection status message. The popup copies the launch command above.
 
+## Launch at login
+
+Right-click the tray icon and check **Launch at login**. That writes
+`~/.config/autostart/cursor-spend-tray.desktop` (XDG autostart; Plasma, GNOME, and most
+other desktops pick it up on the next graphical login). Uncheck to remove it.
+
 ## Config / cache
 
 - `~/.local/share/cursor-spend-tray/config.json` — poll interval, host/port
 - `~/.local/share/cursor-spend-tray/state.json` — last snapshot
 - `~/.local/share/cursor-spend-tray/zen-profile` — dedicated Zen profile (cookies / Cursor login)
+- `~/.config/autostart/cursor-spend-tray.desktop` — optional launch-at-login entry
 
 Default poll interval: **10 minutes**.

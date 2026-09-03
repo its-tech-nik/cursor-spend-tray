@@ -5,8 +5,9 @@ import subprocess
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import QAction, QColor, QConicalGradient, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QApplication, QMenu, QWidget
+from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QWidget
 
+from . import autostart
 from .config import AppConfig, UsageSnapshot, zen_is_running
 from .popup import SpendPopup
 from .scheduler import RefreshScheduler
@@ -173,10 +174,16 @@ class TrayApp(QWidget):
         self._refresh_action.triggered.connect(self._refresh_now)
         self._launch_action = QAction("Launch Browser", self)
         self._launch_action.triggered.connect(self._launch_browser)
+        self._autostart_action = QAction("Launch at login", self)
+        self._autostart_action.setCheckable(True)
+        self._autostart_action.setChecked(autostart.is_enabled())
+        self._autostart_action.toggled.connect(self._on_autostart_toggled)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         self._ctx.addAction(self._refresh_action)
         self._ctx.addAction(self._launch_action)
+        self._ctx.addSeparator()
+        self._ctx.addAction(self._autostart_action)
         self._ctx.addSeparator()
         self._ctx.addAction(quit_action)
 
@@ -249,7 +256,24 @@ class TrayApp(QWidget):
         self._anchor_pos = QPoint(pos)
         # Re-check Zen each time the menu opens so Launch Browser stays accurate.
         self._launch_action.setVisible(not zen_is_running())
+        self._autostart_action.blockSignals(True)
+        self._autostart_action.setChecked(autostart.is_enabled())
+        self._autostart_action.blockSignals(False)
         self._ctx.popup(pos)
+
+    def _on_autostart_toggled(self, enabled: bool) -> None:
+        try:
+            autostart.set_enabled(enabled)
+        except OSError as exc:
+            log.exception("Failed to %s launch at login", "enable" if enabled else "disable")
+            self._autostart_action.blockSignals(True)
+            self._autostart_action.setChecked(autostart.is_enabled())
+            self._autostart_action.blockSignals(False)
+            QMessageBox.warning(
+                None,
+                "Cursor Spend Tray",
+                f"Could not update launch at login:\n{exc}",
+            )
 
     def _anchor_rect(self) -> QRect:
         """Icon rect from Plasma Activate(x, y). Those are screen coordinates."""
