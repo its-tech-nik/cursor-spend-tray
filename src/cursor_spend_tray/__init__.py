@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -17,6 +18,32 @@ def _prefer_xcb_on_wayland() -> None:
     session = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
     if session == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
         os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+
+def _install_posix_quit_handlers(app) -> None:
+    """Map Ctrl+C / SIGTERM to a clean Qt quit so aboutToQuit shutdown runs.
+
+    The Qt event loop is mostly in C++, so a short timer lets Python deliver
+    signals; the handler then asks QApplication to quit on the GUI thread.
+    """
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication
+
+    def _request_quit(*_args) -> None:
+        inst = QApplication.instance()
+        if inst is not None:
+            # Defer to the event loop — unsafe to tear down Qt inside the handler.
+            QTimer.singleShot(0, inst.quit)
+
+    signal.signal(signal.SIGINT, _request_quit)
+    signal.signal(signal.SIGTERM, _request_quit)
+
+    # Wake the interpreter often enough that pending SIGINT/SIGTERM are handled.
+    wake = QTimer(app)
+    wake.setInterval(200)
+    wake.timeout.connect(lambda: None)
+    wake.start()
+    app._posix_signal_wake_timer = wake  # type: ignore[attr-defined]
 
 
 def main() -> None:
@@ -49,6 +76,8 @@ def main() -> None:
         sys.exit(1)
 
     app._cursor_spend_tray = tray  # type: ignore[attr-defined]
+    _install_posix_quit_handlers(app)
+    app.aboutToQuit.connect(tray.shutdown)
     app.aboutToQuit.connect(tray.tray.cleanup)
     sys.exit(app.exec())
 

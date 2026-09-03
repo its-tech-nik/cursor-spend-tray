@@ -7,16 +7,20 @@ from pydantic import BaseModel, PrivateAttr
 
 from .browser import (
     BrowserInfo,
+    browser_is_headless,
     browser_is_running,
     data_dir_for_app,
     launch_argv,
     profile_dir_for,
     resolve_automation_browser,
+    stop_automation_browser,
 )
 
 
 APP_NAME = "cursor-spend-tray"
 SPENDING_URL = "https://cursor.com/dashboard/spending"
+# Spending URL redirects to sign-in when the dedicated profile has no session.
+LOGIN_URL = SPENDING_URL
 # Context-menu choices (minutes). Default is 8; older installs may still have 10.
 POLL_INTERVAL_MINUTES: tuple[int, ...] = (1, 2, 4, 8, 16)
 DEFAULT_POLL_SECONDS = 8 * 60
@@ -73,12 +77,33 @@ class AppConfig(BaseModel):
     def browser_is_running(self) -> bool:
         return browser_is_running(self.browser, app_name=APP_NAME)
 
+    def browser_is_headless(self) -> bool | None:
+        return browser_is_headless(self.browser, app_name=APP_NAME)
+
+    def stop_browser(self, timeout: float = 8.0) -> bool:
+        return stop_automation_browser(self.browser, app_name=APP_NAME, timeout=timeout)
+
     def profile_dir(self) -> Path:
         return profile_dir_for(self.browser, APP_NAME)
 
-    def browser_launch_argv(self) -> list[str]:
+    def browser_launch_argv(
+        self,
+        *,
+        headless: bool = True,
+        url: str | None = None,
+    ) -> list[str]:
         """Argv to start an isolated browser with remote debugging for scraping."""
-        return launch_argv(self.browser, port=self.bidi_port, app_name=APP_NAME)
+        return launch_argv(
+            self.browser,
+            port=self.bidi_port,
+            app_name=APP_NAME,
+            headless=headless,
+            url=url,
+        )
+
+    def browser_login_argv(self) -> list[str]:
+        """Argv for a visible dedicated-profile window on the Cursor login/spending page."""
+        return self.browser_launch_argv(headless=False, url=LOGIN_URL)
 
     def browser_launch_command(self) -> str:
         return shlex.join(self.browser_launch_argv())

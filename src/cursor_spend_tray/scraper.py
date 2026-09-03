@@ -185,10 +185,10 @@ class SpendingScraper:
                     other_models_pct=prev.other_models_pct,
                     error=(
                         f"Cursor session looks logged out in {browser.display_name}. "
-                        "Sign in, then refresh."
+                        "A sign-in window will open — sign in, then refresh."
                     ),
                     fetched_at=time.time(),
-                    source=source,
+                    source="logged_out",
                     raw_hint=data.get("hint") or prev.raw_hint,
                 )
 

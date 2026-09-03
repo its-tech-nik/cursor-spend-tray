@@ -7,7 +7,9 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -187,35 +189,80 @@ def detect_default_browser() -> BrowserInfo | None:
     return None
 
 
-def launch_argv(info: BrowserInfo, *, port: int, app_name: str = "cursor-spend-tray") -> list[str]:
+def launch_argv(
+    info: BrowserInfo,
+    *,
+    port: int,
+    app_name: str = "cursor-spend-tray",
+    headless: bool = True,
+    url: str | None = None,
+) -> list[str]:
     """Argv for an isolated automation instance with remote debugging enabled."""
     profile = str(profile_dir_for(info, app_name))
     if info.family is BrowserFamily.FIREFOX:
-        return [
+        argv = [
             info.binary,
             "--new-instance",
             "--profile",
             profile,
-            "--headless",
-            f"--remote-debugging-port={port}",
-            "--remote-allow-hosts=localhost",
         ]
-    return [
-        info.binary,
-        f"--user-data-dir={profile}",
-        "--headless=new",
-        f"--remote-debugging-port={port}",
-        "--no-first-run",
-        "--no-default-browser-check",
-    ]
+        if headless:
+            argv.append("--headless")
+        argv.extend(
+            [
+                f"--remote-debugging-port={port}",
+                "--remote-allow-hosts=localhost",
+            ]
+        )
+    else:
+        argv = [
+            info.binary,
+            f"--user-data-dir={profile}",
+        ]
+        if headless:
+            argv.append("--headless=new")
+        argv.extend(
+            [
+                f"--remote-debugging-port={port}",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ]
+        )
+    if url:
+        argv.append(url)
+    return argv
 
 
-def browser_is_running(info: BrowserInfo, *, app_name: str = "cursor-spend-tray") -> bool:
-    """True when the dedicated automation profile instance is up."""
+def _cmdline_uses_profile(parts: list[str], profile: str) -> bool:
+    joined = " ".join(parts)
+    if profile in parts or f"--profile={profile}" in joined or f"--user-data-dir={profile}" in joined:
+        return True
+    if "--user-data-dir" in parts:
+        try:
+            idx = parts.index("--user-data-dir")
+            if idx + 1 < len(parts) and parts[idx + 1] == profile:
+                return True
+        except ValueError:
+            pass
+    if "--profile" in parts:
+        try:
+            idx = parts.index("--profile")
+            if idx + 1 < len(parts) and parts[idx + 1] == profile:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _iter_automation_main_procs(
+    info: BrowserInfo, *, app_name: str = "cursor-spend-tray"
+) -> list[tuple[int, list[str]]]:
+    """Main-process (pid, argv) rows for the dedicated automation profile."""
     profile = str(profile_dir_for(info, app_name))
     proc = Path("/proc")
     if not proc.is_dir():
-        return False
+        return []
+    found: list[tuple[int, list[str]]] = []
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
@@ -231,25 +278,60 @@ def browser_is_running(info: BrowserInfo, *, app_name: str = "cursor-spend-tray"
         joined = " ".join(parts)
         if "-contentproc" in joined or "--type=" in joined:
             continue
-        if profile not in parts and f"--profile={profile}" not in joined and f"--user-data-dir={profile}" not in joined:
-            # Also accept space-separated --user-data-dir PATH form
-            if "--user-data-dir" in parts:
-                try:
-                    idx = parts.index("--user-data-dir")
-                    if idx + 1 < len(parts) and parts[idx + 1] == profile:
-                        return True
-                except ValueError:
-                    pass
-            if "--profile" in parts:
-                try:
-                    idx = parts.index("--profile")
-                    if idx + 1 < len(parts) and parts[idx + 1] == profile:
-                        return True
-                except ValueError:
-                    pass
+        if not _cmdline_uses_profile(parts, profile):
             continue
-        return True
+        found.append((int(entry.name), parts))
+    return found
+
+
+def browser_is_running(info: BrowserInfo, *, app_name: str = "cursor-spend-tray") -> bool:
+    """True when the dedicated automation profile instance is up."""
+    return bool(_iter_automation_main_procs(info, app_name=app_name))
+
+
+def browser_is_headless(info: BrowserInfo, *, app_name: str = "cursor-spend-tray") -> bool | None:
+    """True/False when the dedicated profile is running; None if it is not."""
+    procs = _iter_automation_main_procs(info, app_name=app_name)
+    if not procs:
+        return None
+    for _pid, parts in procs:
+        joined = " ".join(parts)
+        if "--headless" in joined or any(p.startswith("--headless=") for p in parts):
+            return True
     return False
+
+
+def stop_automation_browser(
+    info: BrowserInfo,
+    *,
+    app_name: str = "cursor-spend-tray",
+    timeout: float = 8.0,
+) -> bool:
+    """SIGTERM (then SIGKILL) the dedicated automation profile main process(es)."""
+    procs = _iter_automation_main_procs(info, app_name=app_name)
+    if not procs:
+        return True
+    for pid, _parts in procs:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            log.info("Sent SIGTERM to %s pid %s", info.display_name, pid)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            log.warning("Cannot stop %s pid %s: %s", info.display_name, pid, exc)
+            return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _iter_automation_main_procs(info, app_name=app_name):
+            return True
+        time.sleep(0.15)
+    for pid, _parts in _iter_automation_main_procs(info, app_name=app_name):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            log.warning("Sent SIGKILL to %s pid %s", info.display_name, pid)
+        except (ProcessLookupError, PermissionError):
+            continue
+    return not bool(_iter_automation_main_procs(info, app_name=app_name))
 
 
 def _default_desktop_id() -> str | None:

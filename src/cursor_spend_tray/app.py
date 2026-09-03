@@ -82,12 +82,22 @@ def bidi_unavailable(snap: UsageSnapshot) -> bool:
     return "no remote agent" in err or "remote-debugging-port" in err
 
 
+def session_logged_out(snap: UsageSnapshot) -> bool:
+    """True when the spending page scrape indicates no Cursor web session."""
+    return snap.source == "logged_out"
+
+
 def tray_tooltip(snap: UsageSnapshot) -> tuple[str, str]:
     """Return (title, body) for the StatusNotifierItem hover tooltip."""
     if bidi_unavailable(snap):
         return (
             "Cursor Spend — Browser inaccessible",
             "Usage hidden until the automation browser is reachable with remote debugging (see popup).",
+        )
+    if session_logged_out(snap):
+        return (
+            "Cursor Spend — Sign in required",
+            "Sign in to Cursor in the dedicated browser window, then refresh.",
         )
     usage = _usage_phrase(snap)
     if usage:
@@ -605,6 +615,7 @@ class TrayApp(QWidget):
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(_SPIN_INTERVAL_MS)
         self._spin_timer.timeout.connect(self._on_spin_tick)
+        self._login_launch_pending = False
 
         self._apply_snapshot(self.snapshot)
         self.show()
@@ -657,6 +668,72 @@ class TrayApp(QWidget):
         assert isinstance(snap, UsageSnapshot)
         self.snapshot = snap
         self._apply_snapshot(snap)
+        if session_logged_out(snap):
+            self._ensure_login_browser()
+        elif snap.source in ("bidi", "cdp") and not snap.error:
+            self._login_launch_pending = False
+
+    def _ensure_login_browser(self) -> None:
+        """Open a headed dedicated-profile window so the user can sign into Cursor."""
+        headless = self.config.browser_is_headless()
+        if headless is False:
+            self._login_launch_pending = False
+            self.popup.set_status(
+                f"Sign in to Cursor in the {self.config.browser.display_name} window, "
+                "then refresh."
+            )
+            return
+        if self._login_launch_pending:
+            return
+        self._login_launch_pending = True
+        name = self.config.browser.display_name
+        if headless is True:
+            self.popup.set_status(f"Restarting {name} with a visible window for sign-in…")
+            QTimer.singleShot(0, self._restart_headed_for_login)
+        else:
+            self.popup.set_status(f"Opening {name} for Cursor sign-in…")
+            QTimer.singleShot(0, self._launch_headed_login)
+
+    def _restart_headed_for_login(self) -> None:
+        if self.config.browser_is_headless() is True:
+            if not self.config.stop_browser(timeout=8.0):
+                self._login_launch_pending = False
+                self.popup.set_status(
+                    f"Could not stop headless {self.config.browser.display_name} "
+                    "to open a sign-in window."
+                )
+                return
+        self._launch_headed_login()
+
+    def _launch_headed_login(self) -> None:
+        if self.config.browser_is_headless() is False:
+            self._login_launch_pending = False
+            self.popup.set_status(
+                f"Sign in to Cursor in the {self.config.browser.display_name} window, "
+                "then refresh."
+            )
+            return
+        argv = self.config.browser_login_argv()
+        try:
+            subprocess.Popen(
+                argv,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            log.exception("Failed to launch headed %s for login", self.config.browser.display_name)
+            self._login_launch_pending = False
+            self._launch_action.setVisible(not self.config.browser_is_running())
+            self.popup.set_status(f"Could not open sign-in window: {exc}")
+            return
+
+        self._launch_action.setVisible(False)
+        self._start_spinner()
+        self.popup.set_status(
+            f"Sign in to Cursor in the {self.config.browser.display_name} window…"
+        )
+        self._arm_launch_retry()
 
     def _on_activated(self, pos: QPoint) -> None:
         self._anchor_pos = QPoint(pos)
@@ -802,6 +879,9 @@ class TrayApp(QWidget):
 
         self._launch_action.setVisible(False)
         self._start_spinner()
+        self._arm_launch_retry()
+
+    def _arm_launch_retry(self) -> None:
         if not hasattr(self, "_launch_retry_timer"):
             self._launch_retry_timer = QTimer(self)
             self._launch_retry_timer.setSingleShot(True)
@@ -817,3 +897,18 @@ class TrayApp(QWidget):
 
     def _reschedule_launch_retry(self) -> None:
         self._launch_retry_timer.start(_LAUNCH_RETRY_MS)
+
+    def shutdown(self) -> None:
+        """Stop polling and tear down the dedicated automation browser on quit."""
+        if hasattr(self, "scheduler"):
+            self.scheduler.stop()
+        if hasattr(self, "_launch_retry_timer"):
+            self._launch_retry_timer.stop()
+        self._stop_spinner()
+        if not self.config.browser_is_running():
+            return
+        name = self.config.browser.display_name
+        if self.config.stop_browser(timeout=8.0):
+            log.info("Stopped dedicated %s on quit", name)
+        else:
+            log.warning("Dedicated %s did not exit cleanly on quit", name)
