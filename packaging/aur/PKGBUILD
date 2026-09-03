@@ -20,7 +20,7 @@ makedepends=(
   'python-wheel'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/its-tech-nik/cursor-spend-tray/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('04fbd8d85f22d74846b3de2d982895564f1ab999421742426d1f095e811207aa')
 
 build() {
   cd "$pkgname-$pkgver"

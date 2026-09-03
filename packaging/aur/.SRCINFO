@@ -15,6 +15,6 @@ pkgbase = cursor-spend-tray
 	depends = python-pyqt6
 	depends = python-websockets
 	source = cursor-spend-tray-0.1.0.tar.gz::https://github.com/its-tech-nik/cursor-spend-tray/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 04fbd8d85f22d74846b3de2d982895564f1ab999421742426d1f095e811207aa
 
 pkgname = cursor-spend-tray
