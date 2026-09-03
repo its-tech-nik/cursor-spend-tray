@@ -31,7 +31,6 @@ from .config import (
     AppConfig,
     UsageSnapshot,
     poll_interval_label,
-    zen_is_running,
 )
 from .popup import SpendPopup
 from .scheduler import RefreshScheduler
@@ -88,7 +87,7 @@ def tray_tooltip(snap: UsageSnapshot) -> tuple[str, str]:
     if bidi_unavailable(snap):
         return (
             "Cursor Spend — Browser inaccessible",
-            "Usage hidden until Zen is reachable with remote debugging (see popup).",
+            "Usage hidden until the automation browser is reachable with remote debugging (see popup).",
         )
     usage = _usage_phrase(snap)
     if usage:
@@ -636,7 +635,7 @@ class TrayApp(QWidget):
             disconnected, self.config.zen_launch_command()
         )
         self._refresh_action.setVisible(not disconnected)
-        self._launch_action.setVisible(not zen_is_running())
+        self._launch_action.setVisible(not self.config.browser_is_running())
         self.tray.set_icon(
             make_tray_icon(
                 snap.cursor_models_pct,
@@ -677,8 +676,8 @@ class TrayApp(QWidget):
         if self._ctx.isVisible():
             self._ctx.hide()
             return
-        # Re-check Zen each time the menu opens so Launch Browser stays accurate.
-        self._launch_action.setVisible(not zen_is_running())
+        # Re-check dedicated browser each time the menu opens so Launch Browser stays accurate.
+        self._launch_action.setVisible(not self.config.browser_is_running())
         self._autostart_action.blockSignals(True)
         self._autostart_action.setChecked(autostart.is_enabled())
         self._autostart_action.blockSignals(False)
@@ -784,11 +783,11 @@ class TrayApp(QWidget):
         self.tray.set_icon(make_spinner_icon(self._spin_angle))
 
     def _launch_browser(self) -> None:
-        if zen_is_running():
+        if self.config.browser_is_running():
             self._launch_action.setVisible(False)
             return
 
-        argv = self.config.zen_launch_argv()
+        argv = self.config.browser_launch_argv()
         try:
             subprocess.Popen(
                 argv,
@@ -797,8 +796,8 @@ class TrayApp(QWidget):
                 stderr=subprocess.DEVNULL,
             )
         except OSError as exc:
-            log.exception("Failed to launch Zen")
-            self._launch_action.setVisible(not zen_is_running())
+            log.exception("Failed to launch %s", self.config.browser.display_name)
+            self._launch_action.setVisible(not self.config.browser_is_running())
             return
 
         self._launch_action.setVisible(False)
@@ -810,8 +809,8 @@ class TrayApp(QWidget):
         self._launch_retry_timer.start(_LAUNCH_SETTLE_MS)
 
     def _refresh_after_launch(self) -> None:
-        """Probe BiDi; if up scrape (spinner stops on snapshot), otherwise retry."""
-        self._launch_action.setVisible(not zen_is_running())
+        """Probe remote debugging; if up scrape (spinner stops on snapshot), otherwise retry."""
+        self._launch_action.setVisible(not self.config.browser_is_running())
         self.scheduler.probe_or_refresh(
             on_unavailable=self._reschedule_launch_retry,
         )

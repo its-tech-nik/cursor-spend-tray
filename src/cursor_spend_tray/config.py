@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import shlex
-import shutil
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, PrivateAttr
+
+from .browser import (
+    BrowserInfo,
+    browser_is_running,
+    data_dir_for_app,
+    launch_argv,
+    profile_dir_for,
+    resolve_automation_browser,
+)
 
 
 APP_NAME = "cursor-spend-tray"
@@ -20,62 +28,8 @@ def poll_interval_label(minutes: int) -> str:
     return "1 minute" if minutes == 1 else f"{minutes} minutes"
 
 
-def zen_binary() -> str:
-    """Resolve the Zen launcher / binary on PATH or common install paths."""
-    for name in ("zen-browser", "zen"):
-        found = shutil.which(name)
-        if found:
-            return found
-    for candidate in (
-        "/opt/zen-browser-bin/zen",
-        "/usr/bin/zen-browser",
-        "/usr/bin/zen",
-    ):
-        if Path(candidate).is_file():
-            return candidate
-    return "zen-browser"
-
-
-def zen_profile_dir() -> Path:
-    """Dedicated Zen profile so scraping does not attach to the daily session."""
-    path = data_dir() / "zen-profile"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def zen_is_running() -> bool:
-    """True when the tray's dedicated Zen instance is up (not the daily browser)."""
-    profile = str(zen_profile_dir())
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return False
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            raw = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        if not raw:
-            continue
-        parts = [p.decode(errors="ignore") for p in raw.split(b"\0") if p]
-        if not parts:
-            continue
-        joined = " ".join(parts)
-        if "-contentproc" in joined:
-            continue
-        exe = Path(parts[0]).name.lower()
-        if exe not in {"zen", "zen-browser"} and "zen-browser" not in parts[0].lower():
-            continue
-        if profile in parts or f"--profile={profile}" in parts:
-            return True
-    return False
-
-
 def data_dir() -> Path:
-    path = Path.home() / ".local" / "share" / APP_NAME
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return data_dir_for_app(APP_NAME)
 
 
 def config_path() -> Path:
@@ -86,6 +40,11 @@ def state_path() -> Path:
     return data_dir() / "state.json"
 
 
+def zen_is_running() -> bool:
+    """True when the dedicated automation browser profile is running."""
+    return browser_is_running(resolve_automation_browser(), app_name=APP_NAME)
+
+
 class AppConfig(BaseModel):
     bidi_host: str = "127.0.0.1"
     bidi_port: int = DEFAULT_BIDI_PORT
@@ -93,24 +52,43 @@ class AppConfig(BaseModel):
     spending_url: str = SPENDING_URL
     dedicated_tab: bool = True
 
+    _browser: BrowserInfo | None = PrivateAttr(default=None)
+
     def bidi_http_base(self) -> str:
         return f"http://{self.bidi_host}:{self.bidi_port}"
 
+    def debug_http_base(self) -> str:
+        return self.bidi_http_base()
+
+    @property
+    def browser(self) -> BrowserInfo:
+        if self._browser is None:
+            self._browser = resolve_automation_browser()
+        return self._browser
+
+    def refresh_browser(self) -> BrowserInfo:
+        self._browser = resolve_automation_browser()
+        return self._browser
+
+    def browser_is_running(self) -> bool:
+        return browser_is_running(self.browser, app_name=APP_NAME)
+
+    def profile_dir(self) -> Path:
+        return profile_dir_for(self.browser, APP_NAME)
+
+    def browser_launch_argv(self) -> list[str]:
+        """Argv to start an isolated browser with remote debugging for scraping."""
+        return launch_argv(self.browser, port=self.bidi_port, app_name=APP_NAME)
+
+    def browser_launch_command(self) -> str:
+        return shlex.join(self.browser_launch_argv())
+
+    # Back-compat names used throughout the tray UI.
     def zen_launch_argv(self) -> list[str]:
-        """Argv to start an isolated Zen with Remote Agent enabled for scraping."""
-        return [
-            zen_binary(),
-            "--new-instance",
-            "--profile",
-            str(zen_profile_dir()),
-            "--headless",
-            f"--remote-debugging-port={self.bidi_port}",
-            "--remote-allow-hosts=localhost",
-        ]
+        return self.browser_launch_argv()
 
     def zen_launch_command(self) -> str:
-        """Shell command to start an isolated Zen with Remote Agent enabled for scraping."""
-        return shlex.join(self.zen_launch_argv())
+        return self.browser_launch_command()
 
     def save(self) -> None:
         config_path().write_text(self.model_dump_json(indent=2), encoding="utf-8")

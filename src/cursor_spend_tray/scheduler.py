@@ -8,6 +8,8 @@ from typing import Callable
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 from .bidi_client import BidiClient
+from .browser import BrowserFamily
+from .cdp_client import CdpClient
 from .config import AppConfig, UsageSnapshot
 from .scraper import SpendingScraper
 
@@ -45,7 +47,13 @@ class _ProbeWorker(QThread):
 
     def run(self) -> None:
         try:
-            client = BidiClient(self._config.bidi_host, self._config.bidi_port)
+            browser = self._config.browser
+            if browser.family is BrowserFamily.CHROMIUM:
+                client: BidiClient | CdpClient = CdpClient(
+                    self._config.bidi_host, self._config.bidi_port
+                )
+            else:
+                client = BidiClient(self._config.bidi_host, self._config.bidi_port)
             ok = asyncio.run(client.is_available())
         except Exception:
             log.exception("Probe failed")
@@ -166,8 +174,8 @@ class RefreshScheduler(QObject):
             self._emit_seconds()
             self._start_probe()
             self.status_changed.emit(
-                "Browser inaccessible — waiting for Zen with remote debugging. "
-                "Copy the launch command below, then restart Zen."
+                f"Browser inaccessible — waiting for {self.config.browser.display_name} "
+                "with remote debugging. Copy the launch command below, then relaunch."
             )
         else:
             self.refreshing_changed.emit(False)
