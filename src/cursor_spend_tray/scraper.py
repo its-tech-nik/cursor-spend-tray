@@ -188,8 +188,21 @@ class SpendingScraper:
             )
             return snap
         except Exception as exc:
-            log.exception("Scrape failed")
             print(f"[scrape] exception: {exc!r}", flush=True)
+            # Treat a stuck BiDi session the same as "browser unavailable" so the
+            # scheduler's probe loop retries rather than showing a generic error.
+            is_session_stuck = "maximum number of active sessions" in str(exc).lower()
+            if is_session_stuck:
+                log.warning("BiDi session stuck (stale from previous run); will retry: %s", exc)
+                return UsageSnapshot(
+                    cursor_models_pct=prev.cursor_models_pct,
+                    other_models_pct=prev.other_models_pct,
+                    fetched_at=time.time(),
+                    source="unavailable",
+                    error="BiDi session busy — restart Zen with remote debugging to clear it.",
+                    raw_hint=prev.raw_hint,
+                )
+            log.exception("Scrape failed")
             return UsageSnapshot(
                 cursor_models_pct=prev.cursor_models_pct,
                 other_models_pct=prev.other_models_pct,

@@ -122,6 +122,16 @@ class BidiClient:
         except BidiError as exc:
             log.debug("session.status failed before session.new: %s", exc)
 
+        # If a previous session is still open (e.g. app was killed), end it first
+        # so we can create a fresh one.
+        if not status.get("result", status).get("ready", True):
+            log.info("Existing BiDi session detected; ending it before creating a new one")
+            try:
+                await asyncio.wait_for(self.call("session.end", {}), timeout=5)
+                log.info("Stale session ended")
+            except Exception as exc:
+                log.debug("session.end on stale session failed (%s); proceeding anyway", exc)
+
         try:
             await self.call(
                 "session.new",
