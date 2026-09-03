@@ -197,6 +197,16 @@ class TrayApp(QWidget):
         self.scheduler.start()
 
     def _apply_snapshot(self, snap: UsageSnapshot) -> None:
+        # If we're still in the launch-wait loop and the scrape came back unavailable,
+        # keep the spinner running and let the retry handle it instead of flashing the
+        # slash icon.
+        launch_pending = (
+            hasattr(self, "_launch_retry_timer")
+            and self._launch_retry_timer.isActive()
+        )
+        if launch_pending and bidi_unavailable(snap):
+            return
+
         self._stop_spinner()
         disconnected = bidi_unavailable(snap)
         self.popup.apply_snapshot(snap)
@@ -336,11 +346,10 @@ class TrayApp(QWidget):
         self._launch_retry_timer.start(_LAUNCH_SETTLE_MS)
 
     def _refresh_after_launch(self) -> None:
-        """Probe BiDi; if up stop spinner and scrape, otherwise keep spinning and retry."""
+        """Probe BiDi; if up scrape (spinner stops on snapshot), otherwise retry."""
         self._launch_action.setVisible(not zen_is_running())
         self.scheduler.probe_or_refresh(
             on_unavailable=self._reschedule_launch_retry,
-            on_available=self._stop_spinner,
         )
 
     def _reschedule_launch_retry(self) -> None:
