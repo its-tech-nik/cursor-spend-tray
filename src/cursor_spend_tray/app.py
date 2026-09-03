@@ -3,9 +3,27 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
-from PyQt6.QtGui import QAction, QColor, QConicalGradient, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QWidget
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, QTimer
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QConicalGradient,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPen,
+    QPixmap,
+)
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from . import autostart
 from .config import AppConfig, UsageSnapshot, zen_is_running
@@ -154,9 +172,254 @@ def _draw_slash_overlay(painter: QPainter, size: int) -> None:
     )
 
 
+class TrayContextMenu(QFrame):
+    """Tray menu as a Tool window.
+
+    QMenu is a Qt Popup; under Plasma/XWayland those often never deactivate on
+    outside click, so the menu sticks until the tray is clicked again. Tool +
+    focus/outside tracking matches SpendPopup dismiss behaviour.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._dismiss_armed = False
+        self._arm_timer = QTimer(self)
+        self._arm_timer.setSingleShot(True)
+        self._arm_timer.timeout.connect(self._arm_dismiss)
+        self._outside_filter = _CtxOutsideClickFilter(self)
+        self._rows: list[QWidget] = []
+
+        self.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMinimumWidth(220)
+        self.setStyleSheet(
+            """
+            TrayContextMenu {
+                background: #2B2B2B;
+                border: 1px solid #3A3A3A;
+                border-radius: 10px;
+            }
+            QFrame#ctxSep {
+                background: #3A3A3A;
+                border: none;
+                max-height: 1px;
+                margin: 6px 10px;
+            }
+            """
+        )
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(6, 6, 6, 6)
+        self._layout.setSpacing(2)
+
+    def add_action(self, action: QAction) -> QWidget:
+        row = _CtxMenuRow(action, self)
+        action.changed.connect(lambda r=row, a=action: self._sync_row(r, a))
+        action.triggered.connect(self.hide)
+        self._sync_row(row, action)
+        self._layout.addWidget(row)
+        self._rows.append(row)
+        return row
+
+    def add_separator(self) -> QFrame:
+        sep = QFrame(self)
+        sep.setObjectName("ctxSep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        self._layout.addWidget(sep)
+        self._rows.append(sep)
+        return sep
+
+    @staticmethod
+    def _sync_row(row: QWidget, action: QAction) -> None:
+        row.setVisible(action.isVisible())
+        row.setEnabled(action.isEnabled())
+
+    def popup_at(self, pos: QPoint) -> None:
+        """Show near the tray icon; dismiss when focus leaves or user clicks away."""
+        self._dismiss_armed = False
+        self._arm_timer.stop()
+        # Drop empty separators left by hidden actions (e.g. Launch Browser).
+        self._refresh_separator_visibility()
+        self.adjustSize()
+        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        bounds = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        w = max(self.sizeHint().width(), 220)
+        h = max(self.sizeHint().height(), 1)
+        x = min(max(pos.x(), bounds.left() + 4), bounds.right() - w - 4)
+        y = min(max(pos.y(), bounds.top() + 4), bounds.bottom() - h - 4)
+
+        self.setFixedWidth(w)
+        self.setGeometry(x, y, w, h)
+        self.show()
+        self.move(x, y)
+        self.raise_()
+        self.activateWindow()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        QTimer.singleShot(0, lambda: self.move(x, y) if self.isVisible() else None)
+
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self._outside_filter)
+            try:
+                app.focusWindowChanged.disconnect(self._on_focus_window_changed)
+            except TypeError:
+                pass
+            app.focusWindowChanged.connect(self._on_focus_window_changed)
+
+        self._arm_timer.start(200)
+
+    def _refresh_separator_visibility(self) -> None:
+        """Hide a separator when nothing visible sits above or below it."""
+        items = self._rows
+        for i, widget in enumerate(items):
+            if widget.objectName() != "ctxSep":
+                continue
+            above = any(
+                w.isVisibleTo(self) and w.objectName() != "ctxSep"
+                for w in items[:i]
+            )
+            below = any(
+                w.isVisibleTo(self) and w.objectName() != "ctxSep"
+                for w in items[i + 1 :]
+            )
+            widget.setVisible(above and below)
+
+    def _arm_dismiss(self) -> None:
+        self._dismiss_armed = True
+        if self.isVisible() and QGuiApplication.focusWindow() is not self.windowHandle():
+            self.hide()
+
+    def _on_focus_window_changed(self, window) -> None:  # noqa: ANN001
+        if not self._dismiss_armed or not self.isVisible():
+            return
+        if window is self.windowHandle():
+            return
+        self.hide()
+
+    def changeEvent(self, event) -> None:  # noqa: ANN001
+        if (
+            event.type() == QEvent.Type.WindowDeactivate
+            and self.isVisible()
+            and self._dismiss_armed
+        ):
+            self.hide()
+        super().changeEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: ANN001
+        self._arm_timer.stop()
+        self._dismiss_armed = False
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self._outside_filter)
+            try:
+                app.focusWindowChanged.disconnect(self._on_focus_window_changed)
+            except TypeError:
+                pass
+        super().hideEvent(event)
+
+
+class _CtxMenuRow(QFrame):
+    """Left-aligned menu row with optional trailing checkmark (Notion-style)."""
+
+    def __init__(self, action: QAction, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._action = action
+        self.setObjectName("ctxRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(34)
+        self.setStyleSheet(
+            """
+            QFrame#ctxRow {
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+            }
+            QFrame#ctxRow:hover {
+                background: #3A3A3A;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+
+        self._label = QLabel(action.text())
+        label_font = self._label.font()
+        label_font.setPointSize(10)
+        self._label.setFont(label_font)
+        self._label.setStyleSheet("color: #F2F2F2; padding-left: 10px;")
+        self._label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        self._trailing = QLabel("")
+        self._trailing.setFixedWidth(22)
+        self._trailing.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._trailing.setStyleSheet("color: #A0A0A0; padding-right: 10px;")
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(8)
+        row.addWidget(self._label, stretch=1)
+        row.addWidget(self._trailing)
+
+        action.changed.connect(self._sync_from_action)
+        self._sync_from_action()
+
+    def _sync_from_action(self) -> None:
+        self._label.setText(self._action.text())
+        if self._action.isCheckable() and self._action.isChecked():
+            self._trailing.setText("✓")
+        else:
+            self._trailing.setText("")
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton and self._action.isEnabled():
+            self._action.trigger()
+        super().mouseReleaseEvent(event)
+
+
+class _CtxOutsideClickFilter(QObject):
+    """Dismiss the tray menu when a press lands outside its geometry."""
+
+    def __init__(self, menu: TrayContextMenu) -> None:
+        super().__init__(menu)
+        self._menu = menu
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: ANN001
+        if event.type() not in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonDblClick,
+        ):
+            return False
+        if not self._menu.isVisible() or not self._menu._dismiss_armed:
+            return False
+        try:
+            global_pos = event.globalPosition().toPoint()
+        except AttributeError:
+            global_pos = event.globalPos()
+        if self._menu.frameGeometry().contains(global_pos):
+            return False
+        self._menu.hide()
+        return False
+
+
 class TrayApp(QWidget):
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
+        # Hidden native window so grab/focus parenting works for tray UI.
+        self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        self.setWindowFlags(Qt.WindowType.Tool)
         self.config = config
         self.snapshot = UsageSnapshot.load()
 
@@ -169,7 +432,7 @@ class TrayApp(QWidget):
         self.tray.activated.connect(self._on_activated)
         self.tray.context_menu_requested.connect(self._on_context_menu)
 
-        self._ctx = QMenu()
+        self._ctx = TrayContextMenu()
         self._refresh_action = QAction("Refresh now", self)
         self._refresh_action.triggered.connect(self._refresh_now)
         self._launch_action = QAction("Launch Browser", self)
@@ -180,12 +443,12 @@ class TrayApp(QWidget):
         self._autostart_action.toggled.connect(self._on_autostart_toggled)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
-        self._ctx.addAction(self._refresh_action)
-        self._ctx.addAction(self._launch_action)
-        self._ctx.addSeparator()
-        self._ctx.addAction(self._autostart_action)
-        self._ctx.addSeparator()
-        self._ctx.addAction(quit_action)
+        self._ctx.add_action(self._refresh_action)
+        self._ctx.add_action(self._launch_action)
+        self._ctx.add_separator()
+        self._ctx.add_action(self._autostart_action)
+        self._ctx.add_separator()
+        self._ctx.add_action(quit_action)
 
         # Spinner animation (used while waiting for Zen to start after Launch Browser)
         self._spin_angle = 0.0
@@ -194,6 +457,7 @@ class TrayApp(QWidget):
         self._spin_timer.timeout.connect(self._on_spin_tick)
 
         self._apply_snapshot(self.snapshot)
+        self.show()
         self.tray.show()
 
         self.scheduler = RefreshScheduler(config, self)
@@ -246,6 +510,9 @@ class TrayApp(QWidget):
 
     def _on_activated(self, pos: QPoint) -> None:
         self._anchor_pos = QPoint(pos)
+        if self._ctx.isVisible():
+            self._ctx.hide()
+            return
         # Tray click again while open → close (focus moved to another “item”).
         if self.popup.isVisible():
             self.popup.hide()
@@ -254,12 +521,17 @@ class TrayApp(QWidget):
 
     def _on_context_menu(self, pos: QPoint) -> None:
         self._anchor_pos = QPoint(pos)
+        if self.popup.isVisible():
+            self.popup.hide()
+        if self._ctx.isVisible():
+            self._ctx.hide()
+            return
         # Re-check Zen each time the menu opens so Launch Browser stays accurate.
         self._launch_action.setVisible(not zen_is_running())
         self._autostart_action.blockSignals(True)
         self._autostart_action.setChecked(autostart.is_enabled())
         self._autostart_action.blockSignals(False)
-        self._ctx.popup(pos)
+        self._ctx.popup_at(pos)
 
     def _on_autostart_toggled(self, enabled: bool) -> None:
         try:
