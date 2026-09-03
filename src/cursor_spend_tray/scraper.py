@@ -81,31 +81,49 @@ class SpendingScraper:
 
     async def fetch(self) -> UsageSnapshot:
         prev = UsageSnapshot.load()
+        print(
+            f"[scrape] start prev=cursor:{prev.cursor_models_pct}% "
+            f"other:{prev.other_models_pct}% source={prev.source!r} "
+            f"url={self.config.spending_url}",
+            flush=True,
+        )
         client = BidiClient(self.config.bidi_host, self.config.bidi_port)
         try:
-            if not await client.is_available():
+            available = await client.is_available()
+            print(
+                f"[scrape] remote agent at {client.http_base}: "
+                f"{'available' if available else 'UNAVAILABLE'}",
+                flush=True,
+            )
+            if not available:
+                err = (
+                    f"No Remote Agent on {client.http_base}. "
+                    "Start Zen temporarily with "
+                    "`zen-browser --remote-debugging-port=9222` "
+                    "(seamless launcher comes later)."
+                )
+                print(f"[scrape] abort: {err}", flush=True)
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
-                    error=(
-                        f"No Remote Agent on {client.http_base}. "
-                        "Start Zen temporarily with "
-                        "`zen-browser --remote-debugging-port=9222` "
-                        "(seamless launcher comes later)."
-                    ),
+                    error=err,
                     fetched_at=time.time(),
                     source="unavailable",
                     raw_hint=prev.raw_hint,
                 )
             await client.connect()
+            print("[scrape] BiDi connected", flush=True)
             context_id = await client.find_or_open_tab(
                 self.config.spending_url,
                 reuse=self.config.dedicated_tab,
             )
+            print(f"[scrape] tab context_id={context_id}", flush=True)
             # Refresh dedicated tab for latest numbers
             try:
                 await client.reload(context_id)
-            except BidiError:
+                print("[scrape] reloaded spending tab", flush=True)
+            except BidiError as reload_exc:
+                print(f"[scrape] reload failed ({reload_exc}); navigating", flush=True)
                 await client.call(
                     "browsingContext.navigate",
                     {
@@ -114,9 +132,20 @@ class SpendingScraper:
                         "wait": "complete",
                     },
                 )
+                print("[scrape] navigated to spending url", flush=True)
 
             data = await self._extract_with_retry(client, context_id)
+            print(
+                f"[scrape] extract raw cursorModelsPct={data.get('cursorModelsPct')!r} "
+                f"otherModelsPct={data.get('otherModelsPct')!r} "
+                f"loggedOut={data.get('loggedOut')!r} "
+                f"hasIncludedInPro={data.get('hasIncludedInPro')!r}",
+                flush=True,
+            )
+            hint = data.get("hint") or ""
+            print(f"[scrape] page hint ({len(hint)} chars): {hint[:400]!r}", flush=True)
             if data.get("loggedOut"):
+                print("[scrape] page looks logged out; keeping previous snapshot", flush=True)
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
@@ -128,7 +157,12 @@ class SpendingScraper:
 
             cursor_pct = _clamp_pct(data.get("cursorModelsPct"))
             other_pct = _clamp_pct(data.get("otherModelsPct"))
+            print(
+                f"[scrape] clamped pct cursor={cursor_pct!r} other={other_pct!r}",
+                flush=True,
+            )
             if cursor_pct is None and other_pct is None:
+                print("[scrape] parse failed; keeping previous snapshot", flush=True)
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
@@ -146,9 +180,16 @@ class SpendingScraper:
                 raw_hint=data.get("hint"),
             )
             snap.save()
+            print(
+                f"[scrape] OK saved cursor={snap.cursor_models_pct}% "
+                f"other={snap.other_models_pct}% "
+                f"(dashboard expect ~25% / ~70%)",
+                flush=True,
+            )
             return snap
         except Exception as exc:
             log.exception("Scrape failed")
+            print(f"[scrape] exception: {exc!r}", flush=True)
             return UsageSnapshot(
                 cursor_models_pct=prev.cursor_models_pct,
                 other_models_pct=prev.other_models_pct,
@@ -159,6 +200,7 @@ class SpendingScraper:
             )
         finally:
             await client.close()
+            print("[scrape] client closed", flush=True)
 
     async def _extract_with_retry(
         self, client: BidiClient, context_id: str, attempts: int = 8
@@ -168,11 +210,20 @@ class SpendingScraper:
             last = await client.evaluate(context_id, EXTRACT_JS) or {}
             if not isinstance(last, dict):
                 last = {}
+            print(
+                f"[scrape] attempt {i + 1}/{attempts}: "
+                f"cursor={last.get('cursorModelsPct')!r} "
+                f"other={last.get('otherModelsPct')!r} "
+                f"loggedOut={last.get('loggedOut')!r} "
+                f"hasIncludedInPro={last.get('hasIncludedInPro')!r}",
+                flush=True,
+            )
             if last.get("cursorModelsPct") is not None or last.get("otherModelsPct") is not None:
                 return last
             if last.get("loggedOut"):
                 return last
             await asyncio.sleep(0.75 + i * 0.15)
+        print("[scrape] extract retries exhausted", flush=True)
         return last
 
 

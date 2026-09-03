@@ -79,7 +79,12 @@ class RefreshScheduler(QObject):
         assert isinstance(snap, UsageSnapshot)
         self.refreshing_changed.emit(False)
         self._arm_next()
-        if snap.error and snap.cursor_models_pct is None and snap.other_models_pct is None:
+        if snap.source == "unavailable":
+            self.status_changed.emit(
+                "Browser inaccessible — usage is not updating. "
+                "Copy the launch command below, restart Zen with it, then refresh."
+            )
+        elif snap.error and snap.cursor_models_pct is None and snap.other_models_pct is None:
             self.status_changed.emit(snap.error)
         elif snap.error:
             self.status_changed.emit(f"Partial/cached data — {snap.error}")

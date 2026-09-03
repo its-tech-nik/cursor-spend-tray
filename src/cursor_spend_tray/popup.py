@@ -8,11 +8,112 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from .config import UsageSnapshot
+
+
+class CopyableCommand(QLabel):
+    """Monospace command chip — click copies the command to the clipboard."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._command = ""
+        self._reset = QTimer(self)
+        self._reset.setSingleShot(True)
+        self._reset.timeout.connect(self._show_command)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        font = QFont("monospace")
+        font.setStyleHint(QFont.StyleHint.TypeWriter)
+        font.setPointSize(9)
+        self.setFont(font)
+        self.setStyleSheet(
+            """
+            QLabel {
+                color: #D8D8D8;
+                background: #242424;
+                border: 1px solid #3A3A3A;
+                border-radius: 6px;
+                padding: 8px 10px;
+            }
+            QLabel:hover {
+                color: #FFFFFF;
+                background: #2C2C2C;
+                border-color: #4A4A4A;
+            }
+            """
+        )
+        self.setToolTip("Click to copy")
+        self.hide()
+
+    def set_command(self, command: str) -> None:
+        self._command = command.strip()
+        self._show_command()
+        self.setVisible(bool(self._command))
+
+    def _show_command(self) -> None:
+        self.setText(self._command or "")
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton and self._command:
+            QGuiApplication.clipboard().setText(self._command)
+            self.setText("Copied!")
+            self._reset.start(1200)
+        super().mouseReleaseEvent(event)
+
+
+class BrowserHelpBanner(QFrame):
+    """Shown when Zen Remote Agent is unreachable."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("browserHelp")
+        self.setStyleSheet(
+            """
+            QFrame#browserHelp {
+                background: #1F1A14;
+                border: 1px solid #3D3428;
+                border-radius: 10px;
+            }
+            """
+        )
+
+        self._title = QLabel("Browser inaccessible")
+        title_font = QFont()
+        title_font.setPointSize(11)
+        title_font.setWeight(QFont.Weight.DemiBold)
+        self._title.setFont(title_font)
+        self._title.setStyleSheet("color: #E8DCC8; background: transparent; border: none;")
+
+        self._hint = QLabel(
+            "Quit Zen fully, then start it with remote debugging so the tray can read spending:"
+        )
+        hint_font = QFont()
+        hint_font.setPointSize(9)
+        self._hint.setFont(hint_font)
+        self._hint.setWordWrap(True)
+        self._hint.setStyleSheet("color: #A89880; background: transparent; border: none;")
+
+        self.command = CopyableCommand()
+        self.command.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        layout.addWidget(self._title)
+        layout.addWidget(self._hint)
+        layout.addWidget(self.command)
+        self.hide()
+
+    def set_launch_command(self, command: str) -> None:
+        self.command.set_command(command)
 
 
 class UsageBar(QWidget):
@@ -196,6 +297,8 @@ class SpendPopup(QFrame):
         card_layout.addWidget(self.cursor_bar)
         card_layout.addWidget(self.other_bar)
 
+        self.browser_help = BrowserHelpBanner()
+
         self.countdown = CountdownLabel()
         self.countdown.clicked.connect(self.refresh_requested.emit)
 
@@ -211,6 +314,7 @@ class SpendPopup(QFrame):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
         root.addWidget(self._card)
+        root.addWidget(self.browser_help)
         root.addWidget(self.countdown)
         root.addWidget(self.status)
 
@@ -289,6 +393,15 @@ class SpendPopup(QFrame):
     def apply_snapshot(self, snap: UsageSnapshot) -> None:
         self.cursor_bar.set_percent(snap.cursor_models_pct)
         self.other_bar.set_percent(snap.other_models_pct)
+
+    def set_browser_inaccessible(self, inaccessible: bool, launch_command: str = "") -> None:
+        """Show or hide the Browser inaccessible banner with a copyable launch command."""
+        if inaccessible:
+            self.browser_help.set_launch_command(launch_command)
+            self.browser_help.show()
+        else:
+            self.browser_help.hide()
+        self.adjustSize()
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)

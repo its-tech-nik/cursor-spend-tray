@@ -46,6 +46,7 @@ On Wayland (e.g. Plasma), the app defaults to **XWayland (`QT_QPA_PLATFORM=xcb`)
 ### Packaging notes
 
 - **AUR:** `packaging/aur/PKGBUILD` installs a system `cursor-spend-tray` command plus a `.desktop` entry, using Arch’s `python-pyqt6` / `python-httpx` / etc.
+- **AUR CI:** publishing a GitHub Release runs [`.github/workflows/aur.yml`](.github/workflows/aur.yml), which bumps `pkgver`/`sha256sums`, regenerates `.SRCINFO`, and pushes to `aur.archlinux.org`. Requires repo secret `AUR_SSH_PRIVATE_KEY` (and a one-time empty AUR package). Optional secrets: `AUR_USERNAME`, `AUR_EMAIL`. You can also run the workflow manually via **Actions → Publish AUR**.
 - **Debian/Ubuntu (.deb):** not packaged yet; same app can be wrapped later with a `debian/` package or something like `fpm` once an Arch package is solid.
 
 ## Temporary Zen connection (until seamless setup)

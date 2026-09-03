@@ -79,6 +79,12 @@ class _StatusNotifierAdaptor(QDBusAbstractAdaptor):
     def AttentionMovieName(self) -> str:
         return ""
 
+    @pyqtProperty("QVariant")
+    def ToolTip(self):
+        # Spec: (sa(iiay)ss) — icon-name, icon-pixmap[], title, description
+        item = self._item()
+        return ["", [], item.tooltip_title, item.tooltip]
+
     @pyqtSlot(int, int)
     def Activate(self, x: int, y: int) -> None:
         self._item().handle_activate(x, y)
@@ -115,6 +121,7 @@ class StatusNotifierItem(QObject):
         super().__init__(parent)
         self.title = title
         self.item_id = item_id
+        self.tooltip_title = title
         self.tooltip = title
         self.icon_name = item_id
         self._icon_dir = Path(tempfile.mkdtemp(prefix="cursor-spend-tray-icons-"))
@@ -177,8 +184,9 @@ class StatusNotifierItem(QObject):
         if self._registered:
             self._emit(_SNI_IFACE, "NewIcon")
 
-    def set_tooltip(self, text: str) -> None:
+    def set_tooltip(self, text: str, title: str | None = None) -> None:
         self.tooltip = text
+        self.tooltip_title = title if title is not None else self.title
         if self._registered:
             self._emit(_SNI_IFACE, "NewToolTip")
 

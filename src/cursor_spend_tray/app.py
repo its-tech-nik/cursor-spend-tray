@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QPoint, QRect, Qt
-from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QPoint, QRect, QRectF, Qt
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QWidget
 
 from .config import AppConfig, UsageSnapshot
@@ -19,9 +19,51 @@ _GAP_PX = 6
 _ICON_PAD = 12
 
 
+def bidi_unavailable(snap: UsageSnapshot) -> bool:
+    """True when Zen Remote Agent / remote debugging is not reachable."""
+    if snap.source == "unavailable":
+        return True
+    err = (snap.error or "").lower()
+    return "no remote agent" in err or "remote-debugging-port" in err
+
+
+def tray_tooltip(snap: UsageSnapshot) -> tuple[str, str]:
+    """Return (title, body) for the StatusNotifierItem hover tooltip."""
+    usage = _usage_phrase(snap)
+    if bidi_unavailable(snap):
+        title = "Cursor Spend — Browser inaccessible"
+        if usage:
+            body = (
+                f"Usage not updating ({usage}). "
+                "Quit Zen and restart with remote debugging (see popup), then refresh."
+            )
+        else:
+            body = (
+                "Usage not updating. "
+                "Quit Zen and restart with remote debugging (see popup), then refresh."
+            )
+        return title, body
+    if usage:
+        return "Cursor Spend", usage
+    return "Cursor Spend", "Waiting for first reading…"
+
+
+def _usage_phrase(snap: UsageSnapshot) -> str:
+    c, o = snap.cursor_models_pct, snap.other_models_pct
+    if c is not None and o is not None:
+        return f"Cursor {c}% · Other {o}%"
+    if c is not None:
+        return f"Cursor {c}%"
+    if o is not None:
+        return f"Other {o}%"
+    return ""
+
+
 def make_tray_icon(
     cursor_pct: int | None = None,
     other_pct: int | None = None,
+    *,
+    disconnected: bool = False,
 ) -> QIcon:
     """Stacked horizontal meters, similar to Computer Stats tray glyphs."""
     size = 64
@@ -58,8 +100,34 @@ def make_tray_icon(
         painter.setBrush(color)
         painter.drawRoundedRect(margin_x, y, fill_w, bar_h, 4, 4)
 
+    if disconnected:
+        _draw_slash_overlay(painter, size)
+
     painter.end()
     return QIcon(pix)
+
+
+def _draw_slash_overlay(painter: QPainter, size: int) -> None:
+    """Monochrome ⊘ (slash-circle) over the usage bars — remote debugging off."""
+    # Soften bars so the glyph reads at tray size.
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(0, 0, 0, 130))
+    painter.drawRoundedRect(2, 2, size - 4, size - 4, 8, 8)
+
+    cx = cy = size / 2.0
+    r = size * 0.30
+    ink = QColor("#E8E8E8")
+    pen = QPen(ink, max(3.0, size * 0.07), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+
+    # Diagonal slash (bottom-left → top-right), inset so it meets the ring cleanly.
+    inset = r * 0.55
+    painter.drawLine(
+        QPoint(int(cx - inset), int(cy + inset)),
+        QPoint(int(cx + inset), int(cy - inset)),
+    )
 
 
 class TrayApp(QWidget):
@@ -69,23 +137,19 @@ class TrayApp(QWidget):
         self.snapshot = UsageSnapshot.load()
 
         self.popup = SpendPopup()
-        self.popup.apply_snapshot(self.snapshot)
         self.popup.refresh_requested.connect(self._refresh_now)
         # Screen coords from Plasma's StatusNotifierItem.Activate(x, y).
         self._anchor_pos = QPoint()
 
         self.tray = StatusNotifierItem("Cursor Spend", "cursor-spend-tray", self)
-        self.tray.set_icon(
-            make_tray_icon(self.snapshot.cursor_models_pct, self.snapshot.other_models_pct)
-        )
-        self.tray.set_tooltip("Cursor Spend")
+        self._apply_snapshot(self.snapshot)
         self.tray.activated.connect(self._on_activated)
         self.tray.context_menu_requested.connect(self._on_context_menu)
 
         self._ctx = QMenu()
         refresh_action = QAction("Refresh now", self)
         refresh_action.triggered.connect(self._refresh_now)
-        open_action = QAction("Open spending page hint", self)
+        open_action = QAction("Show browser setup…", self)
         open_action.triggered.connect(self._show_connect_hint)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
@@ -103,6 +167,22 @@ class TrayApp(QWidget):
         self.scheduler.refreshing_changed.connect(self._on_refreshing)
         self.scheduler.start()
 
+    def _apply_snapshot(self, snap: UsageSnapshot) -> None:
+        disconnected = bidi_unavailable(snap)
+        self.popup.apply_snapshot(snap)
+        self.popup.set_browser_inaccessible(
+            disconnected, self.config.zen_launch_command()
+        )
+        self.tray.set_icon(
+            make_tray_icon(
+                snap.cursor_models_pct,
+                snap.other_models_pct,
+                disconnected=disconnected,
+            )
+        )
+        title, body = tray_tooltip(snap)
+        self.tray.set_tooltip(body, title=title)
+
     def _refresh_now(self) -> None:
         self.scheduler.refresh()
 
@@ -113,12 +193,7 @@ class TrayApp(QWidget):
     def _on_snapshot(self, snap: object) -> None:
         assert isinstance(snap, UsageSnapshot)
         self.snapshot = snap
-        self.popup.apply_snapshot(snap)
-        self.tray.set_icon(make_tray_icon(snap.cursor_models_pct, snap.other_models_pct))
-        tip = "Cursor Spend"
-        if snap.cursor_models_pct is not None and snap.other_models_pct is not None:
-            tip = f"Cursor {snap.cursor_models_pct}% · Other {snap.other_models_pct}%"
-        self.tray.set_tooltip(tip)
+        self._apply_snapshot(snap)
 
     def _on_activated(self, pos: QPoint) -> None:
         self._anchor_pos = QPoint(pos)
@@ -190,8 +265,11 @@ class TrayApp(QWidget):
         return QPoint(x, y)
 
     def _show_connect_hint(self) -> None:
+        cmd = self.config.zen_launch_command()
+        self.popup.set_browser_inaccessible(True, cmd)
         self.popup.set_status(
-            "Start Zen with remote debugging enabled on port 9222, keep the spending tab open, then click the countdown to refresh."
+            "Browser inaccessible — quit Zen, run the command below (click to copy), "
+            "then click the countdown to refresh."
         )
         if not self.popup.isVisible():
             self.popup.show_at(self._popup_position())

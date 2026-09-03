@@ -35,6 +35,13 @@ class AppConfig(BaseModel):
     def bidi_http_base(self) -> str:
         return f"http://{self.bidi_host}:{self.bidi_port}"
 
+    def zen_launch_command(self) -> str:
+        """Shell command to start Zen with Remote Agent enabled for scraping."""
+        return (
+            f"zen-browser --remote-debugging-port={self.bidi_port} "
+            "--remote-allow-hosts=localhost"
+        )
+
     def save(self) -> None:
         config_path().write_text(self.model_dump_json(indent=2), encoding="utf-8")
 

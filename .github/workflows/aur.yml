@@ -1,0 +1,149 @@
+# Publish packaging/aur to the AUR when a GitHub Release is published.
+#
+# One-time setup (after you have an AUR account):
+#   1. ssh-keygen -t ed25519 -f aur_deploy -N "" -C "github-actions-cursor-spend-tray"
+#   2. Paste aur_deploy.pub into https://aur.archlinux.org → Account → SSH Public Key
+#   3. Create the empty AUR package once (clone + first push of PKGBUILD/.SRCINFO)
+#   4. gh secret set AUR_SSH_PRIVATE_KEY < aur_deploy
+#
+# Optional secrets:
+#   AUR_USERNAME  — git author name on AUR commits (default: technik)
+#   AUR_EMAIL     — git author email (default: from PKGBUILD maintainer line)
+name: Publish AUR
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.0). Defaults to the latest release tag."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aur-publish
+  cancel-in-progress: false
+
+jobs:
+  aur:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      PKGNAME: cursor-spend-tray
+      AUR_REPO: ssh://aur@aur.archlinux.org/cursor-spend-tray.git
+    steps:
+      - name: Install packaging tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git openssh curl pacman-contrib
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version from release/tag
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="$(git describe --tags --abbrev=0)"
+          fi
+          TAG="${TAG#refs/tags/}"
+          VERSION="${TAG#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "Refusing non-semver-ish version: $VERSION (from tag $TAG)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing $PKGNAME $VERSION (tag $TAG)"
+
+      - name: Update PKGBUILD and .SRCINFO
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          TAG="${{ steps.ver.outputs.tag }}"
+          PKGBUILD=packaging/aur/PKGBUILD
+
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          curl -fsSL -o "/tmp/${PKGNAME}-${VERSION}.tar.gz" "$TARBALL_URL"
+          SUM="$(sha256sum "/tmp/${PKGNAME}-${VERSION}.tar.gz" | awk '{print $1}')"
+
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" "$PKGBUILD"
+          sed -i "s/^pkgrel=.*/pkgrel=1/" "$PKGBUILD"
+          sed -i "s/^sha256sums=.*/sha256sums=('${SUM}')/" "$PKGBUILD"
+
+          (
+            cd packaging/aur
+            makepkg --printsrcinfo > .SRCINFO
+          )
+
+          echo "Updated packaging/aur for ${VERSION}"
+          echo "sha256=${SUM}"
+          cat packaging/aur/PKGBUILD
+          echo "----"
+          cat packaging/aur/.SRCINFO
+
+      - name: Configure SSH for AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${AUR_SSH_PRIVATE_KEY:-}" ]]; then
+            echo "::error::Missing secret AUR_SSH_PRIVATE_KEY. Add an AUR deploy key, then: gh secret set AUR_SSH_PRIVATE_KEY < keyfile"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts
+          cat >> ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            User aur
+            IdentityFile ~/.ssh/aur_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+          chmod 600 ~/.ssh/config
+          ssh -T aur@aur.archlinux.org || true
+
+      - name: Push to AUR
+        env:
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          NAME="${AUR_USERNAME:-technik}"
+          EMAIL="${AUR_EMAIL:-}"
+          if [[ -z "$EMAIL" ]]; then
+            EMAIL="$(sed -n 's/^# Maintainer:.*<\(.*\)>/\1/p' packaging/aur/PKGBUILD | head -1)"
+          fi
+          git config --global user.name "$NAME"
+          git config --global user.email "$EMAIL"
+
+          WORKDIR="$(mktemp -d)"
+          git clone "$AUR_REPO" "$WORKDIR/aur"
+          cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO "$WORKDIR/aur/"
+          cd "$WORKDIR/aur"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR package already up to date for ${VERSION}"
+            exit 0
+          fi
+          git commit -m "Update to ${VERSION}"
+          git push origin HEAD:master
+          echo "Pushed ${PKGNAME} ${VERSION} to AUR"
