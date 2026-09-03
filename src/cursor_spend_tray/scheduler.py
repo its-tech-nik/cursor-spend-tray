@@ -112,25 +112,34 @@ class RefreshScheduler(QObject):
         self._deadline = time.monotonic() + self.config.poll_seconds
         self._emit_seconds()
 
-    def probe_or_refresh(self, on_unavailable: "Callable[[], None] | None" = None) -> None:
+    def probe_or_refresh(
+        self,
+        on_unavailable: "Callable[[], None] | None" = None,
+        on_available: "Callable[[], None] | None" = None,
+    ) -> None:
         """Lightweight BiDi check; if available trigger a full refresh, else call on_unavailable."""
         if self._worker and self._worker.isRunning():
             return
         if self._probe_worker and self._probe_worker.isRunning():
             return
         self._probe_on_unavailable = on_unavailable
+        self._probe_on_available = on_available
         pw = _ProbeWorker(self.config)
         pw.finished_available.connect(self._on_probe_or_refresh_result)
         pw.start()
         self._probe_worker = pw
 
     def _on_probe_or_refresh_result(self, available: bool) -> None:
-        cb = getattr(self, "_probe_on_unavailable", None)
+        unavail_cb = getattr(self, "_probe_on_unavailable", None)
+        avail_cb = getattr(self, "_probe_on_available", None)
         self._probe_on_unavailable = None
+        self._probe_on_available = None
         if available:
+            if avail_cb is not None:
+                avail_cb()
             self.refresh()
-        elif cb is not None:
-            cb()
+        elif unavail_cb is not None:
+            unavail_cb()
 
     def _start_probe(self) -> None:
         if not self._probe.isActive():

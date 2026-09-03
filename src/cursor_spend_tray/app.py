@@ -4,7 +4,7 @@ import logging
 import subprocess
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
-from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QAction, QColor, QConicalGradient, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QWidget
 
 from .config import AppConfig, UsageSnapshot, zen_is_running
@@ -19,7 +19,8 @@ _PANEL_EDGE_PX = 96
 _GAP_PX = 6
 _ICON_PAD = 12
 _LAUNCH_SETTLE_MS = 10_000
-_LAUNCH_RETRY_MS = 5_000  # retry interval while waiting for BiDi after launch
+_LAUNCH_RETRY_MS = 5_000      # retry interval while waiting for BiDi after launch
+_SPIN_INTERVAL_MS = 80        # icon animation frame interval (~12 fps)
 
 
 def bidi_unavailable(snap: UsageSnapshot) -> bool:
@@ -102,6 +103,39 @@ def make_tray_icon(
     return QIcon(pix)
 
 
+def make_spinner_icon(angle_deg: float) -> QIcon:
+    """Monochrome rotating arc icon shown while waiting for Zen to start."""
+    size = 64
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    cx = cy = size / 2.0
+    r = size * 0.28
+    stroke = max(4.0, size * 0.10)
+    rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+
+    # Dim track ring
+    track_pen = QPen(QColor(80, 80, 80, 160), stroke, Qt.PenStyle.SolidLine,
+                     Qt.PenCapStyle.RoundCap)
+    painter.setPen(track_pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(rect)
+
+    # Bright arc (270° sweep, rotated by angle_deg)
+    arc_pen = QPen(QColor("#E8E8E8"), stroke, Qt.PenStyle.SolidLine,
+                   Qt.PenCapStyle.RoundCap)
+    painter.setPen(arc_pen)
+    # Qt drawArc uses 1/16th degrees, start from top (90°) rotated by angle_deg
+    start = int((90 - angle_deg) * 16)
+    span = int(-270 * 16)
+    painter.drawArc(rect, start, span)
+
+    painter.end()
+    return QIcon(pix)
+
+
 def _draw_slash_overlay(painter: QPainter, size: int) -> None:
     """Monochrome ⊘ (slash-circle) — remote debugging off; no usage bars."""
     cx = cy = size / 2.0
@@ -146,6 +180,12 @@ class TrayApp(QWidget):
         self._ctx.addSeparator()
         self._ctx.addAction(quit_action)
 
+        # Spinner animation (used while waiting for Zen to start after Launch Browser)
+        self._spin_angle = 0.0
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(_SPIN_INTERVAL_MS)
+        self._spin_timer.timeout.connect(self._on_spin_tick)
+
         self._apply_snapshot(self.snapshot)
         self.tray.show()
 
@@ -157,6 +197,7 @@ class TrayApp(QWidget):
         self.scheduler.start()
 
     def _apply_snapshot(self, snap: UsageSnapshot) -> None:
+        self._stop_spinner()
         disconnected = bidi_unavailable(snap)
         self.popup.apply_snapshot(snap)
         self.popup.set_browser_inaccessible(
@@ -257,15 +298,20 @@ class TrayApp(QWidget):
         )
         return QPoint(x, y)
 
+    def _start_spinner(self) -> None:
+        self._spin_angle = 0.0
+        self._spin_timer.start()
+
+    def _stop_spinner(self) -> None:
+        self._spin_timer.stop()
+
+    def _on_spin_tick(self) -> None:
+        self._spin_angle = (self._spin_angle + 18) % 360  # one full rotation per ~1.6s
+        self.tray.set_icon(make_spinner_icon(self._spin_angle))
+
     def _launch_browser(self) -> None:
         if zen_is_running():
             self._launch_action.setVisible(False)
-            self.popup.set_status(
-                "Zen is already running — quit it fully, then use Launch Browser "
-                "so remote debugging can start."
-            )
-            if not self.popup.isVisible():
-                self.popup.show_at(self._popup_position())
             return
 
         argv = self.config.zen_launch_argv()
@@ -278,19 +324,11 @@ class TrayApp(QWidget):
             )
         except OSError as exc:
             log.exception("Failed to launch Zen")
-            self.popup.set_status(f"Could not launch Zen: {exc}")
-            self.popup.set_browser_inaccessible(True, self.config.zen_launch_command())
             self._launch_action.setVisible(not zen_is_running())
-            if not self.popup.isVisible():
-                self.popup.show_at(self._popup_position())
             return
 
         self._launch_action.setVisible(False)
-        self.popup.set_status(
-            "Launching Zen with remote debugging… checking in 10 seconds."
-        )
-        if not self.popup.isVisible():
-            self.popup.show_at(self._popup_position())
+        self._start_spinner()
         if not hasattr(self, "_launch_retry_timer"):
             self._launch_retry_timer = QTimer(self)
             self._launch_retry_timer.setSingleShot(True)
@@ -298,13 +336,12 @@ class TrayApp(QWidget):
         self._launch_retry_timer.start(_LAUNCH_SETTLE_MS)
 
     def _refresh_after_launch(self) -> None:
-        """Probe BiDi; if up run a full scrape, otherwise retry every 5s."""
-        self.popup.set_status("Checking browser connection…")
+        """Probe BiDi; if up stop spinner and scrape, otherwise keep spinning and retry."""
         self._launch_action.setVisible(not zen_is_running())
         self.scheduler.probe_or_refresh(
-            on_unavailable=self._reschedule_launch_retry
+            on_unavailable=self._reschedule_launch_retry,
+            on_available=self._stop_spinner,
         )
 
     def _reschedule_launch_retry(self) -> None:
-        self.popup.set_status("Browser starting… checking again in 5 seconds.")
         self._launch_retry_timer.start(_LAUNCH_RETRY_MS)
