@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import (
     QAction,
     QColor,
@@ -13,6 +14,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QPolygonF,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -165,7 +167,7 @@ def make_tray_icon(
 
 
 def make_spinner_icon(angle_deg: float) -> QIcon:
-    """Monochrome rotating arc icon shown while waiting for Zen to start."""
+    """Rotating circular-arrow (refresh) glyph while waiting for the browser."""
     size = 64
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
@@ -173,25 +175,41 @@ def make_spinner_icon(angle_deg: float) -> QIcon:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
     cx = cy = size / 2.0
-    r = size * 0.28
+    painter.translate(cx, cy)
+    painter.rotate(angle_deg)
+
+    r = size * 0.30
     stroke = max(4.0, size * 0.10)
-    rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
-
-    # Dim track ring
-    track_pen = QPen(QColor(80, 80, 80, 160), stroke, Qt.PenStyle.SolidLine,
-                     Qt.PenCapStyle.RoundCap)
-    painter.setPen(track_pen)
+    ink = QColor("#E8E8E8")
+    pen = QPen(
+        ink,
+        stroke,
+        Qt.PenStyle.SolidLine,
+        Qt.PenCapStyle.RoundCap,
+        Qt.PenJoinStyle.RoundJoin,
+    )
+    painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.drawEllipse(rect)
 
-    # Bright arc (270° sweep, rotated by angle_deg)
-    arc_pen = QPen(QColor("#E8E8E8"), stroke, Qt.PenStyle.SolidLine,
-                   Qt.PenCapStyle.RoundCap)
-    painter.setPen(arc_pen)
-    # Qt drawArc uses 1/16th degrees, start from top (90°) rotated by angle_deg
-    start = int((90 - angle_deg) * 16)
-    span = int(-270 * 16)
-    painter.drawArc(rect, start, span)
+    # Open ring; gap leaves room for the arrowhead (Qt angles: 0° = east, CCW).
+    tip_qt_deg = 55.0
+    painter.drawArc(QRectF(-r, -r, 2 * r, 2 * r), int(tip_qt_deg * 16), int(-295 * 16))
+
+    tip_a = math.radians(tip_qt_deg)
+    tx = r * math.cos(tip_a)
+    ty = -r * math.sin(tip_a)
+    # Clockwise tangent / outward normal in screen space.
+    tangent = (math.sin(tip_a), math.cos(tip_a))
+    normal = (math.cos(tip_a), -math.sin(tip_a))
+    ah = r * 0.48
+    tip = QPointF(tx + tangent[0] * stroke * 0.15, ty + tangent[1] * stroke * 0.15)
+    back = QPointF(tx - tangent[0] * ah * 0.55, ty - tangent[1] * ah * 0.55)
+    left = QPointF(back.x() + normal[0] * ah * 0.5, back.y() + normal[1] * ah * 0.5)
+    right = QPointF(back.x() - normal[0] * ah * 0.5, back.y() - normal[1] * ah * 0.5)
+
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(ink)
+    painter.drawPolygon(QPolygonF([tip, left, right]))
 
     painter.end()
     return QIcon(pix)
@@ -616,6 +634,7 @@ class TrayApp(QWidget):
         self._spin_timer.setInterval(_SPIN_INTERVAL_MS)
         self._spin_timer.timeout.connect(self._on_spin_tick)
         self._login_launch_pending = False
+        self._headless_switch_pending = False
 
         self._apply_snapshot(self.snapshot)
         self.show()
@@ -672,6 +691,12 @@ class TrayApp(QWidget):
             self._ensure_login_browser()
         elif snap.source in ("bidi", "cdp") and not snap.error:
             self._login_launch_pending = False
+            if self.config.browser_is_headless() is False:
+                # Login window did its job — flip back to headless for background polls.
+                if not self._headless_switch_pending:
+                    QTimer.singleShot(0, self._switch_to_headless_after_login)
+            else:
+                self._headless_switch_pending = False
 
     def _ensure_login_browser(self) -> None:
         """Open a headed dedicated-profile window so the user can sign into Cursor."""
@@ -733,6 +758,41 @@ class TrayApp(QWidget):
         self.popup.set_status(
             f"Sign in to Cursor in the {self.config.browser.display_name} window…"
         )
+        self._arm_launch_retry()
+
+    def _switch_to_headless_after_login(self) -> None:
+        """Close the headed login window and relaunch the dedicated profile headless."""
+        if self._headless_switch_pending:
+            return
+        if self.config.browser_is_headless() is not False:
+            self._headless_switch_pending = False
+            return
+        self._headless_switch_pending = True
+        name = self.config.browser.display_name
+        self.popup.set_status(f"Sign-in complete — switching {name} to headless…")
+        self._start_spinner()
+        if not self.config.stop_browser(timeout=8.0):
+            self._headless_switch_pending = False
+            self._stop_spinner()
+            self.popup.set_status(f"Could not restart {name} in headless mode.")
+            self._launch_action.setVisible(not self.config.browser_is_running())
+            return
+        argv = self.config.browser_launch_argv(headless=True)
+        try:
+            subprocess.Popen(
+                argv,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            log.exception("Failed to relaunch headless %s after login", name)
+            self._headless_switch_pending = False
+            self._stop_spinner()
+            self.popup.set_status(f"Could not relaunch headless {name}: {exc}")
+            self._launch_action.setVisible(True)
+            return
+        self._launch_action.setVisible(False)
         self._arm_launch_retry()
 
     def _on_activated(self, pos: QPoint) -> None:
@@ -850,6 +910,7 @@ class TrayApp(QWidget):
 
     def _start_spinner(self) -> None:
         self._spin_angle = 0.0
+        self.tray.set_icon(make_spinner_icon(self._spin_angle))
         self._spin_timer.start()
 
     def _stop_spinner(self) -> None:
