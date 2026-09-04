@@ -126,7 +126,7 @@ class SpendingScraper:
                 err = (
                     f"No remote debugging on {client.http_base}. "
                     f"Start the dedicated {browser.display_name} profile with remote debugging "
-                    "(copy the command from the tray popup, or use Launch Browser)."
+                    "(copy the command from the tray popup)."
                 )
                 print(f"[scrape] abort: {err}", flush=True)
                 return UsageSnapshot(

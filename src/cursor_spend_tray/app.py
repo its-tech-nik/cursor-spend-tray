@@ -304,7 +304,7 @@ class TrayContextMenu(QFrame):
         self._dismiss_armed = False
         self._arm_timer.stop()
         self.close_submenus()
-        # Drop empty separators left by hidden actions (e.g. Launch Browser).
+        # Drop empty separators left by hidden actions.
         self._refresh_separator_visibility()
         self.adjustSize()
         screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
@@ -602,8 +602,6 @@ class TrayApp(QWidget):
         self._ctx = TrayContextMenu()
         self._refresh_action = QAction("Refresh now", self)
         self._refresh_action.triggered.connect(self._refresh_now)
-        self._launch_action = QAction("Launch Browser", self)
-        self._launch_action.triggered.connect(self._launch_browser)
         self._autostart_action = QAction("Launch at login", self)
         self._autostart_action.setCheckable(True)
         self._autostart_action.setChecked(autostart.is_enabled())
@@ -621,14 +619,13 @@ class TrayApp(QWidget):
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         self._ctx.add_action(self._refresh_action)
-        self._ctx.add_action(self._launch_action)
         self._ctx.add_separator()
         self._ctx.add_submenu("Refresh interval", self._poll_actions)
         self._ctx.add_action(self._autostart_action)
         self._ctx.add_separator()
         self._ctx.add_action(quit_action)
 
-        # Spinner animation (used while waiting for Zen to start after Launch Browser)
+        # Spinner animation (used while waiting for the automation browser to start)
         self._spin_angle = 0.0
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(_SPIN_INTERVAL_MS)
@@ -646,6 +643,10 @@ class TrayApp(QWidget):
         self.scheduler.status_changed.connect(self.popup.set_status)
         self.scheduler.refreshing_changed.connect(self._on_refreshing)
         self.scheduler.start()
+
+        # On first run, start the dedicated browser so scrape + login checks can proceed.
+        if not self.config.browser_is_running():
+            QTimer.singleShot(0, self._launch_browser)
 
     def _apply_snapshot(self, snap: UsageSnapshot) -> None:
         # If we're still in the launch-wait loop and the scrape came back unavailable,
@@ -665,7 +666,6 @@ class TrayApp(QWidget):
             disconnected, self.config.zen_launch_command()
         )
         self._refresh_action.setVisible(not disconnected)
-        self._launch_action.setVisible(not self.config.browser_is_running())
         self.tray.set_icon(
             make_tray_icon(
                 snap.cursor_models_pct,
@@ -749,11 +749,9 @@ class TrayApp(QWidget):
         except OSError as exc:
             log.exception("Failed to launch headed %s for login", self.config.browser.display_name)
             self._login_launch_pending = False
-            self._launch_action.setVisible(not self.config.browser_is_running())
             self.popup.set_status(f"Could not open sign-in window: {exc}")
             return
 
-        self._launch_action.setVisible(False)
         self._start_spinner()
         self.popup.set_status(
             f"Sign in to Cursor in the {self.config.browser.display_name} window…"
@@ -775,7 +773,6 @@ class TrayApp(QWidget):
             self._headless_switch_pending = False
             self._stop_spinner()
             self.popup.set_status(f"Could not restart {name} in headless mode.")
-            self._launch_action.setVisible(not self.config.browser_is_running())
             return
         argv = self.config.browser_launch_argv(headless=True)
         try:
@@ -790,9 +787,7 @@ class TrayApp(QWidget):
             self._headless_switch_pending = False
             self._stop_spinner()
             self.popup.set_status(f"Could not relaunch headless {name}: {exc}")
-            self._launch_action.setVisible(True)
             return
-        self._launch_action.setVisible(False)
         self._arm_launch_retry()
 
     def _on_activated(self, pos: QPoint) -> None:
@@ -813,8 +808,6 @@ class TrayApp(QWidget):
         if self._ctx.isVisible():
             self._ctx.hide()
             return
-        # Re-check dedicated browser each time the menu opens so Launch Browser stays accurate.
-        self._launch_action.setVisible(not self.config.browser_is_running())
         self._autostart_action.blockSignals(True)
         self._autostart_action.setChecked(autostart.is_enabled())
         self._autostart_action.blockSignals(False)
@@ -921,8 +914,8 @@ class TrayApp(QWidget):
         self.tray.set_icon(make_spinner_icon(self._spin_angle))
 
     def _launch_browser(self) -> None:
+        """Start the dedicated automation browser (headless) and poll until reachable."""
         if self.config.browser_is_running():
-            self._launch_action.setVisible(False)
             return
 
         argv = self.config.browser_launch_argv()
@@ -933,13 +926,16 @@ class TrayApp(QWidget):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        except OSError as exc:
+        except OSError:
             log.exception("Failed to launch %s", self.config.browser.display_name)
-            self._launch_action.setVisible(not self.config.browser_is_running())
+            self.popup.set_status(
+                f"Could not start {self.config.browser.display_name} "
+                "(see popup for the launch command)."
+            )
             return
 
-        self._launch_action.setVisible(False)
         self._start_spinner()
+        self.popup.set_status(f"Starting {self.config.browser.display_name}…")
         self._arm_launch_retry()
 
     def _arm_launch_retry(self) -> None:
@@ -951,7 +947,6 @@ class TrayApp(QWidget):
 
     def _refresh_after_launch(self) -> None:
         """Probe remote debugging; if up scrape (spinner stops on snapshot), otherwise retry."""
-        self._launch_action.setVisible(not self.config.browser_is_running())
         self.scheduler.probe_or_refresh(
             on_unavailable=self._reschedule_launch_retry,
         )

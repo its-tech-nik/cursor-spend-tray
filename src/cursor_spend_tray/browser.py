@@ -127,7 +127,7 @@ def resolve_automation_browser() -> BrowserInfo:
             log.info("No Chromium fallback; using %s (%s)", info.display_name, info.binary)
             return info
 
-    # Last resort: keep today's Zen-oriented defaults so Launch Browser still shows a command.
+    # Last resort: keep today's Zen-oriented defaults so the popup still shows a command.
     zen = _resolve_binary(("zen-browser", "zen")) or "zen-browser"
     return BrowserInfo(
         family=BrowserFamily.FIREFOX,

@@ -13,7 +13,7 @@ It polls on a configurable interval (default **8 minutes**; choose 1 / 2 / 4 / 8
 - **Stack:** Python + PyQt6 tray popup (Plasma StatusNotifierItem for icon click coords)
 - **Browser:** Detects your XDG default browser; Firefox-family uses WebDriver BiDi, Chromium-family (Chrome / Brave / Helium / …) uses CDP, both on `127.0.0.1:9222`
 - **Fallback:** If the default is missing/unsupported, prefers an installed Chromium browser, then Firefox/Zen
-- **Launcher:** tray **Launch Browser** / copyable command starts a dedicated automation profile
+- **Launcher:** on startup the app starts a dedicated automation profile (popup still shows a copyable command if needed)
 - **Dedicated spending tab:** the app reuses/reloads that tab
 - **Countdown:** popup shows time until next poll; **click the timer to refresh now**
 
