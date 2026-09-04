@@ -91,7 +91,8 @@ class _StatusNotifierAdaptor(QDBusAbstractAdaptor):
 
     @pyqtSlot(int, int)
     def SecondaryActivate(self, x: int, y: int) -> None:
-        self._item().handle_activate(x, y)
+        # Plasma: typically middle-click on the tray icon.
+        self._item().handle_secondary_activate(x, y)
 
     @pyqtSlot(int, int)
     def ContextMenu(self, x: int, y: int) -> None:
@@ -110,6 +111,7 @@ class StatusNotifierItem(QObject):
     """Tray icon via org.kde.StatusNotifierItem (Plasma-compatible)."""
 
     activated = pyqtSignal(QPoint)
+    secondary_activated = pyqtSignal(QPoint)
     context_menu_requested = pyqtSignal(QPoint)
 
     def __init__(
@@ -206,6 +208,10 @@ class StatusNotifierItem(QObject):
     def handle_activate(self, x: int, y: int) -> None:
         log.info("SNI Activate at %s,%s", x, y)
         self.activated.emit(QPoint(x, y))
+
+    def handle_secondary_activate(self, x: int, y: int) -> None:
+        log.info("SNI SecondaryActivate at %s,%s", x, y)
+        self.secondary_activated.emit(QPoint(x, y))
 
     def handle_context_menu(self, x: int, y: int) -> None:
         log.info("SNI ContextMenu at %s,%s", x, y)

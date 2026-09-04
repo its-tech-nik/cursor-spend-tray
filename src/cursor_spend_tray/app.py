@@ -597,6 +597,7 @@ class TrayApp(QWidget):
 
         self.tray = StatusNotifierItem("Cursor Spend", "cursor-spend-tray", self)
         self.tray.activated.connect(self._on_activated)
+        self.tray.secondary_activated.connect(self._on_secondary_activated)
         self.tray.context_menu_requested.connect(self._on_context_menu)
 
         self._ctx = TrayContextMenu()
@@ -800,6 +801,15 @@ class TrayApp(QWidget):
             self.popup.hide()
             return
         self.popup.show_at(self._popup_position())
+
+    def _on_secondary_activated(self, pos: QPoint) -> None:
+        """Middle-click: refresh usage and open the popup."""
+        self._anchor_pos = QPoint(pos)
+        if self._ctx.isVisible():
+            self._ctx.hide()
+        self._refresh_now()
+        if not self.popup.isVisible():
+            self.popup.show_at(self._popup_position())
 
     def _on_context_menu(self, pos: QPoint) -> None:
         self._anchor_pos = QPoint(pos)
