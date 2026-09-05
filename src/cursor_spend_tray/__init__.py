@@ -46,6 +46,26 @@ def _install_posix_quit_handlers(app) -> None:
     app._posix_signal_wake_timer = wake  # type: ignore[attr-defined]
 
 
+def _acquire_single_instance_lock():
+    """Return a held QLockFile, or None if another instance already owns it.
+
+    Plasma session restore plus XDG autostart can start the tray twice; the
+    second process should exit quietly instead of registering another SNI icon.
+    """
+    from PyQt6.QtCore import QLockFile
+
+    from .config import APP_NAME, data_dir
+
+    root = data_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(root / f"{APP_NAME}.lock"))
+    # Allow recovering a lock left behind after a crash (pid no longer alive).
+    lock.setStaleLockTime(30_000)
+    if not lock.tryLock(0):
+        return None
+    return lock
+
+
 def main() -> None:
     _prefer_xcb_on_wayland()
 
@@ -60,10 +80,19 @@ def main() -> None:
     from .app import TrayApp
     from .config import AppConfig
 
+    instance_lock = _acquire_single_instance_lock()
+    if instance_lock is None:
+        logging.getLogger(__name__).info(
+            "Another Cursor Spend Tray instance is already running; exiting."
+        )
+        sys.exit(0)
+
     QApplication.setQuitOnLastWindowClosed(False)
     app = QApplication(sys.argv)
     app.setApplicationName("Cursor Spend Tray")
     app.setOrganizationName("cursor-spend-tray")
+    # Keep the lock alive for the process lifetime (unlocked on destroy/quit).
+    app._instance_lock = instance_lock  # type: ignore[attr-defined]
     icon_path = Path(__file__).resolve().parent / "resources" / "cursor-spend-tray.svg"
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
