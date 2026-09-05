@@ -1,7 +1,19 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QRectF, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
+from dataclasses import dataclass
+
+from PyQt6.QtCore import (
+    QEvent,
+    QMimeData,
+    QObject,
+    QPoint,
+    QPointF,
+    QRectF,
+    QTimer,
+    Qt,
+    pyqtSignal,
+)
+from PyQt6.QtGui import QColor, QDrag, QFont, QGuiApplication, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -12,7 +24,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .config import UsageSnapshot
+from .config import (
+    UsageSnapshot,
+    load_popup_panel_order,
+    save_popup_panel_order,
+)
+from .sdk_stats import SdkHabitsBatch, SdkHabitsPreview, collect_habits_preview
+from .vscdb_stats import VscdbHabitsPreview, collect_vscdb_habits_preview
+
+PANEL_MIME = "application/x-cursor-spend-tray-panel"
 
 
 class CopyableCommand(QLabel):
@@ -241,6 +261,799 @@ class _RingGlyph(QWidget):
         painter.end()
 
 
+def _habits_chip(text: str, *, fg: str, bg: str, border: str) -> QLabel:
+    """Small status/metric pill used in the habits preview."""
+    chip = QLabel(text)
+    font = QFont()
+    font.setPointSize(8)
+    font.setWeight(QFont.Weight.DemiBold)
+    chip.setFont(font)
+    chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    chip.setStyleSheet(
+        f"""
+        QLabel {{
+            color: {fg};
+            background: {bg};
+            border: 1px solid {border};
+            border-radius: 7px;
+            padding: 3px 8px;
+        }}
+        """
+    )
+    return chip
+
+
+def _habits_metric_row(label: str) -> tuple[QWidget, QLabel]:
+    """Label + value row for a single habit metric."""
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(8)
+
+    key = QLabel(label)
+    key_font = QFont()
+    key_font.setPointSize(9)
+    key.setFont(key_font)
+    key.setStyleSheet("color: #7E8694; background: transparent; border: none;")
+
+    value = QLabel("—")
+    value_font = QFont()
+    value_font.setPointSize(9)
+    value_font.setWeight(QFont.Weight.Medium)
+    value.setFont(value_font)
+    value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    value.setStyleSheet("color: #E4E7EC; background: transparent; border: none;")
+    value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    layout.addWidget(key, stretch=0)
+    layout.addStretch(1)
+    layout.addWidget(value, stretch=0)
+    return row, value
+
+
+@dataclass
+class ChartSeries:
+    """One metric line for MultiSeriesHistoryChart."""
+
+    name: str
+    color: str
+    values: list[float | None]
+    unit: str = ""
+
+
+def _format_chart_value(value: float | None, unit: str = "") -> str:
+    if value is None:
+        return "—"
+    if unit == "%":
+        return f"{value:.0f}%"
+    if abs(value) >= 1000:
+        return f"{value:,.0f}{unit}"
+    if abs(value - round(value)) < 1e-6:
+        return f"{value:.0f}{unit}"
+    return f"{value:g}{unit}"
+
+
+class MultiSeriesHistoryChart(QWidget):
+    """Single multi-line chart; series are min–max normalized; hover shows raw values."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._labels: list[str] = []
+        self._weights: list[int] = []
+        self._series: list[ChartSeries] = []
+        self._hover_index: int | None = None
+        self._plot = QRectF()
+        self.setMouseTracking(True)
+        self.setMinimumHeight(150)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_data(
+        self,
+        labels: list[str],
+        series: list[ChartSeries],
+        *,
+        weights: list[int] | None = None,
+        caption: str = "",
+    ) -> None:
+        self._labels = list(labels)
+        self._series = list(series)
+        self._weights = list(weights or [])
+        self._hover_index = None
+        self.setToolTip(caption or "Hover a billing period for exact values")
+        self.update()
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        self._hover_index = None
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001
+        if len(self._labels) < 2 or self._plot.width() <= 0:
+            return
+        x = event.position().x() if hasattr(event, "position") else event.x()
+        n = len(self._labels)
+        rel = (x - self._plot.left()) / max(1.0, self._plot.width())
+        idx = int(round(rel * (n - 1)))
+        idx = max(0, min(n - 1, idx))
+        if idx != self._hover_index:
+            self._hover_index = idx
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def _normalized_points(self, values: list[float | None]) -> list[QPointF | None]:
+        numeric = [v for v in values if v is not None]
+        if not numeric:
+            return [None] * len(values)
+        lo = min(numeric)
+        hi = max(numeric)
+        if hi <= lo:
+            hi = lo + 1.0
+        pad = (hi - lo) * 0.08
+        lo -= pad
+        hi += pad
+        n = len(values)
+        out: list[QPointF | None] = []
+        for i, value in enumerate(values):
+            if value is None:
+                out.append(None)
+                continue
+            x = (
+                self._plot.left()
+                if n == 1
+                else self._plot.left() + (self._plot.width() * i / (n - 1))
+            )
+            y = self._plot.bottom() - ((value - lo) / (hi - lo)) * self._plot.height()
+            out.append(QPointF(x, y))
+        return out
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        painter.fillRect(self.rect(), QColor("#141820"))
+        painter.setPen(QPen(QColor("#243041"), 1))
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 8, 8)
+
+        # Legend
+        legend_y = 8.0
+        lx = 10.0
+        leg_font = QFont()
+        leg_font.setPointSize(7)
+        painter.setFont(leg_font)
+        for series in self._series:
+            painter.setBrush(QColor(series.color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QPointF(lx + 3, legend_y + 5), 3, 3)
+            painter.setPen(QColor("#9AA6B8"))
+            painter.drawText(QRectF(lx + 10, legend_y, 88, 12), series.name)
+            lx += 96
+            if lx > self.width() - 90:
+                lx = 10.0
+                legend_y += 14
+
+        self._plot = QRectF(12, legend_y + 18, self.width() - 24, self.height() - legend_y - 34)
+
+        if len(self._labels) < 2 or not self._series:
+            painter.setPen(QColor("#5E6775"))
+            note = QFont()
+            note.setPointSize(8)
+            painter.setFont(note)
+            painter.drawText(
+                self._plot,
+                int(Qt.AlignmentFlag.AlignCenter),
+                "Need 2+ billing periods",
+            )
+            painter.end()
+            return
+
+        # Grid
+        painter.setPen(QPen(QColor("#1E2633"), 1, Qt.PenStyle.DotLine))
+        for frac in (0.25, 0.5, 0.75):
+            y = self._plot.top() + self._plot.height() * frac
+            painter.drawLine(
+                QPointF(self._plot.left(), y), QPointF(self._plot.right(), y)
+            )
+
+        for series in self._series:
+            points = self._normalized_points(series.values)
+            usable = [p for p in points if p is not None]
+            if len(usable) < 2:
+                continue
+            pen = QPen(QColor(series.color), 1.9)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(pen)
+            path = QPainterPath()
+            started = False
+            for pt in points:
+                if pt is None:
+                    started = False
+                    continue
+                if not started:
+                    path.moveTo(pt)
+                    started = True
+                else:
+                    path.lineTo(pt)
+            painter.drawPath(path)
+            painter.setBrush(QColor(series.color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            for pt in points:
+                if pt is not None:
+                    painter.drawEllipse(pt, 2.2, 2.2)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        # Axis labels
+        axis = QFont()
+        axis.setPointSize(7)
+        painter.setFont(axis)
+        painter.setPen(QColor("#5E6775"))
+        painter.drawText(
+            QRectF(self._plot.left(), self.height() - 14, self._plot.width() * 0.55, 12),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            f"{self._labels[0]} → now",
+        )
+
+        # Hover crosshair + value card
+        if self._hover_index is not None and 0 <= self._hover_index < len(self._labels):
+            idx = self._hover_index
+            n = len(self._labels)
+            x = (
+                self._plot.left()
+                if n == 1
+                else self._plot.left() + (self._plot.width() * idx / (n - 1))
+            )
+            painter.setPen(QPen(QColor("#6B7C93"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(
+                QPointF(x, self._plot.top()), QPointF(x, self._plot.bottom())
+            )
+
+            lines = [self._labels[idx]]
+            if idx < len(self._weights):
+                lines[0] += f" · {self._weights[idx]}"
+            for series in self._series:
+                raw = series.values[idx] if idx < len(series.values) else None
+                lines.append(
+                    f"{series.name}: {_format_chart_value(raw, series.unit)}"
+                )
+
+            card_font = QFont()
+            card_font.setPointSize(8)
+            painter.setFont(card_font)
+            metrics = painter.fontMetrics()
+            width = max(metrics.horizontalAdvance(line) for line in lines) + 16
+            height = metrics.height() * len(lines) + 10
+            card_x = x + 10
+            if card_x + width > self.width() - 8:
+                card_x = x - width - 10
+            card_x = max(8.0, card_x)
+            card_y = self._plot.top() + 4
+            card = QRectF(card_x, card_y, width, height)
+            painter.setBrush(QColor(20, 24, 32, 230))
+            painter.setPen(QPen(QColor("#3A465A"), 1))
+            painter.drawRoundedRect(card, 6, 6)
+            painter.setPen(QColor("#E4E7EC"))
+            ty = card.top() + 5
+            for i, line in enumerate(lines):
+                if i == 0:
+                    painter.setPen(QColor("#D5DEEA"))
+                elif i - 1 < len(self._series):
+                    painter.setPen(QColor(self._series[i - 1].color))
+                painter.drawText(
+                    QRectF(card.left() + 8, ty, card.width() - 12, metrics.height()),
+                    line,
+                )
+                ty += metrics.height()
+
+        painter.end()
+
+
+class HabitsHistoryCharts(QWidget):
+    """SDK habit trends for subscription billing periods."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        caption = QLabel("Trends by billing period · older → newer")
+        cap_font = QFont()
+        cap_font.setPointSize(8)
+        caption.setFont(cap_font)
+        caption.setStyleSheet("color: #6F7887; background: transparent; border: none;")
+        self._caption = caption
+        self._chart = MultiSeriesHistoryChart()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(caption)
+        layout.addWidget(self._chart)
+
+    def apply_history(self, history: tuple[SdkHabitsBatch, ...]) -> None:
+        if not history:
+            self.hide()
+            return
+        self.show()
+        total_runs = sum(b.runs for b in history)
+        self._caption.setText(
+            f"Trends · {len(history)} billing periods · {total_runs} runs · older → newer"
+        )
+        labels = [b.label for b in history]
+        self._chart.set_data(
+            labels,
+            [
+                ChartSeries(
+                    "Friction %",
+                    "#8BA4C7",
+                    [
+                        float(b.friction_rate_pct)
+                        if b.friction_rate_pct is not None
+                        else None
+                        for b in history
+                    ],
+                    unit="%",
+                ),
+                ChartSeries(
+                    "Shell fail %",
+                    "#D9897A",
+                    [
+                        float(b.shell_fail_pct)
+                        if b.shell_fail_pct is not None
+                        else None
+                        for b in history
+                    ],
+                    unit="%",
+                ),
+                ChartSeries(
+                    "Median tokens",
+                    "#A8C3A4",
+                    [
+                        float(b.median_total_tokens)
+                        if b.median_total_tokens is not None
+                        else None
+                        for b in history
+                    ],
+                ),
+                ChartSeries(
+                    "Median tools",
+                    "#D0B56C",
+                    [
+                        float(b.median_tools_per_run)
+                        if b.median_tools_per_run is not None
+                        else None
+                        for b in history
+                    ],
+                ),
+            ],
+            weights=[b.runs for b in history],
+            caption="Hover a period for exact values (lines are normalized per metric)",
+        )
+
+
+class AgentHabitsPreview(QFrame):
+    """Compact local SDK habit stats — review preview, separate from spend gauges."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("agentHabits")
+        self.setStyleSheet(
+            """
+            QFrame#agentHabits {
+                background: #16191E;
+                border: 1px solid #2A313C;
+                border-radius: 10px;
+            }
+            """
+        )
+
+        title = QLabel("Agent habits")
+        title_font = QFont()
+        title_font.setPointSize(11)
+        title_font.setWeight(QFont.Weight.DemiBold)
+        title.setFont(title_font)
+        title.setStyleSheet("color: #E8ECF2; background: transparent; border: none;")
+
+        self._badge = _habits_chip(
+            "preview",
+            fg="#9BB0C9",
+            bg="#1E2530",
+            border="#334155",
+        )
+
+        self._window = QLabel("")
+        window_font = QFont()
+        window_font.setPointSize(8)
+        self._window.setFont(window_font)
+        self._window.setStyleSheet(
+            "color: #6F7887; background: transparent; border: none;"
+        )
+        self._window.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        header.addWidget(title, stretch=0)
+        header.addWidget(self._badge, stretch=0)
+        header.addStretch(1)
+        header.addWidget(self._window, stretch=0)
+
+        self._chip_ok = _habits_chip("— ok", fg="#A8C3A4", bg="#1A2420", border="#2F4638")
+        self._chip_cancel = _habits_chip(
+            "— cancel", fg="#D0B56C", bg="#242018", border="#4A4028"
+        )
+        self._chip_err = _habits_chip(
+            "— err", fg="#D9897A", bg="#261C1A", border="#4A322E"
+        )
+        self._chip_friction = _habits_chip(
+            "— friction", fg="#8BA4C7", bg="#1A2030", border="#2F3B52"
+        )
+
+        chips = QHBoxLayout()
+        chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(6)
+        chips.addWidget(self._chip_ok)
+        chips.addWidget(self._chip_cancel)
+        chips.addWidget(self._chip_err)
+        chips.addWidget(self._chip_friction)
+        chips.addStretch(1)
+
+        self._tokens_row, self._tokens_value = _habits_metric_row("Median tokens")
+        self._tools_row, self._tools_value = _habits_metric_row("Median tools / run")
+        self._shell_row, self._shell_value = _habits_metric_row("Shell ≠ 0")
+        self._incomplete_row, self._incomplete_value = _habits_metric_row(
+            "Incomplete tools"
+        )
+
+        metrics = QVBoxLayout()
+        metrics.setContentsMargins(0, 0, 0, 0)
+        metrics.setSpacing(4)
+        metrics.addWidget(self._tokens_row)
+        metrics.addWidget(self._tools_row)
+        metrics.addWidget(self._shell_row)
+        metrics.addWidget(self._incomplete_row)
+
+        self._history = HabitsHistoryCharts()
+        self._history.hide()
+
+        self._insight = QLabel("")
+        insight_font = QFont()
+        insight_font.setPointSize(9)
+        self._insight.setFont(insight_font)
+        self._insight.setWordWrap(True)
+        self._insight.setStyleSheet(
+            """
+            QLabel {
+                color: #B7C0CE;
+                background: #1B2230;
+                border: 1px solid #2C3648;
+                border-left: 3px solid #8BA4C7;
+                border-radius: 8px;
+                padding: 7px 10px;
+            }
+            """
+        )
+        self._insight.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._insight.hide()
+
+        self._fallback = QLabel("")
+        fallback_font = QFont()
+        fallback_font.setPointSize(9)
+        self._fallback.setFont(fallback_font)
+        self._fallback.setWordWrap(True)
+        self._fallback.setStyleSheet(
+            "color: #8F8F8F; background: transparent; border: none;"
+        )
+        self._fallback.hide()
+
+        self._content = QWidget()
+        content_layout = QVBoxLayout(self._content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        content_layout.addLayout(chips)
+        content_layout.addLayout(metrics)
+        content_layout.addWidget(self._history)
+        content_layout.addWidget(self._insight)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 11, 12, 11)
+        layout.setSpacing(8)
+        layout.addLayout(header)
+        layout.addWidget(self._content)
+        layout.addWidget(self._fallback)
+
+    def apply_preview(self, preview: SdkHabitsPreview) -> None:
+        self.setToolTip(
+            "Local Cursor SDK run stats from ~/.cursor/projects/*/sdk-agent-store "
+            "(read-only). Use this to review prompt friction — not Pro spend."
+        )
+
+        if not preview.available or preview.runs_considered == 0:
+            message = (
+                preview.error_message
+                or (preview.lines[0] if preview.lines else "Unavailable")
+            )
+            self._content.hide()
+            self._window.setText("")
+            self._fallback.setText(message)
+            self._fallback.show()
+            return
+
+        self._fallback.hide()
+        self._content.show()
+        self._window.setText(preview.window_label)
+
+        self._chip_ok.setText(f"{preview.finished} ok")
+        self._chip_cancel.setText(f"{preview.cancelled} cancel")
+        self._chip_err.setText(f"{preview.error} err")
+        if preview.friction_rate_pct is None:
+            self._chip_friction.setText("— friction")
+        else:
+            self._chip_friction.setText(f"{preview.friction_rate_pct}% friction")
+
+        if preview.median_total_tokens is None:
+            self._tokens_value.setText("—")
+        else:
+            self._tokens_value.setText(f"{preview.median_total_tokens:,}")
+
+        if preview.median_tools_per_run is None:
+            self._tools_value.setText("—")
+        else:
+            self._tools_value.setText(f"{preview.median_tools_per_run:g}")
+
+        if preview.shell_total:
+            rate = round(100 * preview.shell_nonzero / preview.shell_total)
+            self._shell_value.setText(
+                f"{preview.shell_nonzero}/{preview.shell_total} ({rate}%)"
+            )
+            shell_color = "#D9897A" if rate >= 15 else (
+                "#D0B56C" if rate >= 8 else "#A8C3A4"
+            )
+            self._shell_value.setStyleSheet(
+                f"color: {shell_color}; background: transparent; border: none;"
+            )
+        else:
+            self._shell_value.setText("0")
+            self._shell_value.setStyleSheet(
+                "color: #A8C3A4; background: transparent; border: none;"
+            )
+
+        self._incomplete_value.setText(str(preview.incomplete_tools))
+        incomplete_color = (
+            "#D0B56C" if preview.incomplete_tools else "#E4E7EC"
+        )
+        self._incomplete_value.setStyleSheet(
+            f"color: {incomplete_color}; background: transparent; border: none;"
+        )
+
+        self._history.apply_history(preview.history)
+
+        if preview.insight:
+            self._insight.setText(preview.insight)
+            self._insight.show()
+        else:
+            self._insight.hide()
+
+
+class ComposerHistoryPreview(QFrame):
+    """Longer-range composer/tool trends from state.vscdb."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("composerHistory")
+        self.setStyleSheet(
+            """
+            QFrame#composerHistory {
+                background: #15181C;
+                border: 1px solid #2A313C;
+                border-radius: 10px;
+            }
+            """
+        )
+
+        title = QLabel("Composer history")
+        title_font = QFont()
+        title_font.setPointSize(11)
+        title_font.setWeight(QFont.Weight.DemiBold)
+        title.setFont(title_font)
+        title.setStyleSheet("color: #E8ECF2; background: transparent; border: none;")
+
+        badge = _habits_chip(
+            "state.vscdb",
+            fg="#9BB0C9",
+            bg="#1E2530",
+            border="#334155",
+        )
+
+        self._window = QLabel("")
+        window_font = QFont()
+        window_font.setPointSize(8)
+        self._window.setFont(window_font)
+        self._window.setStyleSheet(
+            "color: #6F7887; background: transparent; border: none;"
+        )
+        self._window.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        header.addWidget(title, stretch=0)
+        header.addWidget(badge, stretch=0)
+        header.addStretch(1)
+        header.addWidget(self._window, stretch=0)
+
+        self._chip_composers = _habits_chip(
+            "— composers", fg="#A8C3A4", bg="#1A2420", border="#2F4638"
+        )
+        self._chip_abort = _habits_chip(
+            "— abort", fg="#D0B56C", bg="#242018", border="#4A4028"
+        )
+        self._chip_tool = _habits_chip(
+            "— tool err", fg="#D9897A", bg="#261C1A", border="#4A322E"
+        )
+        self._chip_accept = _habits_chip(
+            "— accept", fg="#8BA4C7", bg="#1A2030", border="#2F3B52"
+        )
+
+        chips = QHBoxLayout()
+        chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(6)
+        chips.addWidget(self._chip_composers)
+        chips.addWidget(self._chip_abort)
+        chips.addWidget(self._chip_tool)
+        chips.addWidget(self._chip_accept)
+        chips.addStretch(1)
+
+        caption = QLabel("Billing periods from state.vscdb · older → newer")
+        cap_font = QFont()
+        cap_font.setPointSize(8)
+        caption.setFont(cap_font)
+        caption.setStyleSheet("color: #6F7887; background: transparent; border: none;")
+        self._caption = caption
+        self._chart = MultiSeriesHistoryChart()
+
+        self._insight = QLabel("")
+        insight_font = QFont()
+        insight_font.setPointSize(9)
+        self._insight.setFont(insight_font)
+        self._insight.setWordWrap(True)
+        self._insight.setStyleSheet(
+            """
+            QLabel {
+                color: #B7C0CE;
+                background: #1B2230;
+                border: 1px solid #2C3648;
+                border-left: 3px solid #D0B56C;
+                border-radius: 8px;
+                padding: 7px 10px;
+            }
+            """
+        )
+        self._insight.hide()
+
+        self._fallback = QLabel("")
+        fallback_font = QFont()
+        fallback_font.setPointSize(9)
+        self._fallback.setFont(fallback_font)
+        self._fallback.setWordWrap(True)
+        self._fallback.setStyleSheet(
+            "color: #8F8F8F; background: transparent; border: none;"
+        )
+        self._fallback.hide()
+
+        self._content = QWidget()
+        content_layout = QVBoxLayout(self._content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        content_layout.addLayout(chips)
+        content_layout.addWidget(self._caption)
+        content_layout.addWidget(self._chart)
+        content_layout.addWidget(self._insight)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 11, 12, 11)
+        layout.setSpacing(8)
+        layout.addLayout(header)
+        layout.addWidget(self._content)
+        layout.addWidget(self._fallback)
+
+    def apply_preview(self, preview: VscdbHabitsPreview) -> None:
+        self.setToolTip(
+            "Longer-range signals from ~/.config/Cursor/User/globalStorage/state.vscdb "
+            "(read-only). Buckets follow subscription renewal day. "
+            "Not Pro spend, and not the same as SDK run habits."
+        )
+        periods = preview.periods
+        if not preview.available or len(periods) < 2:
+            message = preview.error_message or "Not enough composer history yet"
+            self._content.hide()
+            self._window.setText("")
+            self._fallback.setText(message)
+            self._fallback.show()
+            return
+
+        self._fallback.hide()
+        self._content.show()
+        self._window.setText(f"{preview.earliest} → {preview.latest}")
+        self._caption.setText(
+            f"Billing periods · {len(periods)} · {preview.composers} composers "
+            "· older → newer · hover for values"
+        )
+
+        latest = periods[-1]
+        self._chip_composers.setText(f"{preview.composers} composers")
+        if latest.abort_rate_pct is None:
+            self._chip_abort.setText("— abort")
+        else:
+            self._chip_abort.setText(f"{latest.abort_rate_pct}% abort")
+        if latest.tool_error_rate_pct is None:
+            self._chip_tool.setText("— tool err")
+        else:
+            self._chip_tool.setText(f"{latest.tool_error_rate_pct}% tool err")
+        if latest.accept_rate_pct is None:
+            self._chip_accept.setText("— accept")
+        else:
+            self._chip_accept.setText(f"{latest.accept_rate_pct}% accept")
+
+        labels = [p.label for p in periods]
+        self._chart.set_data(
+            labels,
+            [
+                ChartSeries(
+                    "Composers",
+                    "#A8C3A4",
+                    [float(p.composers) for p in periods],
+                ),
+                ChartSeries(
+                    "Abort %",
+                    "#D0B56C",
+                    [
+                        float(p.abort_rate_pct)
+                        if p.abort_rate_pct is not None
+                        else None
+                        for p in periods
+                    ],
+                    unit="%",
+                ),
+                ChartSeries(
+                    "Tool error %",
+                    "#D9897A",
+                    [
+                        float(p.tool_error_rate_pct)
+                        if p.tool_error_rate_pct is not None
+                        else None
+                        for p in periods
+                    ],
+                    unit="%",
+                ),
+                ChartSeries(
+                    "Accept %",
+                    "#8BA4C7",
+                    [
+                        float(p.accept_rate_pct)
+                        if p.accept_rate_pct is not None
+                        else None
+                        for p in periods
+                    ],
+                    unit="%",
+                ),
+            ],
+            weights=[p.composers for p in periods],
+            caption="Hover a period for exact values (lines are normalized per metric)",
+        )
+
+        if preview.insight:
+            self._insight.setText(preview.insight)
+            self._insight.show()
+        else:
+            self._insight.hide()
+
+
 class CountdownLabel(QLabel):
     """Clickable countdown — click triggers an immediate refresh."""
 
@@ -282,6 +1095,234 @@ class CountdownLabel(QLabel):
             return
         minutes, secs = divmod(max(0, seconds), 60)
         self.setText(f"Next update in {minutes:02d}:{secs:02d} · click to refresh")
+
+
+class DraggablePanel(QFrame):
+    """Content card that can be reordered by dragging anywhere on the panel."""
+
+    def __init__(
+        self,
+        panel_id: str,
+        body: QWidget,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.panel_id = panel_id
+        self.body = body
+        self._press_global: QPoint | None = None
+        self.setObjectName("draggablePanel")
+        self.setAcceptDrops(False)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Drag to reorder panels")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(body)
+        self.installEventFilter(self)
+        body.installEventFilter(self)
+        for child in body.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def _widget_blocks_drag(self, widget: QObject | None) -> bool:
+        """Clicks on these controls should not start a panel reorder."""
+        current = widget
+        while isinstance(current, QObject):
+            if isinstance(current, (CopyableCommand, CountdownLabel)):
+                return True
+            current = current.parent()
+        return False
+
+    def _start_panel_drag(self) -> None:
+        self._press_global = None
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(PANEL_MIME, self.panel_id.encode("utf-8"))
+        drag.setMimeData(mime)
+        pix = self.grab()
+        if not pix.isNull():
+            scaled = pix.scaledToWidth(
+                min(280, pix.width()), Qt.TransformationMode.SmoothTransformation
+            )
+            drag.setPixmap(scaled)
+            drag.setHotSpot(QPoint(16, 16))
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        drag.exec(Qt.DropAction.MoveAction)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: ANN001
+        et = event.type()
+        if et == QEvent.Type.ChildAdded:
+            child = event.child()  # type: ignore[attr-defined]
+            if isinstance(child, QWidget):
+                child.installEventFilter(self)
+                for nested in child.findChildren(QWidget):
+                    nested.installEventFilter(self)
+            return False
+
+        if et == QEvent.Type.MouseButtonPress:
+            if (
+                getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton
+                and not self._widget_blocks_drag(obj)
+            ):
+                try:
+                    self._press_global = event.globalPosition().toPoint()
+                except AttributeError:
+                    self._press_global = event.globalPos()
+            return False
+
+        if et == QEvent.Type.MouseButtonRelease:
+            self._press_global = None
+            return False
+
+        if et == QEvent.Type.MouseMove and self._press_global is not None:
+            buttons = getattr(event, "buttons", lambda: Qt.MouseButton.NoButton)()
+            if not (buttons & Qt.MouseButton.LeftButton):
+                self._press_global = None
+                return False
+            try:
+                current = event.globalPosition().toPoint()
+            except AttributeError:
+                current = event.globalPos()
+            if (current - self._press_global).manhattanLength() < QApplication.startDragDistance():
+                return False
+            self._start_panel_drag()
+            return True
+
+        return False
+
+
+class ReorderablePanelHost(QWidget):
+    """Vertical stack of DraggablePanel widgets with drag-and-drop reordering."""
+
+    order_changed = pyqtSignal(list)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._panels: dict[str, DraggablePanel] = {}
+        self._order: list[str] = []
+        self._drop_index: int | None = None
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(10)
+
+    def add_panel(self, panel: DraggablePanel) -> None:
+        self._panels[panel.panel_id] = panel
+        if panel.panel_id not in self._order:
+            self._order.append(panel.panel_id)
+        self._relayout()
+
+    def set_order(self, order: list[str]) -> None:
+        cleaned = [p for p in order if p in self._panels]
+        for key in self._panels:
+            if key not in cleaned:
+                cleaned.append(key)
+        self._order = cleaned
+        self._relayout()
+
+    def order(self) -> list[str]:
+        return list(self._order)
+
+    def panel(self, panel_id: str) -> DraggablePanel | None:
+        return self._panels.get(panel_id)
+
+    def _relayout(self) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(self)
+        for panel_id in self._order:
+            panel = self._panels.get(panel_id)
+            if panel is not None:
+                self._layout.addWidget(panel)
+
+    def _index_for_y(self, y: int) -> int:
+        if not self._order:
+            return 0
+        for i, panel_id in enumerate(self._order):
+            panel = self._panels[panel_id]
+            if not panel.isVisible():
+                continue
+            mid = panel.geometry().center().y()
+            if y < mid:
+                return i
+        return len(self._order)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: ANN001
+        if event.mimeData().hasFormat(PANEL_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: ANN001
+        if not event.mimeData().hasFormat(PANEL_MIME):
+            event.ignore()
+            return
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        self._drop_index = self._index_for_y(pos.y())
+        event.acceptProposedAction()
+        self.update()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: ANN001
+        self._drop_index = None
+        self.update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: ANN001
+        if not event.mimeData().hasFormat(PANEL_MIME):
+            event.ignore()
+            return
+        raw = bytes(event.mimeData().data(PANEL_MIME)).decode("utf-8")
+        if raw not in self._order:
+            event.ignore()
+            return
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        target = self._index_for_y(pos.y())
+        current = self._order.index(raw)
+        order = list(self._order)
+        order.pop(current)
+        if target > current:
+            target -= 1
+        target = max(0, min(len(order), target))
+        order.insert(target, raw)
+        self._drop_index = None
+        if order != self._order:
+            self._order = order
+            self._relayout()
+            self.order_changed.emit(self.order())
+        event.acceptProposedAction()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        super().paintEvent(event)
+        if self._drop_index is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        y = 0
+        visible = [pid for pid in self._order if self._panels[pid].isVisible()]
+        if self._drop_index <= 0:
+            y = 2
+        elif self._drop_index >= len(visible):
+            last = self._panels[visible[-1]] if visible else None
+            y = (last.geometry().bottom() - 2) if last is not None else self.height() - 2
+        else:
+            # Map drop index onto visible panels
+            count = 0
+            for panel_id in self._order:
+                panel = self._panels[panel_id]
+                if not panel.isVisible():
+                    continue
+                if count == self._drop_index:
+                    y = panel.geometry().top() - 4
+                    break
+                count += 1
+            else:
+                y = self.height() - 2
+        painter.setPen(QPen(QColor("#8BA4C7"), 2))
+        painter.drawLine(8, y, self.width() - 8, y)
+        painter.end()
 
 
 class SpendPopup(QFrame):
@@ -364,6 +1405,18 @@ class SpendPopup(QFrame):
         card_layout.addLayout(rings)
 
         self.browser_help = BrowserHelpBanner()
+        self.habits = AgentHabitsPreview()
+        self.composer_history = ComposerHistoryPreview()
+
+        self._panel_host = ReorderablePanelHost()
+        self._spend_panel = DraggablePanel("spend", self._card)
+        self._habits_panel = DraggablePanel("habits", self.habits)
+        self._composer_panel = DraggablePanel("composer", self.composer_history)
+        self._panel_host.add_panel(self._spend_panel)
+        self._panel_host.add_panel(self._habits_panel)
+        self._panel_host.add_panel(self._composer_panel)
+        self._panel_host.set_order(load_popup_panel_order())
+        self._panel_host.order_changed.connect(save_popup_panel_order)
 
         self.countdown = CountdownLabel()
         self.countdown.clicked.connect(self.refresh_requested.emit)
@@ -379,15 +1432,31 @@ class SpendPopup(QFrame):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
-        root.addWidget(self._card)
         root.addWidget(self.browser_help)
+        root.addWidget(self._panel_host)
         root.addWidget(self.countdown)
         root.addWidget(self.status)
+        self.refresh_habits()
+
+    def refresh_habits(self) -> None:
+        """Reload local SDK + state.vscdb habit stats (read-only; soft-fails)."""
+        try:
+            preview = collect_habits_preview()
+        except Exception:  # noqa: BLE001 — popup must stay usable
+            preview = SdkHabitsPreview.unavailable("Could not read local SDK stats")
+        self.habits.apply_preview(preview)
+        try:
+            vscdb = collect_vscdb_habits_preview()
+        except Exception:  # noqa: BLE001
+            vscdb = VscdbHabitsPreview.unavailable("Could not read state.vscdb")
+        self.composer_history.apply_preview(vscdb)
+        self.adjustSize()
 
     def show_at(self, pos) -> None:  # noqa: ANN001
         """Show near tray; close when focus leaves or user clicks elsewhere."""
         self._dismiss_armed = False
         self._arm_timer.stop()
+        self.refresh_habits()
         self.adjustSize()
         target = pos if isinstance(pos, QPoint) else QPoint(pos.x(), pos.y())
         # Under XWayland a single pre- or post-show move() is often ignored.
@@ -463,12 +1532,12 @@ class SpendPopup(QFrame):
     def set_browser_inaccessible(self, inaccessible: bool, launch_command: str = "") -> None:
         """Show or hide the Browser inaccessible banner with a copyable launch command."""
         if inaccessible:
-            self._card.hide()
+            self._spend_panel.hide()
             self.browser_help.set_launch_command(launch_command)
             self.browser_help.show()
             self.countdown.hide()
         else:
-            self._card.show()
+            self._spend_panel.show()
             self.browser_help.hide()
             self.countdown.show()
         self.adjustSize()

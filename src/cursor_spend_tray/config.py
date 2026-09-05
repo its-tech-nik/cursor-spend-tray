@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shlex
 from pathlib import Path
 
@@ -25,6 +26,8 @@ LOGIN_URL = SPENDING_URL
 POLL_INTERVAL_MINUTES: tuple[int, ...] = (1, 2, 4, 8, 16)
 DEFAULT_POLL_SECONDS = 8 * 60
 DEFAULT_BIDI_PORT = 9222
+# Billing-cycle day for habit history charts. Temporary until scraped from spending.
+SUBSCRIPTION_RENEWAL_DAY = 19
 
 
 def poll_interval_label(minutes: int) -> str:
@@ -42,6 +45,41 @@ def config_path() -> Path:
 
 def state_path() -> Path:
     return data_dir() / "state.json"
+
+
+def panel_order_path() -> Path:
+    return data_dir() / "popup_panel_order.json"
+
+
+DEFAULT_POPUP_PANEL_ORDER: tuple[str, ...] = ("spend", "habits", "composer")
+
+
+def load_popup_panel_order() -> list[str]:
+    """Return saved vertical order for the three main popup cards."""
+    path = panel_order_path()
+    known = set(DEFAULT_POPUP_PANEL_ORDER)
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                order = [str(x) for x in raw if str(x) in known]
+                for key in DEFAULT_POPUP_PANEL_ORDER:
+                    if key not in order:
+                        order.append(key)
+                return order
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    return list(DEFAULT_POPUP_PANEL_ORDER)
+
+
+def save_popup_panel_order(order: list[str]) -> None:
+    known = set(DEFAULT_POPUP_PANEL_ORDER)
+    cleaned = [x for x in order if x in known]
+    for key in DEFAULT_POPUP_PANEL_ORDER:
+        if key not in cleaned:
+            cleaned.append(key)
+    data_dir().mkdir(parents=True, exist_ok=True)
+    panel_order_path().write_text(json.dumps(cleaned, indent=2), encoding="utf-8")
 
 
 def zen_is_running() -> bool:
