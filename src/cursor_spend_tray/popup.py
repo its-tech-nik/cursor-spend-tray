@@ -30,7 +30,8 @@ from .config import (
     save_popup_panel_order,
 )
 from .sdk_stats import SdkHabitsBatch, SdkHabitsPreview, collect_habits_preview
-from .vscdb_stats import VscdbHabitsPreview, collect_vscdb_habits_preview
+from .usage_csv import UsageCsvPreview, load_usage_preview
+from .vscdb_stats import VscdbHabitsPreview, VscdbPeriodBucket, collect_vscdb_habits_preview
 
 PANEL_MIME = "application/x-cursor-spend-tray-panel"
 
@@ -269,6 +270,7 @@ def _habits_chip(text: str, *, fg: str, bg: str, border: str) -> QLabel:
     font.setWeight(QFont.Weight.DemiBold)
     chip.setFont(font)
     chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    chip.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     chip.setStyleSheet(
         f"""
         QLabel {{
@@ -319,6 +321,7 @@ class ChartSeries:
     color: str
     values: list[float | None]
     unit: str = ""
+    area: bool = False  # filled under the line; always painted behind other series
 
 
 def _format_chart_value(value: float | None, unit: str = "") -> str:
@@ -344,7 +347,7 @@ class MultiSeriesHistoryChart(QWidget):
         self._hover_index: int | None = None
         self._plot = QRectF()
         self.setMouseTracking(True)
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(168)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
@@ -416,24 +419,40 @@ class MultiSeriesHistoryChart(QWidget):
         painter.setPen(QPen(QColor("#243041"), 1))
         painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 8, 8)
 
-        # Legend
+        # Legend (may wrap to multiple rows when many series)
         legend_y = 8.0
         lx = 10.0
         leg_font = QFont()
         leg_font.setPointSize(7)
         painter.setFont(leg_font)
+        metrics = painter.fontMetrics()
+        row_h = float(max(12, metrics.height()))
         for series in self._series:
+            name_w = max(72, metrics.horizontalAdvance(series.name) + 4)
+            entry_w = 14 + name_w
+            if lx > 10.0 and lx + entry_w > self.width() - 10:
+                lx = 10.0
+                legend_y += row_h + 2
+            # Dot centered on the same row box as the label.
+            cy = legend_y + row_h / 2.0
             painter.setBrush(QColor(series.color))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QPointF(lx + 3, legend_y + 5), 3, 3)
+            painter.drawEllipse(QPointF(lx + 3, cy), 3, 3)
             painter.setPen(QColor("#9AA6B8"))
-            painter.drawText(QRectF(lx + 10, legend_y, 88, 12), series.name)
-            lx += 96
-            if lx > self.width() - 90:
-                lx = 10.0
-                legend_y += 14
+            painter.drawText(
+                QRectF(lx + 10, legend_y, name_w, row_h),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                series.name,
+            )
+            lx += entry_w + 8
 
-        self._plot = QRectF(12, legend_y + 18, self.width() - 24, self.height() - legend_y - 34)
+        axis_reserve = 18
+        self._plot = QRectF(
+            12,
+            legend_y + row_h + 10,
+            self.width() - 24,
+            max(40.0, self.height() - (legend_y + row_h + 10) - axis_reserve),
+        )
 
         if len(self._labels) < 2 or not self._series:
             painter.setPen(QColor("#5E6775"))
@@ -456,42 +475,26 @@ class MultiSeriesHistoryChart(QWidget):
                 QPointF(self._plot.left(), y), QPointF(self._plot.right(), y)
             )
 
-        for series in self._series:
-            points = self._normalized_points(series.values)
-            usable = [p for p in points if p is not None]
-            if len(usable) < 2:
-                continue
-            pen = QPen(QColor(series.color), 1.9)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(pen)
-            path = QPainterPath()
-            started = False
-            for pt in points:
-                if pt is None:
-                    started = False
-                    continue
-                if not started:
-                    path.moveTo(pt)
-                    started = True
-                else:
-                    path.lineTo(pt)
-            painter.drawPath(path)
-            painter.setBrush(QColor(series.color))
-            painter.setPen(Qt.PenStyle.NoPen)
-            for pt in points:
-                if pt is not None:
-                    painter.drawEllipse(pt, 2.2, 2.2)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
+        # Area fills first (behind), then every line/dot on top.
+        area_series = [s for s in self._series if s.area]
+        line_series = [s for s in self._series if not s.area]
+        for series in area_series:
+            self._paint_area_series(painter, series)
+        for series in [*area_series, *line_series]:
+            self._paint_line_series(painter, series)
 
-        # Axis labels
+        # Axis labels — reserved strip below the plot, never over lines
         axis = QFont()
         axis.setPointSize(7)
         painter.setFont(axis)
         painter.setPen(QColor("#5E6775"))
         painter.drawText(
-            QRectF(self._plot.left(), self.height() - 14, self._plot.width() * 0.55, 12),
+            QRectF(
+                self._plot.left(),
+                self._plot.bottom() + 2,
+                self._plot.width(),
+                axis_reserve - 2,
+            ),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             f"{self._labels[0]} → now",
         )
@@ -530,6 +533,8 @@ class MultiSeriesHistoryChart(QWidget):
                 card_x = x - width - 10
             card_x = max(8.0, card_x)
             card_y = self._plot.top() + 4
+            if card_y + height > self._plot.bottom() - 4:
+                card_y = max(self._plot.top() + 4, self._plot.bottom() - height - 4)
             card = QRectF(card_x, card_y, width, height)
             painter.setBrush(QColor(20, 24, 32, 230))
             painter.setPen(QPen(QColor("#3A465A"), 1))
@@ -548,6 +553,93 @@ class MultiSeriesHistoryChart(QWidget):
                 ty += metrics.height()
 
         painter.end()
+
+    def _paint_area_series(self, painter: QPainter, series: ChartSeries) -> None:
+        """Fill under the series curve down to the plot baseline (behind lines)."""
+        points = self._normalized_points(series.values)
+        usable = [p for p in points if p is not None]
+        if len(usable) < 2:
+            return
+        fill = QColor(series.color)
+        fill.setAlpha(55)
+        stroke = QColor(series.color)
+        stroke.setAlpha(160)
+        base_y = self._plot.bottom()
+
+        run: list[QPointF] = []
+        def flush() -> None:
+            nonlocal run
+            if len(run) < 2:
+                run = []
+                return
+            path = QPainterPath()
+            path.moveTo(QPointF(run[0].x(), base_y))
+            for pt in run:
+                path.lineTo(pt)
+            path.lineTo(QPointF(run[-1].x(), base_y))
+            path.closeSubpath()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawPath(path)
+            # Soft top edge so the area reads as a band, not a hard polygon.
+            edge = QPainterPath()
+            edge.moveTo(run[0])
+            for pt in run[1:]:
+                edge.lineTo(pt)
+            pen = QPen(stroke, 1.2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(pen)
+            painter.drawPath(edge)
+            run = []
+
+        for pt in points:
+            if pt is None:
+                flush()
+                continue
+            run.append(pt)
+        flush()
+
+    def _paint_line_series(self, painter: QPainter, series: ChartSeries) -> None:
+        """Stroke + dots for a series (drawn after area fills)."""
+        if series.area:
+            # Area series: dots only on top of the fill; stroke already drawn softly.
+            points = self._normalized_points(series.values)
+            painter.setBrush(QColor(series.color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            for pt in points:
+                if pt is not None:
+                    painter.drawEllipse(pt, 2.0, 2.0)
+            return
+
+        points = self._normalized_points(series.values)
+        usable = [p for p in points if p is not None]
+        if len(usable) < 2:
+            return
+        pen = QPen(QColor(series.color), 1.9)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(pen)
+        path = QPainterPath()
+        started = False
+        for pt in points:
+            if pt is None:
+                started = False
+                continue
+            if not started:
+                path.moveTo(pt)
+                started = True
+            else:
+                path.lineTo(pt)
+        painter.drawPath(path)
+        painter.setBrush(QColor(series.color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for pt in points:
+            if pt is not None:
+                painter.drawEllipse(pt, 2.2, 2.2)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
 
 class HabitsHistoryCharts(QWidget):
@@ -838,8 +930,108 @@ class AgentHabitsPreview(QFrame):
             self._insight.hide()
 
 
+def _format_token_chip(n: int) -> str:
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B tokens"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M tokens"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k tokens"
+    return f"{n} tokens"
+
+
+def _merge_composer_usage_series(
+    preview: VscdbHabitsPreview,
+    usage: UsageCsvPreview,
+) -> tuple[
+    list[str],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[int],
+]:
+    """Union billing periods from vscdb + usage CSV into aligned chart series."""
+    by_start: dict[str, VscdbPeriodBucket] = {}
+    if preview.available:
+        for p in preview.periods:
+            by_start[p.period_start] = p
+
+    usage_by: dict[str, object] = {}
+    if usage.available:
+        for u in usage.periods:
+            usage_by[u.period_start] = u
+
+    starts = sorted(set(by_start) | set(usage_by))
+    labels: list[str] = []
+    composers: list[float | None] = []
+    tokens: list[float | None] = []
+    abort: list[float | None] = []
+    tool_err: list[float | None] = []
+    accept: list[float | None] = []
+    auto_pct: list[float | None] = []
+    api_pct: list[float | None] = []
+    weights: list[int] = []
+
+    for key in starts:
+        v = by_start.get(key)
+        u = usage_by.get(key)
+        label = (
+            (v.label if v else None)
+            or (getattr(u, "label", None) if u is not None else None)
+            or key
+        )
+        labels.append(str(label))
+        if v is not None:
+            composers.append(float(v.composers))
+            abort.append(
+                float(v.abort_rate_pct) if v.abort_rate_pct is not None else None
+            )
+            tool_err.append(
+                float(v.tool_error_rate_pct)
+                if v.tool_error_rate_pct is not None
+                else None
+            )
+            accept.append(
+                float(v.accept_rate_pct) if v.accept_rate_pct is not None else None
+            )
+            weights.append(v.composers)
+        else:
+            composers.append(None)
+            abort.append(None)
+            tool_err.append(None)
+            accept.append(None)
+            weights.append(0)
+        if u is not None:
+            tok = int(getattr(u, "total_tokens", 0) or 0)
+            tokens.append(float(tok) if tok or getattr(u, "event_count", 0) else None)
+            cp = getattr(u, "cursor_models_pct", None)
+            op = getattr(u, "other_models_pct", None)
+            auto_pct.append(float(cp) if cp is not None else None)
+            api_pct.append(float(op) if op is not None else None)
+        else:
+            tokens.append(None)
+            auto_pct.append(None)
+            api_pct.append(None)
+
+    return (
+        labels,
+        composers,
+        tokens,
+        abort,
+        tool_err,
+        accept,
+        auto_pct,
+        api_pct,
+        weights,
+    )
+
+
 class ComposerHistoryPreview(QFrame):
-    """Longer-range composer/tool trends from state.vscdb."""
+    """Longer-range composer/tool trends from state.vscdb (+ usage CSV tokens)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -890,6 +1082,9 @@ class ComposerHistoryPreview(QFrame):
         self._chip_composers = _habits_chip(
             "— composers", fg="#A8C3A4", bg="#1A2420", border="#2F4638"
         )
+        self._chip_tokens = _habits_chip(
+            "— tokens", fg="#E0C090", bg="#242016", border="#4A3C28"
+        )
         self._chip_abort = _habits_chip(
             "— abort", fg="#D0B56C", bg="#242018", border="#4A4028"
         )
@@ -900,19 +1095,30 @@ class ComposerHistoryPreview(QFrame):
             "— accept", fg="#8BA4C7", bg="#1A2030", border="#2F3B52"
         )
 
-        chips = QHBoxLayout()
+        chips = QVBoxLayout()
         chips.setContentsMargins(0, 0, 0, 0)
         chips.setSpacing(6)
-        chips.addWidget(self._chip_composers)
-        chips.addWidget(self._chip_abort)
-        chips.addWidget(self._chip_tool)
-        chips.addWidget(self._chip_accept)
-        chips.addStretch(1)
+        chip_row1 = QHBoxLayout()
+        chip_row1.setContentsMargins(0, 0, 0, 0)
+        chip_row1.setSpacing(6)
+        chip_row1.addWidget(self._chip_composers)
+        chip_row1.addWidget(self._chip_tokens)
+        chip_row1.addStretch(1)
+        chip_row2 = QHBoxLayout()
+        chip_row2.setContentsMargins(0, 0, 0, 0)
+        chip_row2.setSpacing(6)
+        chip_row2.addWidget(self._chip_abort)
+        chip_row2.addWidget(self._chip_tool)
+        chip_row2.addWidget(self._chip_accept)
+        chip_row2.addStretch(1)
+        chips.addLayout(chip_row1)
+        chips.addLayout(chip_row2)
 
         caption = QLabel("Billing periods from state.vscdb · older → newer")
         cap_font = QFont()
         cap_font.setPointSize(8)
         caption.setFont(cap_font)
+        caption.setWordWrap(True)
         caption.setStyleSheet("color: #6F7887; background: transparent; border: none;")
         self._caption = caption
         self._chart = MultiSeriesHistoryChart()
@@ -952,8 +1158,9 @@ class ComposerHistoryPreview(QFrame):
         content_layout.setSpacing(8)
         content_layout.addLayout(chips)
         content_layout.addWidget(self._caption)
-        content_layout.addWidget(self._chart)
+        # Summary above the plot so it never covers axis labels / series.
         content_layout.addWidget(self._insight)
+        content_layout.addWidget(self._chart)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 11, 12, 11)
@@ -962,15 +1169,34 @@ class ComposerHistoryPreview(QFrame):
         layout.addWidget(self._content)
         layout.addWidget(self._fallback)
 
-    def apply_preview(self, preview: VscdbHabitsPreview) -> None:
+    def apply_preview(
+        self,
+        preview: VscdbHabitsPreview,
+        usage: UsageCsvPreview | None = None,
+    ) -> None:
         self.setToolTip(
-            "Longer-range signals from ~/.config/Cursor/User/globalStorage/state.vscdb "
-            "(read-only). Buckets follow subscription renewal day. "
-            "Not Pro spend, and not the same as SDK run habits."
+            "Composer signals from state.vscdb plus dashboard usage CSV token totals "
+            "(billing periods). AUTO/API % associate from spend scrapes starting now. "
+            f"CSVs: {(usage.csv_dir if usage else '') or '~/.local/share/cursor-spend-tray/usage-csv'}"
         )
-        periods = preview.periods
-        if not preview.available or len(periods) < 2:
-            message = preview.error_message or "Not enough composer history yet"
+        usage = usage or UsageCsvPreview.unavailable("")
+        (
+            labels,
+            composers,
+            tokens,
+            abort,
+            tool_err,
+            accept,
+            auto_pct,
+            api_pct,
+            weights,
+        ) = _merge_composer_usage_series(preview, usage)
+        if len(labels) < 2:
+            message = (
+                preview.error_message
+                or usage.error_message
+                or "Not enough billing-period history yet"
+            )
             self._content.hide()
             self._window.setText("")
             self._fallback.setText(message)
@@ -979,76 +1205,68 @@ class ComposerHistoryPreview(QFrame):
 
         self._fallback.hide()
         self._content.show()
-        self._window.setText(f"{preview.earliest} → {preview.latest}")
-        self._caption.setText(
-            f"Billing periods · {len(periods)} · {preview.composers} composers "
-            "· older → newer · hover for values"
+        earliest = preview.earliest or (usage.earliest if usage.available else "")
+        latest_label = preview.latest or (usage.latest if usage.available else "")
+        self._window.setText(
+            f"{earliest} → {latest_label}" if earliest else latest_label
         )
 
-        latest = periods[-1]
+        token_total = sum(int(v) for v in tokens if v is not None)
+        self._caption.setText(
+            f"Billing periods · {len(labels)} · {preview.composers} composers"
+            + (f" · {token_total:,} tokens" if token_total else "")
+            + " · older → newer · hover for values"
+        )
+
         self._chip_composers.setText(f"{preview.composers} composers")
-        if latest.abort_rate_pct is None:
+        latest_tokens = next(
+            (int(v) for v in reversed(tokens) if v is not None), None
+        )
+        if latest_tokens is None:
+            self._chip_tokens.setText("— tokens")
+        else:
+            self._chip_tokens.setText(_format_token_chip(latest_tokens))
+
+        latest_abort = next((v for v in reversed(abort) if v is not None), None)
+        latest_tool = next((v for v in reversed(tool_err) if v is not None), None)
+        latest_accept = next((v for v in reversed(accept) if v is not None), None)
+        if latest_abort is None:
             self._chip_abort.setText("— abort")
         else:
-            self._chip_abort.setText(f"{latest.abort_rate_pct}% abort")
-        if latest.tool_error_rate_pct is None:
+            self._chip_abort.setText(f"{latest_abort:.0f}% abort")
+        if latest_tool is None:
             self._chip_tool.setText("— tool err")
         else:
-            self._chip_tool.setText(f"{latest.tool_error_rate_pct}% tool err")
-        if latest.accept_rate_pct is None:
+            self._chip_tool.setText(f"{latest_tool:.0f}% tool err")
+        if latest_accept is None:
             self._chip_accept.setText("— accept")
         else:
-            self._chip_accept.setText(f"{latest.accept_rate_pct}% accept")
+            self._chip_accept.setText(f"{latest_accept:.0f}% accept")
 
-        labels = [p.label for p in periods]
+        series = [
+            ChartSeries("Composers", "#A8C3A4", composers),
+            ChartSeries("Tokens", "#E0C090", tokens, area=True),
+            ChartSeries("Abort %", "#D0B56C", abort, unit="%"),
+            ChartSeries("Tool error %", "#D9897A", tool_err, unit="%"),
+            ChartSeries("Accept %", "#8BA4C7", accept, unit="%"),
+        ]
+        if any(v is not None for v in auto_pct):
+            series.append(ChartSeries("AUTO %", "#6FA8DC", auto_pct, unit="%"))
+        if any(v is not None for v in api_pct):
+            series.append(ChartSeries("API %", "#B0B0B0", api_pct, unit="%"))
+
         self._chart.set_data(
             labels,
-            [
-                ChartSeries(
-                    "Composers",
-                    "#A8C3A4",
-                    [float(p.composers) for p in periods],
-                ),
-                ChartSeries(
-                    "Abort %",
-                    "#D0B56C",
-                    [
-                        float(p.abort_rate_pct)
-                        if p.abort_rate_pct is not None
-                        else None
-                        for p in periods
-                    ],
-                    unit="%",
-                ),
-                ChartSeries(
-                    "Tool error %",
-                    "#D9897A",
-                    [
-                        float(p.tool_error_rate_pct)
-                        if p.tool_error_rate_pct is not None
-                        else None
-                        for p in periods
-                    ],
-                    unit="%",
-                ),
-                ChartSeries(
-                    "Accept %",
-                    "#8BA4C7",
-                    [
-                        float(p.accept_rate_pct)
-                        if p.accept_rate_pct is not None
-                        else None
-                        for p in periods
-                    ],
-                    unit="%",
-                ),
-            ],
-            weights=[p.composers for p in periods],
+            series,
+            weights=weights,
             caption="Hover a period for exact values (lines are normalized per metric)",
         )
 
-        if preview.insight:
-            self._insight.setText(preview.insight)
+        insight = (
+            usage.insight if usage.available and usage.insight else preview.insight
+        )
+        if insight:
+            self._insight.setText(insight)
             self._insight.show()
         else:
             self._insight.hide()
@@ -1439,7 +1657,7 @@ class SpendPopup(QFrame):
         self.refresh_habits()
 
     def refresh_habits(self) -> None:
-        """Reload local SDK + state.vscdb habit stats (read-only; soft-fails)."""
+        """Reload local SDK + state.vscdb + usage-CSV habit stats (soft-fails)."""
         try:
             preview = collect_habits_preview()
         except Exception:  # noqa: BLE001 — popup must stay usable
@@ -1449,7 +1667,11 @@ class SpendPopup(QFrame):
             vscdb = collect_vscdb_habits_preview()
         except Exception:  # noqa: BLE001
             vscdb = VscdbHabitsPreview.unavailable("Could not read state.vscdb")
-        self.composer_history.apply_preview(vscdb)
+        try:
+            usage = load_usage_preview()
+        except Exception:  # noqa: BLE001
+            usage = UsageCsvPreview.unavailable("Could not read usage CSV totals")
+        self.composer_history.apply_preview(vscdb, usage)
         self.adjustSize()
 
     def show_at(self, pos) -> None:  # noqa: ANN001
@@ -1528,6 +1750,8 @@ class SpendPopup(QFrame):
     def apply_snapshot(self, snap: UsageSnapshot) -> None:
         self.cursor_ring.set_percent(snap.cursor_models_pct)
         self.other_ring.set_percent(snap.other_models_pct)
+        # Usage CSV sync + AUTO/API associations run with the scrape.
+        self.refresh_habits()
 
     def set_browser_inaccessible(self, inaccessible: bool, launch_command: str = "") -> None:
         """Show or hide the Browser inaccessible banner with a copyable launch command."""

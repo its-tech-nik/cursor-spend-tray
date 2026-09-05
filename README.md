@@ -94,6 +94,7 @@ restored the next time the app starts.
 
 - `~/.local/share/cursor-spend-tray/config.json` — poll interval, host/port
 - `~/.local/share/cursor-spend-tray/state.json` — last snapshot
+- `~/.local/share/cursor-spend-tray/usage-csv/` — per billing-period usage-events CSVs + token totals; `period-spend-pct.json` links scraped AUTO/API % to the current period
 - `~/.local/share/cursor-spend-tray/*-profile` — dedicated automation profile (e.g. `zen-profile`, `brave-profile`)
 - `~/.config/autostart/cursor-spend-tray.desktop` — optional launch-at-login entry
 

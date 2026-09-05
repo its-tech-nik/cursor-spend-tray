@@ -61,7 +61,8 @@ class CdpClient:
             ws_url = parsed._replace(netloc=f"{self.host}:{parsed.port or self.port}").geturl()
 
         log.info("Connecting CDP websocket %s", ws_url)
-        self._ws = await websockets.connect(ws_url, max_size=8 * 1024 * 1024)
+        # Usage CSV exports can be multi-MB when returned through Runtime.evaluate.
+        self._ws = await websockets.connect(ws_url, max_size=32 * 1024 * 1024)
         self._reader_task = asyncio.create_task(self._read_loop(), name="cdp-reader")
         try:
             await self.call("Target.setDiscoverTargets", {"discover": True})

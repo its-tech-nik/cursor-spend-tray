@@ -9,6 +9,7 @@ from .bidi_client import BidiClient, BidiError
 from .browser import BrowserFamily
 from .cdp_client import CdpClient, CdpError
 from .config import AppConfig, UsageSnapshot
+from .usage_csv import associate_spend_pct, sync_usage_csvs
 
 log = logging.getLogger(__name__)
 
@@ -222,6 +223,34 @@ class SpendingScraper:
                 f"other={snap.other_models_pct}%",
                 flush=True,
             )
+
+            # Usage-events CSV (same signed-in session) → billing-period token totals.
+            try:
+                usage_preview = await sync_usage_csvs(client, handle)
+                current_tokens = None
+                if usage_preview.available and usage_preview.periods:
+                    current_tokens = usage_preview.periods[-1].total_tokens
+                associate_spend_pct(
+                    cursor_models_pct=cursor_pct,
+                    other_models_pct=other_pct,
+                    total_tokens=current_tokens,
+                )
+                if usage_preview.available:
+                    print(
+                        f"[usage-csv] periods={len(usage_preview.periods)} "
+                        f"total_tokens={usage_preview.total_tokens:,} "
+                        f"dir={usage_preview.csv_dir}",
+                        flush=True,
+                    )
+                elif usage_preview.error_message:
+                    print(
+                        f"[usage-csv] skip: {usage_preview.error_message}",
+                        flush=True,
+                    )
+            except Exception as csv_exc:  # noqa: BLE001 — spend scrape still succeeded
+                print(f"[usage-csv] failed: {csv_exc!r}", flush=True)
+                log.exception("Usage CSV sync failed")
+
             return snap
         except Exception as exc:
             print(f"[scrape] exception: {exc!r}", flush=True)

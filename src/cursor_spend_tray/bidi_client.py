@@ -112,7 +112,7 @@ class BidiClient:
 
     async def _connect_once(self, ws_url: str, *, attempt: int) -> None:
         log.info("Connecting BiDi websocket %s (attempt %d)", ws_url, attempt)
-        self._ws = await websockets.connect(ws_url, max_size=8 * 1024 * 1024)
+        self._ws = await websockets.connect(ws_url, max_size=32 * 1024 * 1024)
         self._reader_task = asyncio.create_task(self._read_loop(), name="bidi-reader")
         self._session_active = False
 
