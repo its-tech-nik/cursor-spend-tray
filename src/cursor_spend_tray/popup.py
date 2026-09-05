@@ -9,11 +9,21 @@ from PyQt6.QtCore import (
     QPoint,
     QPointF,
     QRectF,
+    QSize,
     QTimer,
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QDrag, QFont, QGuiApplication, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import (
+    QColor,
+    QDrag,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -285,6 +295,71 @@ def _habits_chip(text: str, *, fg: str, bg: str, border: str) -> QLabel:
     return chip
 
 
+class SeriesToggleChip(QLabel):
+    """Colored metric pill — shows latest period value; click toggles chart series."""
+
+    toggled = pyqtSignal(str)  # series name
+
+    def __init__(
+        self,
+        series_name: str,
+        *,
+        fg: str,
+        bg: str,
+        border: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__("—", parent)
+        self.series_name = series_name
+        self._fg = fg
+        self._bg = bg
+        self._border = border
+        self._series_on = True
+        font = QFont()
+        font.setPointSize(8)
+        font.setWeight(QFont.Weight.DemiBold)
+        self.setFont(font)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"Click to show/hide {series_name} on the chart")
+        self._apply_style()
+
+    def set_series_on(self, on: bool) -> None:
+        if on == self._series_on:
+            return
+        self._series_on = on
+        self._apply_style()
+
+    def is_series_on(self) -> bool:
+        return self._series_on
+
+    def _apply_style(self) -> None:
+        if self._series_on:
+            fg, bg, border = self._fg, self._bg, self._border
+        else:
+            fg, bg, border = "#5E6775", "#1A1E24", "#2A313C"
+        self.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {fg};
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 7px;
+                padding: 3px 8px;
+            }}
+            QLabel:hover {{
+                border-color: {self._border if self._series_on else "#3A465A"};
+            }}
+            """
+        )
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggled.emit(self.series_name)
+        super().mouseReleaseEvent(event)
+
+
 def _habits_metric_row(label: str) -> tuple[QWidget, QLabel]:
     """Label + value row for a single habit metric."""
     row = QWidget()
@@ -339,17 +414,76 @@ def _format_chart_value(value: float | None, unit: str = "") -> str:
 class MultiSeriesHistoryChart(QWidget):
     """Single multi-line chart; series are min–max normalized; hover shows raw values."""
 
+    # Desired plot body height; total widget height = legend + plot + axis.
+    _PLOT_BODY = 260
+    _AXIS_RESERVE = 18
+    _LEGEND_TOP = 8
+    _LEGEND_GAP = 10
+    # Keep peaks/dots inside the plot — map series into this inset.
+    _DRAW_INSET = 12.0
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._labels: list[str] = []
         self._weights: list[int] = []
         self._series: list[ChartSeries] = []
+        self._hidden: set[str] = set()
         self._hover_index: int | None = None
         self._plot = QRectF()
         self.setMouseTracking(True)
-        self.setMinimumHeight(168)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setFixedHeight(self._height_for_rows(1))
+
+    def _legend_font(self) -> QFont:
+        font = QFont()
+        font.setPointSize(7)
+        return font
+
+    def _legend_row_height(self) -> float:
+        return float(max(12, QFontMetrics(self._legend_font()).height()))
+
+    def _height_for_rows(self, rows: int) -> int:
+        rows = max(1, rows)
+        row_h = self._legend_row_height()
+        legend = (
+            self._LEGEND_TOP
+            + rows * row_h
+            + max(0, rows - 1) * 2
+            + self._LEGEND_GAP
+        )
+        return int(legend + self._PLOT_BODY + self._AXIS_RESERVE)
+
+    def _estimate_legend_rows(self, width: int) -> int:
+        """How many legend rows are needed at the given width (matches paintEvent)."""
+        if not self._series:
+            return 1
+        metrics = QFontMetrics(self._legend_font())
+        lx = 10.0
+        rows = 1
+        for series in self._series:
+            name_w = max(72, metrics.horizontalAdvance(series.name) + 4)
+            entry_w = 14 + name_w
+            if lx > 10.0 and lx + entry_w > width - 10:
+                lx = 10.0
+                rows += 1
+            lx += entry_w + 8
+        return rows
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        width = self.width() if self.width() > 1 else 360
+        return QSize(360, self._height_for_rows(self._estimate_legend_rows(width)))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(200, self._height_for_rows(1))
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        # Legend wrap depends on width — refresh fixed height when it changes.
+        hint_h = self.sizeHint().height()
+        if self.height() != hint_h:
+            self.setFixedHeight(hint_h)
+            self.updateGeometry()
+        super().resizeEvent(event)
 
     def set_data(
         self,
@@ -362,9 +496,43 @@ class MultiSeriesHistoryChart(QWidget):
         self._labels = list(labels)
         self._series = list(series)
         self._weights = list(weights or [])
+        names = {s.name for s in self._series}
+        self._hidden &= names
         self._hover_index = None
         self.setToolTip(caption or "Hover a billing period for exact values")
+        self.setFixedHeight(self.sizeHint().height())
+        self.updateGeometry()
         self.update()
+
+    def is_series_visible(self, name: str) -> bool:
+        return name not in self._hidden
+
+    def toggle_series(self, name: str) -> bool:
+        """Toggle series visibility. Returns True if the series is now visible."""
+        if name in self._hidden:
+            self._hidden.discard(name)
+            visible = True
+        else:
+            self._hidden.add(name)
+            visible = False
+        self.update()
+        return visible
+
+    def _visible_series(self) -> list[ChartSeries]:
+        return [s for s in self._series if s.name not in self._hidden]
+
+    def _draw_rect(self) -> QRectF:
+        """Inset viewing area for series — peaks stay clear of plot edges."""
+        inset = self._DRAW_INSET
+        r = self._plot
+        if r.height() <= inset * 2 + 4:
+            return r
+        return QRectF(
+            r.left(),
+            r.top() + inset,
+            r.width(),
+            r.height() - 2 * inset,
+        )
 
     def leaveEvent(self, event) -> None:  # noqa: ANN001
         self._hover_index = None
@@ -392,9 +560,11 @@ class MultiSeriesHistoryChart(QWidget):
         hi = max(numeric)
         if hi <= lo:
             hi = lo + 1.0
-        pad = (hi - lo) * 0.08
+        # Extra headroom so max/min don't sit on the draw-rect edge.
+        pad = (hi - lo) * 0.14
         lo -= pad
         hi += pad
+        draw = self._draw_rect()
         n = len(values)
         out: list[QPointF | None] = []
         for i, value in enumerate(values):
@@ -402,11 +572,11 @@ class MultiSeriesHistoryChart(QWidget):
                 out.append(None)
                 continue
             x = (
-                self._plot.left()
+                draw.left()
                 if n == 1
-                else self._plot.left() + (self._plot.width() * i / (n - 1))
+                else draw.left() + (draw.width() * i / (n - 1))
             )
-            y = self._plot.bottom() - ((value - lo) / (hi - lo)) * self._plot.height()
+            y = draw.bottom() - ((value - lo) / (hi - lo)) * draw.height()
             out.append(QPointF(x, y))
         return out
 
@@ -435,10 +605,16 @@ class MultiSeriesHistoryChart(QWidget):
                 legend_y += row_h + 2
             # Dot centered on the same row box as the label.
             cy = legend_y + row_h / 2.0
-            painter.setBrush(QColor(series.color))
+            visible = series.name not in self._hidden
+            dot = QColor(series.color)
+            label_color = QColor("#9AA6B8")
+            if not visible:
+                dot.setAlpha(70)
+                label_color = QColor("#4A5565")
+            painter.setBrush(dot)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(QPointF(lx + 3, cy), 3, 3)
-            painter.setPen(QColor("#9AA6B8"))
+            painter.setPen(label_color)
             painter.drawText(
                 QRectF(lx + 10, legend_y, name_w, row_h),
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
@@ -446,14 +622,18 @@ class MultiSeriesHistoryChart(QWidget):
             )
             lx += entry_w + 8
 
-        axis_reserve = 18
+        axis_reserve = self._AXIS_RESERVE
+        plot_top = legend_y + row_h + self._LEGEND_GAP
+        available = self.height() - plot_top - axis_reserve
         self._plot = QRectF(
             12,
-            legend_y + row_h + 10,
+            plot_top,
             self.width() - 24,
-            max(40.0, self.height() - (legend_y + row_h + 10) - axis_reserve),
+            # Never force a plot taller than the widget — that clipped the axis.
+            max(0.0, available),
         )
 
+        visible_series = self._visible_series()
         if len(self._labels) < 2 or not self._series:
             painter.setPen(QColor("#5E6775"))
             note = QFont()
@@ -467,6 +647,19 @@ class MultiSeriesHistoryChart(QWidget):
             painter.end()
             return
 
+        if not visible_series:
+            painter.setPen(QColor("#5E6775"))
+            note = QFont()
+            note.setPointSize(8)
+            painter.setFont(note)
+            painter.drawText(
+                self._plot,
+                int(Qt.AlignmentFlag.AlignCenter),
+                "All series hidden — click chips to show",
+            )
+            painter.end()
+            return
+
         # Grid
         painter.setPen(QPen(QColor("#1E2633"), 1, Qt.PenStyle.DotLine))
         for frac in (0.25, 0.5, 0.75):
@@ -476,8 +669,8 @@ class MultiSeriesHistoryChart(QWidget):
             )
 
         # Area fills first (behind), then every line/dot on top.
-        area_series = [s for s in self._series if s.area]
-        line_series = [s for s in self._series if not s.area]
+        area_series = [s for s in visible_series if s.area]
+        line_series = [s for s in visible_series if not s.area]
         for series in area_series:
             self._paint_area_series(painter, series)
         for series in [*area_series, *line_series]:
@@ -516,7 +709,8 @@ class MultiSeriesHistoryChart(QWidget):
             lines = [self._labels[idx]]
             if idx < len(self._weights):
                 lines[0] += f" · {self._weights[idx]}"
-            for series in self._series:
+            hover_series = visible_series
+            for series in hover_series:
                 raw = series.values[idx] if idx < len(series.values) else None
                 lines.append(
                     f"{series.name}: {_format_chart_value(raw, series.unit)}"
@@ -532,9 +726,11 @@ class MultiSeriesHistoryChart(QWidget):
             if card_x + width > self.width() - 8:
                 card_x = x - width - 10
             card_x = max(8.0, card_x)
+            # Prefer near the plot top; clamp to the full widget so tall cards
+            # (many series) are not clipped by the plot strip or widget edge.
             card_y = self._plot.top() + 4
-            if card_y + height > self._plot.bottom() - 4:
-                card_y = max(self._plot.top() + 4, self._plot.bottom() - height - 4)
+            if card_y + height > self.height() - 8:
+                card_y = max(8.0, self.height() - 8 - height)
             card = QRectF(card_x, card_y, width, height)
             painter.setBrush(QColor(20, 24, 32, 230))
             painter.setPen(QPen(QColor("#3A465A"), 1))
@@ -544,8 +740,8 @@ class MultiSeriesHistoryChart(QWidget):
             for i, line in enumerate(lines):
                 if i == 0:
                     painter.setPen(QColor("#D5DEEA"))
-                elif i - 1 < len(self._series):
-                    painter.setPen(QColor(self._series[i - 1].color))
+                elif i - 1 < len(hover_series):
+                    painter.setPen(QColor(hover_series[i - 1].color))
                 painter.drawText(
                     QRectF(card.left() + 8, ty, card.width() - 12, metrics.height()),
                     line,
@@ -1079,21 +1275,41 @@ class ComposerHistoryPreview(QFrame):
         header.addStretch(1)
         header.addWidget(self._window, stretch=0)
 
-        self._chip_composers = _habits_chip(
-            "— composers", fg="#A8C3A4", bg="#1A2420", border="#2F4638"
+        self._chip_composers = SeriesToggleChip(
+            "Composers", fg="#A8C3A4", bg="#1A2420", border="#2F4638"
         )
-        self._chip_tokens = _habits_chip(
-            "— tokens", fg="#E0C090", bg="#242016", border="#4A3C28"
+        self._chip_tokens = SeriesToggleChip(
+            "Tokens", fg="#E0C090", bg="#242016", border="#4A3C28"
         )
-        self._chip_abort = _habits_chip(
-            "— abort", fg="#D0B56C", bg="#242018", border="#4A4028"
+        self._chip_abort = SeriesToggleChip(
+            "Abort %", fg="#D0B56C", bg="#242018", border="#4A4028"
         )
-        self._chip_tool = _habits_chip(
-            "— tool err", fg="#D9897A", bg="#261C1A", border="#4A322E"
+        self._chip_tool = SeriesToggleChip(
+            "Tool error %", fg="#D9897A", bg="#261C1A", border="#4A322E"
         )
-        self._chip_accept = _habits_chip(
-            "— accept", fg="#8BA4C7", bg="#1A2030", border="#2F3B52"
+        self._chip_accept = SeriesToggleChip(
+            "Accept %", fg="#8BA4C7", bg="#1A2030", border="#2F3B52"
         )
+        self._chip_auto = SeriesToggleChip(
+            "AUTO %", fg="#6FA8DC", bg="#1A2030", border="#2F3B52"
+        )
+        self._chip_api = SeriesToggleChip(
+            "API %", fg="#B0B0B0", bg="#1E1E1E", border="#3A3A3A"
+        )
+        self._chip_auto.hide()
+        self._chip_api.hide()
+
+        self._series_chips: list[SeriesToggleChip] = [
+            self._chip_composers,
+            self._chip_tokens,
+            self._chip_abort,
+            self._chip_tool,
+            self._chip_accept,
+            self._chip_auto,
+            self._chip_api,
+        ]
+        for chip in self._series_chips:
+            chip.toggled.connect(self._on_series_chip_toggled)
 
         chips = QVBoxLayout()
         chips.setContentsMargins(0, 0, 0, 0)
@@ -1111,8 +1327,15 @@ class ComposerHistoryPreview(QFrame):
         chip_row2.addWidget(self._chip_tool)
         chip_row2.addWidget(self._chip_accept)
         chip_row2.addStretch(1)
+        chip_row3 = QHBoxLayout()
+        chip_row3.setContentsMargins(0, 0, 0, 0)
+        chip_row3.setSpacing(6)
+        chip_row3.addWidget(self._chip_auto)
+        chip_row3.addWidget(self._chip_api)
+        chip_row3.addStretch(1)
         chips.addLayout(chip_row1)
         chips.addLayout(chip_row2)
+        chips.addLayout(chip_row3)
 
         caption = QLabel("Billing periods from state.vscdb · older → newer")
         cap_font = QFont()
@@ -1122,25 +1345,6 @@ class ComposerHistoryPreview(QFrame):
         caption.setStyleSheet("color: #6F7887; background: transparent; border: none;")
         self._caption = caption
         self._chart = MultiSeriesHistoryChart()
-
-        self._insight = QLabel("")
-        insight_font = QFont()
-        insight_font.setPointSize(9)
-        self._insight.setFont(insight_font)
-        self._insight.setWordWrap(True)
-        self._insight.setStyleSheet(
-            """
-            QLabel {
-                color: #B7C0CE;
-                background: #1B2230;
-                border: 1px solid #2C3648;
-                border-left: 3px solid #D0B56C;
-                border-radius: 8px;
-                padding: 7px 10px;
-            }
-            """
-        )
-        self._insight.hide()
 
         self._fallback = QLabel("")
         fallback_font = QFont()
@@ -1158,8 +1362,6 @@ class ComposerHistoryPreview(QFrame):
         content_layout.setSpacing(8)
         content_layout.addLayout(chips)
         content_layout.addWidget(self._caption)
-        # Summary above the plot so it never covers axis labels / series.
-        content_layout.addWidget(self._insight)
         content_layout.addWidget(self._chart)
 
         layout = QVBoxLayout(self)
@@ -1215,21 +1417,27 @@ class ComposerHistoryPreview(QFrame):
         self._caption.setText(
             f"Billing periods · {len(labels)} · {preview.composers} composers"
             + (f" · {token_total:,} tokens" if token_total else "")
-            + " · older → newer · hover for values"
+            + " · older → newer · click chips to toggle series"
         )
 
-        self._chip_composers.setText(f"{preview.composers} composers")
-        latest_tokens = next(
-            (int(v) for v in reversed(tokens) if v is not None), None
-        )
+        def _latest(values: list[float | None]) -> float | None:
+            return next((v for v in reversed(values) if v is not None), None)
+
+        latest_composers = _latest(composers)
+        if latest_composers is None:
+            self._chip_composers.setText("— composers")
+        else:
+            self._chip_composers.setText(f"{int(latest_composers)} composers")
+
+        latest_tokens = _latest(tokens)
         if latest_tokens is None:
             self._chip_tokens.setText("— tokens")
         else:
-            self._chip_tokens.setText(_format_token_chip(latest_tokens))
+            self._chip_tokens.setText(_format_token_chip(int(latest_tokens)))
 
-        latest_abort = next((v for v in reversed(abort) if v is not None), None)
-        latest_tool = next((v for v in reversed(tool_err) if v is not None), None)
-        latest_accept = next((v for v in reversed(accept) if v is not None), None)
+        latest_abort = _latest(abort)
+        latest_tool = _latest(tool_err)
+        latest_accept = _latest(accept)
         if latest_abort is None:
             self._chip_abort.setText("— abort")
         else:
@@ -1243,6 +1451,27 @@ class ComposerHistoryPreview(QFrame):
         else:
             self._chip_accept.setText(f"{latest_accept:.0f}% accept")
 
+        latest_auto = _latest(auto_pct)
+        latest_api = _latest(api_pct)
+        has_auto = any(v is not None for v in auto_pct)
+        has_api = any(v is not None for v in api_pct)
+        if has_auto:
+            if latest_auto is None:
+                self._chip_auto.setText("— AUTO")
+            else:
+                self._chip_auto.setText(f"{latest_auto:.0f}% AUTO")
+            self._chip_auto.show()
+        else:
+            self._chip_auto.hide()
+        if has_api:
+            if latest_api is None:
+                self._chip_api.setText("— API")
+            else:
+                self._chip_api.setText(f"{latest_api:.0f}% API")
+            self._chip_api.show()
+        else:
+            self._chip_api.hide()
+
         series = [
             ChartSeries("Composers", "#A8C3A4", composers),
             ChartSeries("Tokens", "#E0C090", tokens, area=True),
@@ -1250,26 +1479,29 @@ class ComposerHistoryPreview(QFrame):
             ChartSeries("Tool error %", "#D9897A", tool_err, unit="%"),
             ChartSeries("Accept %", "#8BA4C7", accept, unit="%"),
         ]
-        if any(v is not None for v in auto_pct):
+        if has_auto:
             series.append(ChartSeries("AUTO %", "#6FA8DC", auto_pct, unit="%"))
-        if any(v is not None for v in api_pct):
+        if has_api:
             series.append(ChartSeries("API %", "#B0B0B0", api_pct, unit="%"))
 
         self._chart.set_data(
             labels,
             series,
             weights=weights,
-            caption="Hover a period for exact values (lines are normalized per metric)",
+            caption="Hover a period for exact values · click chips to toggle series",
         )
+        self._sync_series_chip_states()
 
-        insight = (
-            usage.insight if usage.available and usage.insight else preview.insight
-        )
-        if insight:
-            self._insight.setText(insight)
-            self._insight.show()
-        else:
-            self._insight.hide()
+    def _on_series_chip_toggled(self, series_name: str) -> None:
+        visible = self._chart.toggle_series(series_name)
+        for chip in self._series_chips:
+            if chip.series_name == series_name:
+                chip.set_series_on(visible)
+                break
+
+    def _sync_series_chip_states(self) -> None:
+        for chip in self._series_chips:
+            chip.set_series_on(self._chart.is_series_visible(chip.series_name))
 
 
 class CountdownLabel(QLabel):
@@ -1345,7 +1577,7 @@ class DraggablePanel(QFrame):
         """Clicks on these controls should not start a panel reorder."""
         current = widget
         while isinstance(current, QObject):
-            if isinstance(current, (CopyableCommand, CountdownLabel)):
+            if isinstance(current, (CopyableCommand, CountdownLabel, SeriesToggleChip)):
                 return True
             current = current.parent()
         return False
