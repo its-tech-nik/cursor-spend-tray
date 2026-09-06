@@ -495,6 +495,14 @@ class _CtxMenuRow(QFrame):
         else:
             self._trailing.setText("")
 
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        # Hovering another main-menu item should dismiss any open flyout
+        # (QMenu-style). Rows inside TrayContextSubmenu must not close it.
+        parent = self.parent()
+        if isinstance(parent, TrayContextMenu):
+            parent.close_submenus()
+        super().enterEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.MouseButton.LeftButton and self._action.isEnabled():
             self._action.trigger()
