@@ -8,6 +8,7 @@ from PyQt6.QtCore import (
     QObject,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
     QSize,
     QTimer,
@@ -29,6 +30,8 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -44,6 +47,86 @@ from .usage_csv import UsageCsvPreview, load_usage_preview
 from .vscdb_stats import VscdbHabitsPreview, VscdbPeriodBucket, collect_vscdb_habits_preview
 
 PANEL_MIME = "application/x-cursor-spend-tray-panel"
+
+
+class FlowLayout(QLayout):
+    """Left-flowing wrap layout — packs widgets tightly, wraps when needed."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        hspacing: int = 4,
+        vspacing: int = 4,
+    ) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self._hspacing = hspacing
+        self._vspacing = vspacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientation:  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        row_h = 0
+        for item in self._items:
+            w = item.widget()
+            if w is not None and w.isHidden():
+                continue
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._hspacing
+            if row_h and next_x - self._hspacing > effective.right() + 1:
+                x = effective.x()
+                y += row_h + self._vspacing
+                next_x = x + hint.width() + self._hspacing
+                row_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            row_h = max(row_h, hint.height())
+        return y + row_h - rect.y() + m.bottom()
 
 
 class CopyableCommand(QLabel):
@@ -322,7 +405,6 @@ class SeriesToggleChip(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(f"Click to show/hide {series_name} on the chart")
         self._apply_style()
 
     def set_series_on(self, on: bool) -> None:
@@ -414,9 +496,9 @@ def _format_chart_value(value: float | None, unit: str = "") -> str:
 class MultiSeriesHistoryChart(QWidget):
     """Single multi-line chart; series are min–max normalized; hover shows raw values."""
 
-    # Desired plot body height; total widget height = legend + plot + axis.
-    _PLOT_BODY = 260
-    _AXIS_RESERVE = 18
+    # Desired plot body height; total widget height = legend + plot.
+    _PLOT_BODY = 200
+    _AXIS_RESERVE = 0  # period axis label hidden; keep constant for height math
     _LEGEND_TOP = 8
     _LEGEND_GAP = 10
     # Pixel clearance inside the plot so peaks/floor dots aren't edge-clipped.
@@ -501,7 +583,6 @@ class MultiSeriesHistoryChart(QWidget):
         names = {s.name for s in self._series}
         self._hidden &= names
         self._hover_index = None
-        self.setToolTip(caption or "Hover a billing period for exact values")
         self.setFixedHeight(self.sizeHint().height())
         self.updateGeometry()
         self.update()
@@ -686,22 +767,6 @@ class MultiSeriesHistoryChart(QWidget):
         for series in [*area_series, *line_series]:
             self._paint_line_series(painter, series)
 
-        # Axis labels — reserved strip below the plot, never over lines
-        axis = QFont()
-        axis.setPointSize(7)
-        painter.setFont(axis)
-        painter.setPen(QColor("#5E6775"))
-        painter.drawText(
-            QRectF(
-                self._plot.left(),
-                self._plot.bottom() + 2,
-                self._plot.width(),
-                axis_reserve - 2,
-            ),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            f"{self._labels[0]} → now",
-        )
-
         # Hover crosshair + value card
         if self._hover_index is not None and 0 <= self._hover_index < len(self._labels):
             idx = self._hover_index
@@ -847,6 +912,11 @@ class MultiSeriesHistoryChart(QWidget):
             if pt is not None:
                 painter.drawEllipse(pt, 2.2, 2.2)
         painter.setBrush(Qt.BrushStyle.NoBrush)
+
+
+# Temporarily hide the whole Agent habits panel in the popup.
+# Keep AgentHabitsPreview / HabitsHistoryCharts until we decide to delete them.
+_SHOW_AGENT_HABITS_PANEL = False
 
 
 class HabitsHistoryCharts(QWidget):
@@ -1065,11 +1135,6 @@ class AgentHabitsPreview(QFrame):
         layout.addWidget(self._fallback)
 
     def apply_preview(self, preview: SdkHabitsPreview) -> None:
-        self.setToolTip(
-            "Local Cursor SDK run stats from ~/.cursor/projects/*/sdk-agent-store "
-            "(read-only). Use this to review prompt friction — not Pro spend."
-        )
-
         if not preview.available or preview.runs_considered == 0:
             message = (
                 preview.error_message
@@ -1260,31 +1325,11 @@ class ComposerHistoryPreview(QFrame):
         title.setFont(title_font)
         title.setStyleSheet("color: #E8ECF2; background: transparent; border: none;")
 
-        badge = _habits_chip(
-            "state.vscdb",
-            fg="#9BB0C9",
-            bg="#1E2530",
-            border="#334155",
-        )
-
-        self._window = QLabel("")
-        window_font = QFont()
-        window_font.setPointSize(8)
-        self._window.setFont(window_font)
-        self._window.setStyleSheet(
-            "color: #6F7887; background: transparent; border: none;"
-        )
-        self._window.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(8)
+        header.setSpacing(0)
         header.addWidget(title, stretch=0)
-        header.addWidget(badge, stretch=0)
         header.addStretch(1)
-        header.addWidget(self._window, stretch=0)
 
         self._chip_composers = SeriesToggleChip(
             "Composers", fg="#A8C3A4", bg="#1A2420", border="#2F4638"
@@ -1311,8 +1356,8 @@ class ComposerHistoryPreview(QFrame):
         self._chip_api.hide()
 
         self._series_chips: list[SeriesToggleChip] = [
-            self._chip_composers,
             self._chip_tokens,
+            self._chip_composers,
             self._chip_abort,
             self._chip_tool,
             self._chip_accept,
@@ -1322,38 +1367,20 @@ class ComposerHistoryPreview(QFrame):
         for chip in self._series_chips:
             chip.toggled.connect(self._on_series_chip_toggled)
 
-        chips = QVBoxLayout()
-        chips.setContentsMargins(0, 0, 0, 0)
-        chips.setSpacing(6)
-        chip_row1 = QHBoxLayout()
-        chip_row1.setContentsMargins(0, 0, 0, 0)
-        chip_row1.setSpacing(6)
-        chip_row1.addWidget(self._chip_composers)
-        chip_row1.addWidget(self._chip_tokens)
-        chip_row1.addStretch(1)
-        chip_row2 = QHBoxLayout()
-        chip_row2.setContentsMargins(0, 0, 0, 0)
-        chip_row2.setSpacing(6)
-        chip_row2.addWidget(self._chip_abort)
-        chip_row2.addWidget(self._chip_tool)
-        chip_row2.addWidget(self._chip_accept)
-        chip_row2.addStretch(1)
-        chip_row3 = QHBoxLayout()
-        chip_row3.setContentsMargins(0, 0, 0, 0)
-        chip_row3.setSpacing(6)
-        chip_row3.addWidget(self._chip_auto)
-        chip_row3.addWidget(self._chip_api)
-        chip_row3.addStretch(1)
-        chips.addLayout(chip_row1)
-        chips.addLayout(chip_row2)
-        chips.addLayout(chip_row3)
+        chips_host = QWidget()
+        chips = FlowLayout(chips_host, hspacing=4, vspacing=4)
+        for chip in self._series_chips:
+            chips.addWidget(chip)
+        self._chips_host = chips_host
 
-        caption = QLabel("Billing periods from state.vscdb · older → newer")
+        caption = QLabel("Billing periods")
         cap_font = QFont()
         cap_font.setPointSize(8)
         caption.setFont(cap_font)
         caption.setWordWrap(True)
-        caption.setStyleSheet("color: #6F7887; background: transparent; border: none;")
+        caption.setStyleSheet(
+            "color: #6F7887; background: transparent; border: none; padding-top: 12px;"
+        )
         self._caption = caption
         self._chart = MultiSeriesHistoryChart()
 
@@ -1371,12 +1398,12 @@ class ComposerHistoryPreview(QFrame):
         content_layout = QVBoxLayout(self._content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
-        content_layout.addLayout(chips)
-        content_layout.addWidget(self._caption)
+        content_layout.addWidget(chips_host)
         content_layout.addWidget(self._chart)
+        content_layout.addWidget(self._caption)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 11, 12, 11)
+        layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         layout.addLayout(header)
         layout.addWidget(self._content)
@@ -1387,11 +1414,6 @@ class ComposerHistoryPreview(QFrame):
         preview: VscdbHabitsPreview,
         usage: UsageCsvPreview | None = None,
     ) -> None:
-        self.setToolTip(
-            "Composer signals from state.vscdb plus dashboard usage CSV token totals "
-            "(billing periods). AUTO/API % associate from spend scrapes starting now. "
-            f"CSVs: {(usage.csv_dir if usage else '') or '~/.local/share/cursor-spend-tray/usage-csv'}"
-        )
         usage = usage or UsageCsvPreview.unavailable("")
         (
             labels,
@@ -1411,24 +1433,17 @@ class ComposerHistoryPreview(QFrame):
                 or "Not enough billing-period history yet"
             )
             self._content.hide()
-            self._window.setText("")
             self._fallback.setText(message)
             self._fallback.show()
             return
 
         self._fallback.hide()
         self._content.show()
-        earliest = preview.earliest or (usage.earliest if usage.available else "")
-        latest_label = preview.latest or (usage.latest if usage.available else "")
-        self._window.setText(
-            f"{earliest} → {latest_label}" if earliest else latest_label
-        )
 
         token_total = sum(int(v) for v in tokens if v is not None)
         self._caption.setText(
             f"Billing periods · {len(labels)} · {preview.composers} composers"
             + (f" · {token_total:,} tokens" if token_total else "")
-            + " · older → newer · click chips to toggle series"
         )
 
         def _latest(values: list[float | None]) -> float | None:
@@ -1482,10 +1497,11 @@ class ComposerHistoryPreview(QFrame):
             self._chip_api.show()
         else:
             self._chip_api.hide()
+        self._chips_host.updateGeometry()
 
         series = [
-            ChartSeries("Composers", "#A8C3A4", composers),
             ChartSeries("Tokens", "#E0C090", tokens, area=True),
+            ChartSeries("Composers", "#A8C3A4", composers),
             ChartSeries("Abort %", "#D0B56C", abort, unit="%"),
             ChartSeries("Tool error %", "#D9897A", tool_err, unit="%"),
             ChartSeries("Accept %", "#8BA4C7", accept, unit="%"),
@@ -1540,7 +1556,6 @@ class CountdownLabel(QLabel):
             }
             """
         )
-        self.setToolTip("Click to refresh now")
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1574,7 +1589,6 @@ class DraggablePanel(QFrame):
         self.setObjectName("draggablePanel")
         self.setAcceptDrops(False)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setToolTip("Drag to reorder panels")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -1843,13 +1857,11 @@ class SpendPopup(QFrame):
         self.cursor_ring = UsageRing(
             "AUTO",
             "#8BA4C7",
-            tooltip="Cursor Models — includes Cursor Grok and Composer. Extra usage consumes API quota or on-demand spend.",
         )
         self.other_ring = UsageRing(
             "API",
             "#B0B0B0",
             warn_at_70=True,
-            tooltip="Other Models — additional usage beyond limits consumes on-demand spend.",
         )
 
         rings = QHBoxLayout()
@@ -1878,6 +1890,8 @@ class SpendPopup(QFrame):
         self._panel_host.add_panel(self._composer_panel)
         self._panel_host.set_order(load_popup_panel_order())
         self._panel_host.order_changed.connect(save_popup_panel_order)
+        # Panel code stays mounted; flip `_SHOW_AGENT_HABITS_PANEL` to restore.
+        self._habits_panel.setVisible(_SHOW_AGENT_HABITS_PANEL)
 
         self.countdown = CountdownLabel()
         self.countdown.clicked.connect(self.refresh_requested.emit)
@@ -1901,11 +1915,16 @@ class SpendPopup(QFrame):
 
     def refresh_habits(self) -> None:
         """Reload local SDK + state.vscdb + usage-CSV habit stats (soft-fails)."""
-        try:
-            preview = collect_habits_preview()
-        except Exception:  # noqa: BLE001 — popup must stay usable
-            preview = SdkHabitsPreview.unavailable("Could not read local SDK stats")
-        self.habits.apply_preview(preview)
+        if _SHOW_AGENT_HABITS_PANEL:
+            try:
+                preview = collect_habits_preview()
+            except Exception:  # noqa: BLE001 — popup must stay usable
+                preview = SdkHabitsPreview.unavailable(
+                    "Could not read local SDK stats"
+                )
+            self.habits.apply_preview(preview)
+        else:
+            self._habits_panel.hide()
         try:
             vscdb = collect_vscdb_habits_preview()
         except Exception:  # noqa: BLE001
