@@ -419,8 +419,10 @@ class MultiSeriesHistoryChart(QWidget):
     _AXIS_RESERVE = 18
     _LEGEND_TOP = 8
     _LEGEND_GAP = 10
-    # Keep peaks/dots inside the plot — map series into this inset.
-    _DRAW_INSET = 12.0
+    # Pixel clearance inside the plot so peaks/floor dots aren't edge-clipped.
+    _CEILING_CLEARANCE = 12.0
+    # Keep 0% / min values clearly above the plot floor (dots + stroke + AA).
+    _FLOOR_CLEARANCE = 28.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -522,16 +524,17 @@ class MultiSeriesHistoryChart(QWidget):
         return [s for s in self._series if s.name not in self._hidden]
 
     def _draw_rect(self) -> QRectF:
-        """Inset viewing area for series — peaks stay clear of plot edges."""
-        inset = self._DRAW_INSET
+        """Viewing area for series — fixed pixel insets so floor/ceiling stay visible."""
+        top = self._CEILING_CLEARANCE
+        bottom = self._FLOOR_CLEARANCE
         r = self._plot
-        if r.height() <= inset * 2 + 4:
+        if r.height() <= top + bottom + 4:
             return r
         return QRectF(
             r.left(),
-            r.top() + inset,
+            r.top() + top,
             r.width(),
-            r.height() - 2 * inset,
+            r.height() - top - bottom,
         )
 
     def leaveEvent(self, event) -> None:  # noqa: ANN001
@@ -560,10 +563,9 @@ class MultiSeriesHistoryChart(QWidget):
         hi = max(numeric)
         if hi <= lo:
             hi = lo + 1.0
-        # Extra headroom so max/min don't sit on the draw-rect edge.
-        pad = (hi - lo) * 0.14
-        lo -= pad
-        hi += pad
+        span = hi - lo
+        # Peak headroom in value space; floor clearance is pixel-based via _draw_rect.
+        hi += span * 0.14
         draw = self._draw_rect()
         n = len(values)
         out: list[QPointF | None] = []
@@ -576,6 +578,7 @@ class MultiSeriesHistoryChart(QWidget):
                 if n == 1
                 else draw.left() + (draw.width() * i / (n - 1))
             )
+            # Min maps to draw.bottom() (= plot.bottom - _FLOOR_CLEARANCE).
             y = draw.bottom() - ((value - lo) / (hi - lo)) * draw.height()
             out.append(QPointF(x, y))
         return out
@@ -667,6 +670,13 @@ class MultiSeriesHistoryChart(QWidget):
             painter.drawLine(
                 QPointF(self._plot.left(), y), QPointF(self._plot.right(), y)
             )
+        # Floor baseline — makes 0%/min values readable above the axis strip.
+        floor_y = self._draw_rect().bottom()
+        painter.setPen(QPen(QColor("#2A3545"), 1, Qt.PenStyle.SolidLine))
+        painter.drawLine(
+            QPointF(self._plot.left(), floor_y),
+            QPointF(self._plot.right(), floor_y),
+        )
 
         # Area fills first (behind), then every line/dot on top.
         area_series = [s for s in visible_series if s.area]
@@ -760,7 +770,8 @@ class MultiSeriesHistoryChart(QWidget):
         fill.setAlpha(55)
         stroke = QColor(series.color)
         stroke.setAlpha(160)
-        base_y = self._plot.bottom()
+        # Align fill to the same floor as line series (not the axis strip).
+        base_y = self._draw_rect().bottom()
 
         run: list[QPointF] = []
         def flush() -> None:
