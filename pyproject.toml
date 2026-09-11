@@ -26,5 +26,11 @@ Repository = "https://github.com/its-tech-nik/cursor-spend-tray"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "watchfiles>=1.0.0",
+]
+
 [tool.uv]
 package = true
+default-groups = ["dev"]

@@ -50,6 +50,13 @@ uv sync
 uv run cursor-spend-tray
 ```
 
+While developing, auto-restart on `src/` changes (requires the `dev` dependency group, included by default with `uv sync`):
+
+```bash
+./scripts/dev.sh
+# same as: uv run watchfiles --filter python --target-type command --sigint-timeout 15 cursor-spend-tray src
+```
+
 On Wayland (e.g. Plasma), the app defaults to **XWayland (`QT_QPA_PLATFORM=xcb`)** so the popup can be moved and dismissed on outside click. Icon position comes from Plasma’s `Activate(x, y)` (Qt’s `QSystemTrayIcon.geometry()` is always empty on Linux). The popup opens under a top panel icon and above a bottom panel icon.
 
 ### Packaging notes
