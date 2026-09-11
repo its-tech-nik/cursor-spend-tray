@@ -378,6 +378,174 @@ def _habits_chip(text: str, *, fg: str, bg: str, border: str) -> QLabel:
     return chip
 
 
+class BubbleTip(QFrame):
+    """Solid speech-bubble tip with an arrow pointing at the hovered chip."""
+
+    _instance: BubbleTip | None = None
+    _ARROW = 8
+    _RADIUS = 10
+    _PAD_X = 12
+    _PAD_Y = 10
+    _FILL = QColor("#1E2430")
+    _BORDER = QColor("#3A465A")
+    _TEXT = "#E6EAF0"
+
+    def __init__(self) -> None:
+        super().__init__(None)
+        self.setWindowFlags(
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setStyleSheet("background: transparent; border: none;")
+
+        self._arrow_below = True  # tip above target → arrow on bottom edge
+        self._arrow_x = 0.5  # 0..1 across the bubble width
+
+        self._label = QLabel("")
+        tip_font = QFont()
+        tip_font.setPointSize(9)
+        self._label.setFont(tip_font)
+        self._label.setWordWrap(True)
+        self._label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._label.setStyleSheet(
+            f"color: {self._TEXT}; background: transparent; border: none;"
+        )
+        self._label.setMaximumWidth(200)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(
+            self._PAD_X,
+            self._PAD_Y,
+            self._PAD_X,
+            self._PAD_Y + self._ARROW,
+        )
+        lay.setSpacing(0)
+        lay.addWidget(self._label)
+
+    def _set_arrow_margins(self, *, arrow_below: bool) -> None:
+        lay = self.layout()
+        if lay is None:
+            return
+        if arrow_below:
+            lay.setContentsMargins(
+                self._PAD_X,
+                self._PAD_Y,
+                self._PAD_X,
+                self._PAD_Y + self._ARROW,
+            )
+        else:
+            lay.setContentsMargins(
+                self._PAD_X,
+                self._PAD_Y + self._ARROW,
+                self._PAD_X,
+                self._PAD_Y,
+            )
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, ARG002
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        arrow = float(self._ARROW)
+        # Body sits opposite the arrow so the tip can point at the chip.
+        if self._arrow_below:
+            body = QRectF(
+                1.0, 1.0, self.width() - 2.0, self.height() - arrow - 2.0
+            )
+        else:
+            body = QRectF(
+                1.0, arrow + 1.0, self.width() - 2.0, self.height() - arrow - 2.0
+            )
+
+        path = QPainterPath()
+        path.setFillRule(Qt.FillRule.WindingFill)
+        path.addRoundedRect(body, float(self._RADIUS), float(self._RADIUS))
+
+        tip_x = body.left() + max(
+            self._RADIUS + 4.0,
+            min(body.width() - self._RADIUS - 4.0, body.width() * self._arrow_x),
+        )
+        half = 7.0
+        if self._arrow_below:
+            path.moveTo(tip_x - half, body.bottom())
+            path.lineTo(tip_x, body.bottom() + arrow - 1.0)
+            path.lineTo(tip_x + half, body.bottom())
+            path.closeSubpath()
+        else:
+            path.moveTo(tip_x - half, body.top())
+            path.lineTo(tip_x, body.top() - arrow + 1.0)
+            path.lineTo(tip_x + half, body.top())
+            path.closeSubpath()
+
+        painter.setPen(QPen(self._BORDER, 1.0))
+        painter.setBrush(self._FILL)
+        painter.drawPath(path)
+        painter.end()
+
+    def show_for(self, widget: QWidget, text: str) -> None:
+        clean = text.strip()
+        if not clean:
+            self.hide()
+            return
+        self._label.setText(clean)
+        self._label.adjustSize()
+        self.adjustSize()
+
+        origin = widget.mapToGlobal(QPoint(0, 0))
+        tip_w, tip_h = self.width(), self.height()
+        chip_cx = origin.x() + widget.width() / 2.0
+
+        # Prefer above the chip; flip below if the screen clips the top.
+        place_above = True
+        x = int(chip_cx - tip_w / 2.0)
+        y = origin.y() - tip_h + 2
+        screen = QGuiApplication.screenAt(origin) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            x = max(geo.left() + 4, min(x, geo.right() - tip_w - 4))
+            if y < geo.top() + 4:
+                place_above = False
+                y = origin.y() + widget.height() - 2
+            y = max(geo.top() + 4, min(y, geo.bottom() - tip_h - 4))
+
+        self._arrow_below = place_above
+        # Aim the arrow at the chip center even if the bubble was shifted.
+        self._arrow_x = (chip_cx - x) / tip_w if tip_w else 0.5
+        self._arrow_x = max(0.12, min(0.88, self._arrow_x))
+        self._set_arrow_margins(arrow_below=self._arrow_below)
+        self.adjustSize()
+        tip_w, tip_h = self.width(), self.height()
+        if place_above:
+            y = origin.y() - tip_h + 2
+        else:
+            y = origin.y() + widget.height() - 2
+        if screen is not None:
+            geo = screen.availableGeometry()
+            y = max(geo.top() + 4, min(y, geo.bottom() - tip_h - 4))
+        self.move(x, y)
+        self.update()
+        self.show()
+        self.raise_()
+
+    @classmethod
+    def shared(cls) -> BubbleTip:
+        if cls._instance is None:
+            cls._instance = BubbleTip()
+        return cls._instance
+
+    @classmethod
+    def hide_shared(cls) -> None:
+        if cls._instance is not None and cls._instance.isVisible():
+            cls._instance.hide()
+
+
 class SeriesToggleChip(QLabel):
     """Colored metric pill — shows latest period value; click toggles chart series."""
 
@@ -390,6 +558,7 @@ class SeriesToggleChip(QLabel):
         fg: str,
         bg: str,
         border: str,
+        tooltip: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__("—", parent)
@@ -398,6 +567,11 @@ class SeriesToggleChip(QLabel):
         self._bg = bg
         self._border = border
         self._series_on = True
+        self._bubble_tip = tooltip.strip()
+        self._tip_timer = QTimer(self)
+        self._tip_timer.setSingleShot(True)
+        self._tip_timer.setInterval(280)
+        self._tip_timer.timeout.connect(self._show_bubble_tip)
         font = QFont()
         font.setPointSize(8)
         font.setWeight(QFont.Weight.DemiBold)
@@ -405,6 +579,8 @@ class SeriesToggleChip(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Custom bubble tip — avoid the flat system QToolTip strip.
+        self.setToolTip("")
         self._apply_style()
 
     def set_series_on(self, on: bool) -> None:
@@ -436,8 +612,30 @@ class SeriesToggleChip(QLabel):
             """
         )
 
+    def _show_bubble_tip(self) -> None:
+        if not self._bubble_tip or not self.underMouse():
+            return
+        BubbleTip.shared().show_for(self, self._bubble_tip)
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        if self._bubble_tip:
+            self._tip_timer.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        self._tip_timer.stop()
+        BubbleTip.hide_shared()
+        super().leaveEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: ANN001
+        self._tip_timer.stop()
+        BubbleTip.hide_shared()
+        super().hideEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.MouseButton.LeftButton:
+            self._tip_timer.stop()
+            BubbleTip.hide_shared()
             self.toggled.emit(self.series_name)
         super().mouseReleaseEvent(event)
 
@@ -1215,6 +1413,7 @@ def _format_token_chip(n: int) -> str:
 def _merge_composer_usage_series(
     preview: VscdbHabitsPreview,
     usage: UsageCsvPreview,
+    sdk: SdkHabitsPreview | None = None,
 ) -> tuple[
     list[str],
     list[float | None],
@@ -1224,9 +1423,14 @@ def _merge_composer_usage_series(
     list[float | None],
     list[float | None],
     list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
     list[int],
 ]:
-    """Union billing periods from vscdb + usage CSV into aligned chart series."""
+    """Union billing periods from vscdb + usage CSV + SDK/pi into aligned series."""
     by_start: dict[str, VscdbPeriodBucket] = {}
     if preview.available:
         for p in preview.periods:
@@ -1237,7 +1441,14 @@ def _merge_composer_usage_series(
         for u in usage.periods:
             usage_by[u.period_start] = u
 
-    starts = sorted(set(by_start) | set(usage_by))
+    sdk_by: dict[str, SdkHabitsBatch] = {}
+    if sdk is not None and sdk.available:
+        for batch in sdk.history:
+            key = batch.period_start or ""
+            if key:
+                sdk_by[key] = batch
+
+    starts = sorted(set(by_start) | set(usage_by) | set(sdk_by))
     labels: list[str] = []
     composers: list[float | None] = []
     tokens: list[float | None] = []
@@ -1246,14 +1457,21 @@ def _merge_composer_usage_series(
     accept: list[float | None] = []
     auto_pct: list[float | None] = []
     api_pct: list[float | None] = []
+    pi_runs: list[float | None] = []
+    pi_abort: list[float | None] = []
+    pi_tool_err: list[float | None] = []
+    pi_friction: list[float | None] = []
+    pi_tokens: list[float | None] = []
     weights: list[int] = []
 
     for key in starts:
         v = by_start.get(key)
         u = usage_by.get(key)
+        s = sdk_by.get(key)
         label = (
             (v.label if v else None)
             or (getattr(u, "label", None) if u is not None else None)
+            or (s.label if s is not None else None)
             or key
         )
         labels.append(str(label))
@@ -1288,6 +1506,30 @@ def _merge_composer_usage_series(
             tokens.append(None)
             auto_pct.append(None)
             api_pct.append(None)
+        if s is not None:
+            pi_runs.append(float(s.runs))
+            pi_abort.append(
+                float(s.abort_rate_pct) if s.abort_rate_pct is not None else None
+            )
+            pi_tool_err.append(
+                float(s.shell_fail_pct) if s.shell_fail_pct is not None else None
+            )
+            pi_friction.append(
+                float(s.friction_rate_pct) if s.friction_rate_pct is not None else None
+            )
+            pi_tokens.append(
+                float(s.median_total_tokens)
+                if s.median_total_tokens is not None
+                else None
+            )
+            if weights[-1] == 0:
+                weights[-1] = s.runs
+        else:
+            pi_runs.append(None)
+            pi_abort.append(None)
+            pi_tool_err.append(None)
+            pi_friction.append(None)
+            pi_tokens.append(None)
 
     return (
         labels,
@@ -1298,6 +1540,11 @@ def _merge_composer_usage_series(
         accept,
         auto_pct,
         api_pct,
+        pi_runs,
+        pi_abort,
+        pi_tool_err,
+        pi_friction,
+        pi_tokens,
         weights,
     )
 
@@ -1332,25 +1579,145 @@ class ComposerHistoryPreview(QFrame):
         header.addStretch(1)
 
         self._chip_composers = SeriesToggleChip(
-            "Composers", fg="#A8C3A4", bg="#1A2420", border="#2F4638"
+            "Composers",
+            fg="#A8C3A4",
+            bg="#1A2420",
+            border="#2F4638",
+            tooltip=(
+                "Cursor Composer / Agent chat threads\n"
+                "in this billing period (state.vscdb).\n"
+                "\n"
+                "One thread = one composer,\n"
+                "no matter how many follow-ups."
+            ),
         )
         self._chip_tokens = SeriesToggleChip(
-            "Tokens", fg="#E0C090", bg="#242016", border="#4A3C28"
+            "Tokens",
+            fg="#E0C090",
+            bg="#242016",
+            border="#4A3C28",
+            tooltip=(
+                "Total tokens from Cursor\n"
+                "usage-events CSV this period.\n"
+                "\n"
+                "Native Cursor usage — not pi."
+            ),
         )
         self._chip_abort = SeriesToggleChip(
-            "Abort %", fg="#D0B56C", bg="#242018", border="#4A4028"
+            "Abort %",
+            fg="#D0B56C",
+            bg="#242018",
+            border="#4A4028",
+            tooltip=(
+                "Share of Cursor Composer threads\n"
+                "marked aborted in state.vscdb\n"
+                "for this billing period."
+            ),
         )
         self._chip_tool = SeriesToggleChip(
-            "Tool error %", fg="#D9897A", bg="#261C1A", border="#4A322E"
+            "Tool error %",
+            fg="#D9897A",
+            bg="#261C1A",
+            border="#4A322E",
+            tooltip=(
+                "Share of Cursor Composer tool calls\n"
+                "that ended in error\n"
+                "(from state.vscdb bubbles)."
+            ),
         )
         self._chip_accept = SeriesToggleChip(
-            "Accept %", fg="#8BA4C7", bg="#1A2030", border="#2F3B52"
+            "Accept %",
+            fg="#8BA4C7",
+            bg="#1A2030",
+            border="#2F3B52",
+            tooltip=(
+                "Composer suggested lines accepted\n"
+                "÷ suggested (aiCodeTracking).\n"
+                "\n"
+                "Not available for pi edits."
+            ),
         )
         self._chip_auto = SeriesToggleChip(
-            "AUTO %", fg="#6FA8DC", bg="#1A2030", border="#2F3B52"
+            "AUTO %",
+            fg="#6FA8DC",
+            bg="#1A2030",
+            border="#2F3B52",
+            tooltip=(
+                "Included-in-Pro AUTO usage %\n"
+                "from the Cursor spending page\n"
+                "for this billing period."
+            ),
         )
         self._chip_api = SeriesToggleChip(
-            "API %", fg="#B0B0B0", bg="#1E1E1E", border="#3A3A3A"
+            "API %",
+            fg="#B0B0B0",
+            bg="#1E1E1E",
+            border="#3A3A3A",
+            tooltip=(
+                "Included-in-Pro API usage %\n"
+                "from the Cursor spending page\n"
+                "for this billing period."
+            ),
+        )
+        self._chip_pi_runs = SeriesToggleChip(
+            "pi/runs",
+            fg="#7BC9A6",
+            bg="#15241F",
+            border="#2A4A3C",
+            tooltip=(
+                "Cursor SDK / pi agent runs\n"
+                "in this billing period\n"
+                "(sdk-agent-store).\n"
+                "\n"
+                "One chat can contain many runs."
+            ),
+        )
+        self._chip_pi_abort = SeriesToggleChip(
+            "pi/abort %",
+            fg="#E0C070",
+            bg="#2A2414",
+            border="#4A4020",
+            tooltip=(
+                "CANCELLED ÷ (FINISHED + CANCELLED)\n"
+                "among pi / SDK runs.\n"
+                "\n"
+                "Excludes ERROR status."
+            ),
+        )
+        self._chip_pi_tool = SeriesToggleChip(
+            "pi/tool err %",
+            fg="#E09A8A",
+            bg="#2A1C1A",
+            border="#4A3530",
+            tooltip=(
+                "Shell calls with non-zero exit\n"
+                "÷ all shell calls\n"
+                "in pi / SDK runs."
+            ),
+        )
+        self._chip_pi_friction = SeriesToggleChip(
+            "pi/friction %",
+            fg="#9BB0D0",
+            bg="#1A2030",
+            border="#354460",
+            tooltip=(
+                "(CANCELLED + ERROR)\n"
+                "÷ terminal pi / SDK runs.\n"
+                "\n"
+                "Broad “didn’t finish OK” rate."
+            ),
+        )
+        self._chip_pi_tokens = SeriesToggleChip(
+            "pi/tokens",
+            fg="#D4B896",
+            bg="#242016",
+            border="#4A3C28",
+            tooltip=(
+                "Median totalTokens per\n"
+                "pi / SDK run this period.\n"
+                "\n"
+                "From usage_json on finished runs."
+            ),
         )
         self._chip_auto.hide()
         self._chip_api.hide()
@@ -1363,6 +1730,11 @@ class ComposerHistoryPreview(QFrame):
             self._chip_accept,
             self._chip_auto,
             self._chip_api,
+            self._chip_pi_runs,
+            self._chip_pi_abort,
+            self._chip_pi_tool,
+            self._chip_pi_friction,
+            self._chip_pi_tokens,
         ]
         for chip in self._series_chips:
             chip.toggled.connect(self._on_series_chip_toggled)
@@ -1413,8 +1785,10 @@ class ComposerHistoryPreview(QFrame):
         self,
         preview: VscdbHabitsPreview,
         usage: UsageCsvPreview | None = None,
+        sdk: SdkHabitsPreview | None = None,
     ) -> None:
         usage = usage or UsageCsvPreview.unavailable("")
+        sdk = sdk or SdkHabitsPreview.unavailable("")
         (
             labels,
             composers,
@@ -1424,12 +1798,18 @@ class ComposerHistoryPreview(QFrame):
             accept,
             auto_pct,
             api_pct,
+            pi_runs,
+            pi_abort,
+            pi_tool_err,
+            pi_friction,
+            pi_tokens,
             weights,
-        ) = _merge_composer_usage_series(preview, usage)
+        ) = _merge_composer_usage_series(preview, usage, sdk)
         if len(labels) < 2:
             message = (
                 preview.error_message
                 or usage.error_message
+                or sdk.error_message
                 or "Not enough billing-period history yet"
             )
             self._content.hide()
@@ -1441,10 +1821,15 @@ class ComposerHistoryPreview(QFrame):
         self._content.show()
 
         token_total = sum(int(v) for v in tokens if v is not None)
-        self._caption.setText(
+        pi_run_total = sum(int(v) for v in pi_runs if v is not None)
+        caption_bits = [
             f"Billing periods · {len(labels)} · {preview.composers} composers"
-            + (f" · {token_total:,} tokens" if token_total else "")
-        )
+        ]
+        if token_total:
+            caption_bits.append(f"{token_total:,} tokens")
+        if pi_run_total:
+            caption_bits.append(f"{pi_run_total} pi runs")
+        self._caption.setText(" · ".join(caption_bits))
 
         def _latest(values: list[float | None]) -> float | None:
             return next((v for v in reversed(values) if v is not None), None)
@@ -1497,6 +1882,31 @@ class ComposerHistoryPreview(QFrame):
             self._chip_api.show()
         else:
             self._chip_api.hide()
+
+        has_pi = any(v is not None for v in pi_runs)
+        pi_chips = (
+            (self._chip_pi_runs, pi_runs, lambda v: f"{int(v)} pi/runs"),
+            (self._chip_pi_abort, pi_abort, lambda v: f"{v:.0f}% pi/abort"),
+            (self._chip_pi_tool, pi_tool_err, lambda v: f"{v:.0f}% pi/tool err"),
+            (
+                self._chip_pi_friction,
+                pi_friction,
+                lambda v: f"{v:.0f}% pi/friction",
+            ),
+            (
+                self._chip_pi_tokens,
+                pi_tokens,
+                lambda v: f"pi/{_format_token_chip(int(v))}",
+            ),
+        )
+        for chip, series, fmt in pi_chips:
+            if has_pi and any(v is not None for v in series):
+                latest = _latest(series)
+                chip.setText(fmt(latest) if latest is not None else f"— {chip.series_name}")
+                chip.show()
+            else:
+                chip.hide()
+
         self._chips_host.updateGeometry()
 
         series = [
@@ -1510,6 +1920,16 @@ class ComposerHistoryPreview(QFrame):
             series.append(ChartSeries("AUTO %", "#6FA8DC", auto_pct, unit="%"))
         if has_api:
             series.append(ChartSeries("API %", "#B0B0B0", api_pct, unit="%"))
+        if has_pi:
+            for name, color, values, unit in (
+                ("pi/runs", "#7BC9A6", pi_runs, ""),
+                ("pi/abort %", "#E0C070", pi_abort, "%"),
+                ("pi/tool err %", "#E09A8A", pi_tool_err, "%"),
+                ("pi/friction %", "#9BB0D0", pi_friction, "%"),
+                ("pi/tokens", "#D4B896", pi_tokens, ""),
+            ):
+                if any(v is not None for v in values):
+                    series.append(ChartSeries(name, color, values, unit=unit))
 
         self._chart.set_data(
             labels,
@@ -1801,7 +2221,11 @@ class ReorderablePanelHost(QWidget):
 
 
 class SpendPopup(QFrame):
-    """Frameless tray panel. Closes when focus leaves or the user clicks outside."""
+    """Frameless tray panel. Closes when focus leaves or the user clicks outside.
+
+    When opened with keep_open=True (context menu), outside clicks and focus loss
+    do not dismiss it — tray click (or hide()) still closes it.
+    """
 
     refresh_requested = pyqtSignal()
 
@@ -1809,6 +2233,7 @@ class SpendPopup(QFrame):
         super().__init__(parent)
         self._refreshing = False
         self._dismiss_armed = False
+        self._keep_open = False
         self._arm_timer = QTimer(self)
         self._arm_timer.setSingleShot(True)
         self._arm_timer.timeout.connect(self._arm_dismiss)
@@ -1915,14 +2340,12 @@ class SpendPopup(QFrame):
 
     def refresh_habits(self) -> None:
         """Reload local SDK + state.vscdb + usage-CSV habit stats (soft-fails)."""
+        try:
+            sdk = collect_habits_preview()
+        except Exception:  # noqa: BLE001 — popup must stay usable
+            sdk = SdkHabitsPreview.unavailable("Could not read local SDK stats")
         if _SHOW_AGENT_HABITS_PANEL:
-            try:
-                preview = collect_habits_preview()
-            except Exception:  # noqa: BLE001 — popup must stay usable
-                preview = SdkHabitsPreview.unavailable(
-                    "Could not read local SDK stats"
-                )
-            self.habits.apply_preview(preview)
+            self.habits.apply_preview(sdk)
         else:
             self._habits_panel.hide()
         try:
@@ -1933,12 +2356,17 @@ class SpendPopup(QFrame):
             usage = load_usage_preview()
         except Exception:  # noqa: BLE001
             usage = UsageCsvPreview.unavailable("Could not read usage CSV totals")
-        self.composer_history.apply_preview(vscdb, usage)
+        self.composer_history.apply_preview(vscdb, usage, sdk)
         self.adjustSize()
 
-    def show_at(self, pos) -> None:  # noqa: ANN001
-        """Show near tray; close when focus leaves or user clicks elsewhere."""
+    def show_at(self, pos, *, keep_open: bool = False) -> None:  # noqa: ANN001
+        """Show near tray; close when focus leaves or user clicks elsewhere.
+
+        keep_open=True pins the panel until tray click / hide() — outside clicks
+        and focus loss do not dismiss it.
+        """
         self._dismiss_armed = False
+        self._keep_open = keep_open
         self._arm_timer.stop()
         self.refresh_habits()
         self.adjustSize()
@@ -1955,25 +2383,34 @@ class SpendPopup(QFrame):
 
         app = QApplication.instance()
         if app is not None:
-            app.installEventFilter(self._outside_filter)
-            # focusWindowChanged is the reliable leave signal on Plasma/XWayland.
-            try:
-                app.focusWindowChanged.disconnect(self._on_focus_window_changed)
-            except TypeError:
-                pass
-            app.focusWindowChanged.connect(self._on_focus_window_changed)
-
-        # Grace period: the tray Activate that opened us must not instantly dismiss.
-        self._arm_timer.start(300)
+            if keep_open:
+                # Pinned: no outside-click filter / focus-leave dismiss wiring.
+                app.removeEventFilter(self._outside_filter)
+                try:
+                    app.focusWindowChanged.disconnect(self._on_focus_window_changed)
+                except TypeError:
+                    pass
+            else:
+                app.installEventFilter(self._outside_filter)
+                # focusWindowChanged is the reliable leave signal on Plasma/XWayland.
+                try:
+                    app.focusWindowChanged.disconnect(self._on_focus_window_changed)
+                except TypeError:
+                    pass
+                app.focusWindowChanged.connect(self._on_focus_window_changed)
+                # Grace period: the tray Activate that opened us must not instantly dismiss.
+                self._arm_timer.start(300)
 
     def _arm_dismiss(self) -> None:
+        if self._keep_open:
+            return
         self._dismiss_armed = True
         # If focus already left during the grace period, close now.
         if self.isVisible() and QGuiApplication.focusWindow() is not self.windowHandle():
             self.hide()
 
     def _on_focus_window_changed(self, window) -> None:  # noqa: ANN001
-        if not self._dismiss_armed or not self.isVisible():
+        if self._keep_open or not self._dismiss_armed or not self.isVisible():
             return
         if window is self.windowHandle():
             return
@@ -1981,7 +2418,7 @@ class SpendPopup(QFrame):
 
     def dismiss_if_outside(self, global_pos: QPoint) -> bool:
         """Hide when a press lands outside this panel. Returns True if dismissed."""
-        if not self._dismiss_armed or not self.isVisible():
+        if self._keep_open or not self._dismiss_armed or not self.isVisible():
             return False
         if self.frameGeometry().contains(global_pos):
             return False
@@ -1993,6 +2430,7 @@ class SpendPopup(QFrame):
             event.type() == QEvent.Type.WindowDeactivate
             and self.isVisible()
             and self._dismiss_armed
+            and not self._keep_open
         ):
             self.hide()
         super().changeEvent(event)
@@ -2000,6 +2438,8 @@ class SpendPopup(QFrame):
     def hideEvent(self, event) -> None:  # noqa: ANN001
         self._arm_timer.stop()
         self._dismiss_armed = False
+        self._keep_open = False
+        BubbleTip.hide_shared()
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self._outside_filter)
@@ -2051,7 +2491,11 @@ class _OutsideClickFilter(QObject):
             QEvent.Type.MouseButtonDblClick,
         ):
             return False
-        if not self._popup.isVisible() or not self._popup._dismiss_armed:
+        if (
+            not self._popup.isVisible()
+            or self._popup._keep_open
+            or not self._popup._dismiss_armed
+        ):
             return False
         # Global coordinates — works for presses on other top-levels too.
         try:

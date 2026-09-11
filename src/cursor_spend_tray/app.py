@@ -611,6 +611,11 @@ class TrayApp(QWidget):
         self._ctx = TrayContextMenu()
         self._refresh_action = QAction("Refresh now", self)
         self._refresh_action.triggered.connect(self._refresh_now)
+        self._keep_open_action = QAction("Keep open", self)
+        self._keep_open_action.setToolTip(
+            "Open the tray popup and leave it open until you click the tray icon again."
+        )
+        self._keep_open_action.triggered.connect(self._on_keep_open)
         self._autostart_action = QAction("Launch at login", self)
         self._autostart_action.setCheckable(True)
         self._autostart_action.setChecked(autostart.is_enabled())
@@ -628,6 +633,7 @@ class TrayApp(QWidget):
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         self._ctx.add_action(self._refresh_action)
+        self._ctx.add_action(self._keep_open_action)
         self._ctx.add_separator()
         self._ctx.add_submenu("Refresh interval", self._poll_actions)
         self._ctx.add_action(self._autostart_action)
@@ -804,7 +810,7 @@ class TrayApp(QWidget):
         if self._ctx.isVisible():
             self._ctx.hide()
             return
-        # Tray click again while open → close (focus moved to another “item”).
+        # Tray click again while open → close (also closes keep-open / pinned).
         if self.popup.isVisible():
             self.popup.hide()
             return
@@ -818,6 +824,12 @@ class TrayApp(QWidget):
         self._refresh_now()
         if not self.popup.isVisible():
             self.popup.show_at(self._popup_position())
+
+    def _on_keep_open(self) -> None:
+        """Open the popup pinned — outside clicks / focus loss do not dismiss it."""
+        if self._ctx.isVisible():
+            self._ctx.hide()
+        self.popup.show_at(self._popup_position(), keep_open=True)
 
     def _on_context_menu(self, pos: QPoint) -> None:
         self._anchor_pos = QPoint(pos)

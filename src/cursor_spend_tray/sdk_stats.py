@@ -34,9 +34,11 @@ class SdkHabitsBatch:
     runs: int
     started_at: str | None
     ended_at: str | None
+    period_start: str = ""  # ISO date; aligns with composer/usage billing keys
     finished: int = 0
     cancelled: int = 0
     error: int = 0
+    abort_rate_pct: int | None = None  # cancelled / (finished + cancelled)
     friction_rate_pct: int | None = None
     shell_fail_pct: int | None = None
     shell_nonzero: int = 0
@@ -304,6 +306,7 @@ def _aggregate_batch(
     selected: list[RunRow],
     *,
     label: str,
+    period_start: str = "",
 ) -> tuple[SdkHabitsBatch, Counter[int]]:
     """Aggregate one run window; also return exit-code counts for insights."""
     status_counts: Counter[str] = Counter()
@@ -342,8 +345,10 @@ def _aggregate_batch(
     cancelled = status_counts.get("CANCELLED", 0)
     error = status_counts.get("ERROR", 0)
     known = finished + cancelled + error
+    settle = finished + cancelled
     friction_n = cancelled + error
     friction_rate = round(100 * friction_n / known) if known else None
+    abort_rate = round(100 * cancelled / settle) if settle else None
     shell_fail = (
         round(100 * shell_nonzero / shell_total) if shell_total else None
     )
@@ -353,9 +358,11 @@ def _aggregate_batch(
         runs=len(selected),
         started_at=started_at,
         ended_at=ended_at,
+        period_start=period_start,
         finished=finished,
         cancelled=cancelled,
         error=error,
+        abort_rate_pct=abort_rate,
         friction_rate_pct=friction_rate,
         shell_fail_pct=shell_fail,
         shell_nonzero=shell_nonzero,
@@ -423,7 +430,9 @@ def collect_habits_preview(
     latest_exits: Counter[int] = Counter()
     for start, window in windows:
         label = period_label(start, renewal_day=renewal_day)
-        batch, exits = _aggregate_batch(window, label=label)
+        batch, exits = _aggregate_batch(
+            window, label=label, period_start=start.isoformat()
+        )
         history.append(batch)
         latest_exits = exits
 
