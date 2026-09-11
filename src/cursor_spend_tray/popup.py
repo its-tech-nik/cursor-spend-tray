@@ -2328,6 +2328,7 @@ class SpendPopup(QFrame):
         self.status.setStyleSheet("color: #777; background: transparent; border: none;")
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status.hide()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -2471,7 +2472,11 @@ class SpendPopup(QFrame):
         self.adjustSize()
 
     def set_status(self, text: str) -> None:
-        self.status.setText(text)
+        clean = (text or "").strip()
+        self.status.setText(clean)
+        self.status.setVisible(bool(clean))
+        if not clean:
+            self.adjustSize()
 
     def set_remaining(self, seconds: int) -> None:
         self.countdown.set_remaining(seconds, refreshing=self._refreshing)

@@ -185,7 +185,8 @@ class RefreshScheduler(QObject):
             elif snap.error:
                 self.status_changed.emit(f"Partial/cached data — {snap.error}")
             else:
-                self.status_changed.emit("Updated")
+                # Clear the footer on success — no "Updated" label.
+                self.status_changed.emit("")
         self.snapshot_updated.emit(snap)
 
     def _on_err(self, message: str) -> None:
