@@ -2364,11 +2364,13 @@ class SpendPopup(QFrame):
 
         keep_open=True pins the panel until tray click / hide() — outside clicks
         and focus loss do not dismiss it.
+
+        Habits are not rescanned here — refresh_habits() runs on startup and when
+        usage updates (poll / Refresh now / countdown click).
         """
         self._dismiss_armed = False
         self._keep_open = keep_open
         self._arm_timer.stop()
-        self.refresh_habits()
         self.adjustSize()
         target = pos if isinstance(pos, QPoint) else QPoint(pos.x(), pos.y())
         # Under XWayland a single pre- or post-show move() is often ignored.
@@ -2452,7 +2454,7 @@ class SpendPopup(QFrame):
     def apply_snapshot(self, snap: UsageSnapshot) -> None:
         self.cursor_ring.set_percent(snap.cursor_models_pct)
         self.other_ring.set_percent(snap.other_models_pct)
-        # Usage CSV sync + AUTO/API associations run with the scrape.
+        # Rescan local habits when Cursor usage updates (poll or Refresh).
         self.refresh_habits()
 
     def set_browser_inaccessible(self, inaccessible: bool, launch_command: str = "") -> None:
