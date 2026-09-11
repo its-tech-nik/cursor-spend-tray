@@ -25,7 +25,7 @@ The app is not on the AUR. Build from this repo and install with `yay` or `pacma
 
 ```bash
 ./packaging/aur/install-local.sh
-# same as: ./packaging/aur/build-local.sh && yay -U dist/cursor-spend-tray-*.pkg.tar.zst
+# same as: ./packaging/aur/build-local.sh && sudo pacman -U dist/cursor-spend-tray-*.pkg.tar.zst
 ```
 
 After install, open KRunner and type `cursor`, `spend`, or `Cursor Spend Tray`.

@@ -15,10 +15,10 @@ cd /home/technik/Documents/Projects/cursor-spend-tray
 
 ## Choose the install path
 
-1. **Arch Linux (preferred when `pacman` / `yay` exist)** → [Arch local package](#arch-linux-local-package)
+1. **Arch Linux (preferred when `pacman` exists)** → [Arch local package](#arch-linux-local-package)
 2. **Any other distro, or a one-off run without packaging** → [From source](#from-source-any-distro)
 
-Detect with: `command -v pacman` and `command -v yay`.
+Detect with: `command -v pacman`.
 
 ## Arch Linux (local package)
 
@@ -34,27 +34,27 @@ That is equivalent to:
 
 ```bash
 ./packaging/aur/build-local.sh
-yay -U dist/cursor-spend-tray-*.pkg.tar.zst
-# or, without yay:
-# sudo pacman -U dist/cursor-spend-tray-*.pkg.tar.zst
+sudo pacman -U dist/cursor-spend-tray-*.pkg.tar.zst
 ```
 
 What the script does:
 
-1. Builds `dist/cursor-spend-tray-*-any.pkg.tar.zst` from the current checkout
-2. Installs the newest matching package with `yay -U --noconfirm` if `yay` exists, else `sudo pacman -U --noconfirm`
-3. Refreshes the desktop database / hicolor icon cache when those tools exist
+1. Takes an exclusive lock (`dist/.install-local.lock`) so overlapping skill runs (e.g. pi + Cursor) do not both elevate — waiters skip after the winner finishes
+2. Builds `dist/cursor-spend-tray-*-any.pkg.tar.zst` from the current checkout
+3. Installs the newest matching package with a **single** `sudo pacman -U --noconfirm` (desktop DB / icon cache come from pacman hooks in that same transaction)
+
+For non-interactive / agent shells with a GUI askpass:
 
 ```bash
-SUDO_ASKPASS=/usr/bin/ksshaskpass yay -U --noconfirm --sudoflags="-A" dist/cursor-spend-tray-0.1.0-1-any.pkg.tar.zst
+SUDO_ASKPASS=/usr/bin/ksshaskpass ./packaging/aur/install-local.sh
 ```
 
-(Adjust the exact `.pkg.tar.zst` name to the latest under `dist/`.)
+(`install-local.sh` passes `sudo -A` when `SUDO_ASKPASS` is set.)
 
-3. If askpass is unavailable, tell the user to run in their own terminal:
+If askpass is unavailable, tell the user to run in their own terminal:
 
 ```bash
-yay -U --noconfirm /absolute/path/to/dist/cursor-spend-tray-*.pkg.tar.zst
-# or
+./packaging/aur/install-local.sh
+# or:
 sudo pacman -U --noconfirm /absolute/path/to/dist/cursor-spend-tray-*.pkg.tar.zst
 ```

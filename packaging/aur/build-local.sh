@@ -38,5 +38,5 @@ ls -1 "$WORKDIR"/*.pkg.tar.*
 mkdir -p "$ROOT/dist"
 cp -v "$WORKDIR"/*.pkg.tar.* "$ROOT/dist/"
 echo "Install locally (no AUR) with:"
-echo "  yay -U $ROOT/dist/$pkgname-$pkgver-*.pkg.tar.*"
-echo "  # or: sudo pacman -U $ROOT/dist/$pkgname-$pkgver-*.pkg.tar.*"
+echo "  sudo pacman -U $ROOT/dist/$pkgname-$pkgver-*.pkg.tar.*"
+echo "  # or: ./packaging/aur/install-local.sh"
