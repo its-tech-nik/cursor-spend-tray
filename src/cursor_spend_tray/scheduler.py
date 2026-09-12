@@ -124,7 +124,7 @@ class RefreshScheduler(QObject):
         self._awaiting_ready = False
 
     def pause_for_login(self) -> None:
-        """Stop the countdown until the user signs in and refreshes manually."""
+        """Stop the countdown until sign-in (manual refresh or network auto-detect)."""
         self._paused = True
         self._stop_probe()
         self._warmup_fired = True
@@ -222,12 +222,13 @@ class RefreshScheduler(QObject):
                 "with remote debugging. Copy the launch command below, then relaunch."
             )
         elif snap.source == "logged_out":
-            # No auto-poll while signed out — hide countdown; wait for manual refresh.
+            # No auto-poll while signed out — hide countdown; network watch or manual refresh.
             self.pause_for_login()
             self.refreshing_changed.emit(False)
             self.status_changed.emit(
                 snap.error
-                or "Sign in to Cursor in the dedicated browser window, then refresh."
+                or "Sign in to Cursor in the dedicated browser window "
+                "(refresh runs automatically when the dashboard loads)."
             )
         else:
             self.refreshing_changed.emit(False)

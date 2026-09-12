@@ -14,8 +14,12 @@ from .usage_csv import associate_spend_pct, sync_usage_csvs
 
 log = logging.getLogger(__name__)
 
+# Longest-first so "Pro+" wins over "Pro".
+_PLAN_NAMES_JS = '["Ultra", "Pro+", "Business", "Teams", "Pro", "Hobby", "Free"]'
+
 EXTRACT_JS = r"""
 (() => {
+  const plans = __PLANS__;
   const bodyText = document.body ? document.body.innerText : "";
   const pageUrl = String(location.href || "");
   const pickPct = (label) => {
@@ -25,6 +29,19 @@ EXTRACT_JS = r"""
     );
     const m = bodyText.match(re);
     return m ? Number(m[1]) : null;
+  };
+
+  const matchPlan = (text) => {
+    const t = (text || "").trim();
+    if (!t || t.length > 64) return null;
+    for (const p of plans) {
+      if (t === p) return p;
+    }
+    for (const p of plans) {
+      const esc = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp("^" + esc + "\\b", "i").test(t)) return p;
+    }
+    return null;
   };
 
   // Prefer structured nodes when present
@@ -60,6 +77,27 @@ EXTRACT_JS = r"""
     return out;
   };
 
+  // Plan on spending: "CURRENT PLAN" block, else first leaf plan label.
+  let subscription = null;
+  const currentPlan = bodyText.match(
+    /CURRENT\s+PLAN[\s\S]{0,80}?\b(Ultra|Pro\+|Business|Teams|Pro|Hobby|Free)\b/i
+  );
+  if (currentPlan) {
+    subscription = matchPlan(currentPlan[1]) || currentPlan[1];
+  }
+  if (!subscription) {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n.children.length !== 0) continue;
+      const hit = matchPlan(n.textContent);
+      if (hit) {
+        subscription = hit;
+        break;
+      }
+    }
+  }
+
   const dom = fromDom();
   const cursorModelsPct = dom.cursorModelsPct ?? pickPct("Cursor Models");
   const otherModelsPct = dom.otherModelsPct ?? pickPct("Other Models");
@@ -79,18 +117,32 @@ EXTRACT_JS = r"""
     pageUrl,
     cursorModelsPct,
     otherModelsPct,
+    subscription,
     loggedOut,
     hasIncludedInPro: hasDashboard,
     hint: bodyText.slice(0, 500),
   };
 })()
-"""
+""".replace("__PLANS__", _PLAN_NAMES_JS)
 
 # Settings page: email cell + left-sidebar plan / avatar at the bottom.
 ACCOUNT_EXTRACT_JS = r"""
 (() => {
-  const plans = ["Ultra", "Pro+", "Business", "Teams", "Pro", "Hobby", "Free"];
+  const plans = __PLANS__;
   const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+  const matchPlan = (text) => {
+    const t = (text || "").trim();
+    if (!t || t.length > 64) return null;
+    for (const p of plans) {
+      if (t === p) return p;
+    }
+    for (const p of plans) {
+      const esc = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp("^" + esc + "\\b", "i").test(t)) return p;
+    }
+    return null;
+  };
+
   let email = null;
   const label = Array.from(document.querySelectorAll(".dashboard-cell-label")).find(
     (el) => (el.textContent || "").trim() === "Email"
@@ -107,20 +159,30 @@ ACCOUNT_EXTRACT_JS = r"""
 
   let subscription = null;
   const secondary = Array.from(
-    document.querySelectorAll('span[class*="text-secondary"]')
+    document.querySelectorAll(
+      'span[class*="text-secondary"], [class*="text-muted"], [class*="opacity"]'
+    )
   );
   for (const el of secondary) {
-    const t = (el.textContent || "").trim();
-    if (plans.includes(t)) subscription = t;
+    const hit = matchPlan(el.textContent);
+    if (hit) subscription = hit;
   }
   if (!subscription) {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
     let n;
     while ((n = walker.nextNode())) {
       if (n.children.length !== 0) continue;
-      const t = (n.textContent || "").trim();
-      if (plans.includes(t)) subscription = t;
+      const hit = matchPlan(n.textContent);
+      if (hit) {
+        subscription = hit;
+        break;
+      }
     }
+  }
+  if (!subscription) {
+    const body = (document.body && document.body.innerText) || "";
+    const m = body.match(/\b(Ultra|Pro\+|Business|Teams|Pro|Hobby|Free)\b/);
+    if (m) subscription = matchPlan(m[1]) || m[1];
   }
 
   let avatarUrl = null;
@@ -141,7 +203,7 @@ ACCOUNT_EXTRACT_JS = r"""
     pageUrl: String(location.href || ""),
   };
 })()
-"""
+""".replace("__PLANS__", _PLAN_NAMES_JS)
 
 
 class _ScrapeClient(Protocol):
@@ -349,6 +411,18 @@ class SpendingScraper:
                 )
 
             account = await self._fetch_account(client, handle, prev)
+            spend_sub = data.get("subscription")
+            if (
+                not account.get("subscription_level")
+                and isinstance(spend_sub, str)
+                and spend_sub.strip()
+            ):
+                account["subscription_level"] = spend_sub.strip()
+                print(
+                    f"[scrape] subscription from spending page: "
+                    f"{account['subscription_level']!r}",
+                    flush=True,
+                )
             snap = UsageSnapshot(
                 cursor_models_pct=cursor_pct,
                 other_models_pct=other_pct,

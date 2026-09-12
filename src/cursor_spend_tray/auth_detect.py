@@ -30,6 +30,14 @@ _AUTH_HINT_RE = re.compile(
 _DASHBOARD_HINT_RE = re.compile(r"included in pro|cursor models|other models", re.I)
 
 
+def url_suggests_auth(url: str | None) -> bool:
+    """True when a URL looks like Cursor auth / accounts (not the spending dashboard)."""
+    url_l = (url or "").strip().lower()
+    if not url_l:
+        return False
+    return any(marker in url_l for marker in _AUTH_URL_MARKERS)
+
+
 def page_requires_login(
     *,
     url: str | None = None,

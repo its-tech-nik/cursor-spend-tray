@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,6 +14,8 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 log = logging.getLogger(__name__)
+
+CdpEventListener = Callable[[str, dict[str, Any], str | None], None]
 
 
 class CdpError(RuntimeError):
@@ -30,6 +33,17 @@ class CdpClient:
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: asyncio.Task[None] | None = None
         self._sessions: dict[str, str] = {}  # targetId -> sessionId
+        self._event_listeners: list[CdpEventListener] = []
+
+    def add_event_listener(self, listener: CdpEventListener) -> None:
+        """Register a callback for CDP events (method, params, sessionId)."""
+        self._event_listeners.append(listener)
+
+    def remove_event_listener(self, listener: CdpEventListener) -> None:
+        try:
+            self._event_listeners.remove(listener)
+        except ValueError:
+            pass
 
     @property
     def http_base(self) -> str:
@@ -131,6 +145,18 @@ class CdpClient:
             raise CdpError(f"Runtime.evaluate failed: {details}")
         remote = result.get("result") or {}
         return remote.get("value")
+
+    async def enable_network(self, session_id: str) -> None:
+        """Enable CDP Network events for an attached page session."""
+        await self.call("Network.enable", {}, session_id=session_id)
+
+    async def attach_page_target(self, target_id: str) -> str:
+        """Attach to a page target and return its session id."""
+        return await self._attach(target_id)
+
+    async def list_page_targets(self) -> list[dict[str, Any]]:
+        """Return current page targets (type == page)."""
+        return await self._page_targets()
 
     async def call(
         self,
@@ -235,6 +261,17 @@ class CdpClient:
                     continue
                 msg_id = msg.get("id")
                 if msg_id is None:
+                    method = msg.get("method")
+                    if method and self._event_listeners:
+                        params = msg.get("params") or {}
+                        session_id = msg.get("sessionId")
+                        if not isinstance(params, dict):
+                            params = {}
+                        for listener in list(self._event_listeners):
+                            try:
+                                listener(str(method), params, session_id)
+                            except Exception:
+                                log.exception("CDP event listener failed for %s", method)
                     continue
                 fut = self._pending.pop(msg_id, None)
                 if not fut:

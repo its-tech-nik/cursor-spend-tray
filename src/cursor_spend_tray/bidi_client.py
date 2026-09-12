@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -11,6 +12,8 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 log = logging.getLogger(__name__)
+
+BidiEventListener = Callable[[str, dict[str, Any], str | None], None]
 
 
 class BidiError(RuntimeError):
@@ -28,6 +31,17 @@ class BidiClient:
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: asyncio.Task[None] | None = None
         self._session_active = False
+        self._event_listeners: list[BidiEventListener] = []
+
+    def add_event_listener(self, listener: BidiEventListener) -> None:
+        """Register a callback for BiDi events (method, params, unused session)."""
+        self._event_listeners.append(listener)
+
+    def remove_event_listener(self, listener: BidiEventListener) -> None:
+        try:
+            self._event_listeners.remove(listener)
+        except ValueError:
+            pass
 
     @property
     def http_base(self) -> str:
@@ -204,7 +218,17 @@ class BidiClient:
                     continue
                 msg_id = msg.get("id")
                 if msg_id is None:
-                    log.debug("BiDi event: %s", msg.get("method"))
+                    method = msg.get("method")
+                    log.debug("BiDi event: %s", method)
+                    if method and self._event_listeners:
+                        params = msg.get("params") or {}
+                        if not isinstance(params, dict):
+                            params = {}
+                        for listener in list(self._event_listeners):
+                            try:
+                                listener(str(method), params, None)
+                            except Exception:
+                                log.exception("BiDi event listener failed for %s", method)
                     continue
                 fut = self._pending.pop(msg_id, None)
                 if not fut:

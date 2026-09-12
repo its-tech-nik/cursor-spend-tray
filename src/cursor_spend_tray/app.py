@@ -43,6 +43,7 @@ from .config import (
     poll_interval_label,
 )
 from .popup import SpendPopup
+from .login_network_watch import LoginNetworkWatcher
 from .scheduler import RefreshScheduler
 from .session_cookie import profile_has_cursor_session_cookie
 from .sni import StatusNotifierItem
@@ -146,7 +147,7 @@ def tray_tooltip(snap: UsageSnapshot) -> tuple[str, str]:
     if session_logged_out(snap):
         return (
             "Cursor Spend — Sign in required",
-            "Sign in to Cursor in the dedicated browser window, then refresh.",
+            "Sign in to Cursor in the dedicated browser window; usage refreshes automatically.",
         )
     usage = _usage_phrase(snap)
     if usage:
@@ -618,14 +619,17 @@ class _CtxAccountCard(QFrame):
         avatar: QPixmap | None = None,
         authenticated: bool = True,
     ) -> None:
-        if not authenticated or not email:
+        if not authenticated:
             self._email.setText("Not authenticated")
             self._email.setStyleSheet("color: #F2F2F2;")
             self._plan.setText("Sign in to Cursor to track spending")
             self._plan.setStyleSheet("color: #B0B0B0;")
             self._avatar.clear()
             return
-        self._email.setText(f"Authenticated as: {email}")
+        if email:
+            self._email.setText(f"Authenticated as: {email}")
+        else:
+            self._email.setText("Authenticated")
         self._email.setStyleSheet("color: #F2F2F2;")
         self._plan.setText(f"Subscription: {subscription or '—'}")
         self._plan.setStyleSheet("color: #B0B0B0;")
@@ -889,6 +893,8 @@ class TrayApp(QWidget):
         self._login_launch_pending = False
         self._headless_switch_pending = False
         self._viewing_browser = False
+        # Set when network watch detects sign-in: headless first, then scrape.
+        self._refresh_after_headless = False
         self._warmup_only = False
         self._pending_scrape_ready: Callable[[], None] | None = None
 
@@ -906,6 +912,9 @@ class TrayApp(QWidget):
         self.scheduler.status_changed.connect(self.popup.set_status)
         self.scheduler.refreshing_changed.connect(self._on_refreshing)
         self.scheduler.browser_warmup_requested.connect(self._warmup_browser_for_scrape)
+        self._login_watch = LoginNetworkWatcher(config, self)
+        self._login_watch.detected.connect(self._on_login_network_detected)
+        self._login_watch.status.connect(self.popup.set_status)
         # Early cookie presence check: brand-new / never-signed-in profiles open
         # headed login immediately; profiles with a session cookie scrape in background.
         if self._prompt_login_if_no_session_cookie():
@@ -945,7 +954,11 @@ class TrayApp(QWidget):
         self.tray.set_tooltip(body, title=title)
 
     def _sync_account_actions(self, snap: UsageSnapshot) -> None:
-        authenticated = bool(snap.account_email) and not session_logged_out(snap)
+        # Email is preferred; subscription alone still means a signed-in scrape.
+        authenticated = (
+            (bool(snap.account_email) or bool(snap.subscription_level))
+            and not session_logged_out(snap)
+        )
         if not authenticated:
             self._refresh_account_avatar(None)
             self._account_card.set_account(
@@ -1003,11 +1016,40 @@ class TrayApp(QWidget):
             log.debug("Could not load account avatar: %s", exc)
 
     def _refresh_now(self) -> None:
+        # Release the BiDi/CDP watch session before a scrape (Firefox allows one).
+        self._stop_login_network_watch()
         self.scheduler.refresh()
+
+    def _on_login_network_detected(self, url: str) -> None:
+        """After sign-in traffic: flip to headless, then scrape (no manual refresh)."""
+        log.info(
+            "Sign-in network activity detected (%s) — switching to headless then refresh",
+            url,
+        )
+        self._stop_login_network_watch()
+        self._login_launch_pending = False
+        self._viewing_browser = False
+        self._refresh_after_headless = True
+        self.popup.set_status("Sign-in detected — switching to headless…")
+        QTimer.singleShot(0, self._switch_to_headless_after_login)
+
+    def _start_login_network_watch(self) -> None:
+        """Watch headed-browser traffic only while awaiting Cursor sign-in."""
+        if not getattr(self.popup, "_awaiting_login", False):
+            return
+        if self.scheduler.is_refreshing():
+            return
+        self._login_watch.start()
+
+    def _stop_login_network_watch(self) -> None:
+        if hasattr(self, "_login_watch"):
+            self._login_watch.stop()
 
     def _on_refreshing(self, refreshing: bool) -> None:
         self.popup.set_refreshing(refreshing)
         self.popup.set_remaining(self.scheduler.remaining_seconds())
+        if refreshing:
+            self._stop_login_network_watch()
 
     def _on_snapshot(self, snap: object) -> None:
         assert isinstance(snap, UsageSnapshot)
@@ -1016,6 +1058,7 @@ class TrayApp(QWidget):
         # Single entry for first launch, browser switch, and poll failures.
         if self._prompt_login_if_needed(snap):
             return
+        self._stop_login_network_watch()
         if snap.source in ("bidi", "cdp") and not snap.error:
             self._login_launch_pending = False
             if self.config.browser_is_headless() is False:
@@ -1079,9 +1122,10 @@ class TrayApp(QWidget):
         if headless is False:
             self._login_launch_pending = False
             self.popup.set_status(
-                f"Sign in to Cursor in the {self.config.browser.display_name} window, "
-                "then refresh."
+                f"Sign in to Cursor in the {self.config.browser.display_name} window "
+                "(refresh runs automatically when the dashboard loads)."
             )
+            self._start_login_network_watch()
             return
         if self._login_launch_pending:
             return
@@ -1109,9 +1153,10 @@ class TrayApp(QWidget):
         if self.config.browser_is_headless() is False:
             self._login_launch_pending = False
             self.popup.set_status(
-                f"Sign in to Cursor in the {self.config.browser.display_name} window, "
-                "then refresh."
+                f"Sign in to Cursor in the {self.config.browser.display_name} window "
+                "(refresh runs automatically when the dashboard loads)."
             )
+            self._start_login_network_watch()
             return
         argv = self.config.browser_login_argv()
         try:
@@ -1131,9 +1176,9 @@ class TrayApp(QWidget):
         self.popup.set_status(
             f"Sign in to Cursor in the {self.config.browser.display_name} window…"
         )
-        # Do not arm a scrape retry — wait for the user to finish sign-in; the next
-        # manual refresh / poll verifies the session (cookie + page check).
+        # Watch network once remote debugging is up; auto-refresh after dashboard API traffic.
         QTimer.singleShot(2_000, self._stop_spinner)
+        QTimer.singleShot(2_500, self._start_login_network_watch)
 
     def _on_view_browser(self) -> None:
         """Open the selected automation browser headed on the Cursor spending page."""
@@ -1192,14 +1237,28 @@ class TrayApp(QWidget):
         QTimer.singleShot(2_000, self._stop_spinner)
 
     def _switch_to_headless_after_login(self) -> None:
-        """Close the headed login window and relaunch the dedicated profile headless."""
+        """Close the headed login window and relaunch the dedicated profile headless.
+
+        When ``_refresh_after_headless`` is set (network login detection), scrape
+        after the headless browser is up. Otherwise this is the post-scrape flip
+        from a manual/headed success path.
+        """
         if self._headless_switch_pending:
             return
         if self._viewing_browser:
+            self._refresh_after_headless = False
             return
-        if self.config.browser_is_headless() is not False:
+        refresh_after = self._refresh_after_headless
+        self._refresh_after_headless = False
+
+        headless = self.config.browser_is_headless()
+        if headless is not False:
+            # Already headless or not running — scrape if login detection asked for it.
             self._headless_switch_pending = False
+            if refresh_after:
+                self.scheduler.refresh()
             return
+
         self._headless_switch_pending = True
         name = self.config.browser.display_name
         self.popup.set_status(f"Sign-in complete — switching {name} to headless…")
@@ -1208,13 +1267,23 @@ class TrayApp(QWidget):
             self._headless_switch_pending = False
             self._stop_spinner()
             self.popup.set_status(f"Could not restart {name} in headless mode.")
+            if refresh_after:
+                # Last resort: scrape while still headed so the user is not stuck.
+                self.scheduler.refresh()
             return
         if self.config.between_scrapes == "quit":
             self._headless_switch_pending = False
             self._stop_spinner()
-            self.popup.set_status(
-                f"Sign-in complete — {name} will relaunch on the next refresh."
-            )
+            if refresh_after:
+                # ensure_ready will launch headless before this scrape.
+                self.popup.set_status(
+                    f"Sign-in complete — launching {name} headless for refresh…"
+                )
+                self.scheduler.refresh()
+            else:
+                self.popup.set_status(
+                    f"Sign-in complete — {name} will relaunch on the next refresh."
+                )
             return
         argv = self.config.browser_launch_argv(headless=True)
         try:
@@ -1229,8 +1298,11 @@ class TrayApp(QWidget):
             self._headless_switch_pending = False
             self._stop_spinner()
             self.popup.set_status(f"Could not relaunch headless {name}: {exc}")
+            if refresh_after:
+                self.scheduler.refresh()
             return
         self._viewing_browser = False
+        # _arm_launch_retry → probe → scheduler.refresh() once remote debugging is up.
         self._arm_launch_retry()
 
     def _on_activated(self, pos: QPoint) -> None:
@@ -1572,6 +1644,7 @@ class TrayApp(QWidget):
 
     def shutdown(self) -> None:
         """Stop polling and tear down the dedicated automation browser on quit."""
+        self._stop_login_network_watch()
         if hasattr(self, "scheduler"):
             self.scheduler.stop()
         if hasattr(self, "_launch_retry_timer"):
