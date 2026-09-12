@@ -342,16 +342,8 @@ class _RingGlyph(QWidget):
         pct_font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(pct_font)
         label = "—" if self._pct is None else f"{max(0, min(100, self._pct))}%"
-        text_rect = QRectF(0, self.height() * 0.28, self.width(), 36)
+        text_rect = QRectF(0, 0, self.width(), self.height())
         painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), label)
-
-        caption = QFont()
-        caption.setPointSize(8)
-        painter.setFont(caption)
-        painter.setPen(QColor("#8B8B8B"))
-        used = "" if self._pct is None else "used"
-        used_rect = QRectF(0, self.height() * 0.52, self.width(), 20)
-        painter.drawText(used_rect, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), used)
         painter.end()
 
 
