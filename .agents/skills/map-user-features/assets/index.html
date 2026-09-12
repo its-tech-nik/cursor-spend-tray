@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Capability map</title>
+  <style>
+    :root {
+      --bg: #f4f4f1;
+      --ink: #1c1c1a;
+      --muted: #5c5c56;
+      --card: #fffef8;
+      --line: #9a9a90;
+      --accent: #2f5d50;
+      --border: #d2d2c8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background: var(--bg);
+      min-height: 100vh;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: #ebebe4;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1rem;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: normal;
+      letter-spacing: 0.02em;
+    }
+    header p {
+      margin: 0.2rem 0 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+      max-width: 42rem;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    button, label.file-btn {
+      font: inherit;
+      font-size: 0.85rem;
+      padding: 0.35rem 0.7rem;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--ink);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover, label.file-btn:hover { border-color: var(--accent); }
+    input[type="file"] { display: none; }
+    #status {
+      padding: 0.5rem 1.25rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    #status.error { color: #8a3030; }
+    #viewport {
+      overflow: auto;
+      padding: 1.5rem;
+      min-height: calc(100vh - 7rem);
+    }
+    .forest {
+      display: flex;
+      flex-direction: column;
+      gap: 1.75rem;
+      width: max-content;
+      min-width: 100%;
+    }
+    .node-row {
+      display: flex;
+      flex-direction: row;
+      align-items: stretch;
+    }
+    .card {
+      width: 240px;
+      flex: 0 0 240px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.7rem 0.8rem;
+      align-self: center;
+      position: relative;
+      z-index: 1;
+    }
+    .card-top {
+      display: flex;
+      gap: 0.45rem;
+      align-items: flex-start;
+    }
+    .expand {
+      flex: 0 0 auto;
+      width: 1.4rem;
+      height: 1.4rem;
+      padding: 0;
+      line-height: 1.3rem;
+      text-align: center;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+      background: #f7f7f2;
+      color: var(--accent);
+      font-family: monospace;
+      font-size: 0.95rem;
+    }
+    .expand[disabled] {
+      opacity: 0.35;
+      cursor: default;
+    }
+    .card h2 {
+      margin: 0;
+      font-size: 0.95rem;
+      font-weight: normal;
+      line-height: 1.3;
+    }
+    .card .desc {
+      margin: 0.45rem 0 0;
+      font-size: 0.78rem;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .card .when {
+      margin: 0.4rem 0 0;
+      font-size: 0.72rem;
+      color: var(--accent);
+      line-height: 1.3;
+    }
+    .card details {
+      margin-top: 0.4rem;
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+    .card details summary { cursor: pointer; }
+    .card code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.68rem;
+    }
+    .branch {
+      display: flex;
+      flex-direction: row;
+      align-items: stretch;
+    }
+    .connector {
+      width: 36px;
+      flex: 0 0 36px;
+      position: relative;
+      align-self: stretch;
+    }
+    .connector::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 100%;
+      border-top: 2px solid var(--line);
+    }
+    .kids-wrap {
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      position: relative;
+      padding: 0.25rem 0;
+    }
+    .kids-wrap.open { display: flex; }
+    .kids-wrap::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: var(--line);
+    }
+    .kid {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      position: relative;
+      padding: 0.55rem 0;
+    }
+    .kid::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 28px;
+      border-top: 2px solid var(--line);
+    }
+    .kid > .node-row {
+      margin-left: 28px;
+    }
+    .kids-wrap > .kid:only-child::before {
+      /* single child: still draw stub from vertical rail */
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1 id="title">Capability map</h1>
+      <p id="subtitle">Expand nodes left → right. Nested capabilities stay collapsed until you open them.</p>
+    </div>
+    <div class="controls">
+      <button type="button" id="expand-all">Expand all</button>
+      <button type="button" id="collapse-all">Collapse all</button>
+      <label class="file-btn">Load JSON…<input type="file" id="file" accept="application/json,.json" /></label>
+    </div>
+  </header>
+  <div id="status">Loading…</div>
+  <div id="viewport">
+    <div class="forest" id="forest"></div>
+  </div>
+
+  <script>
+    const JSON_CANDIDATES = [
+      "./capability-map.json",
+    ];
+
+    const statusEl = document.getElementById("status");
+    const forestEl = document.getElementById("forest");
+    const titleEl = document.getElementById("title");
+    const subtitleEl = document.getElementById("subtitle");
+
+    function setStatus(text, isError) {
+      statusEl.textContent = text;
+      statusEl.classList.toggle("error", !!isError);
+    }
+
+    function codeList(code) {
+      if (!code || !code.length) return "";
+      const items = code.map((c) => {
+        const fn = c.function ? ` · <code>${escapeHtml(c.function)}</code>` : "";
+        const line = c.line != null ? `:${c.line}` : "";
+        return `<li><code>${escapeHtml(c.file)}${line}</code>${fn}</li>`;
+      }).join("");
+      return `<details><summary>Code</summary><ul>${items}</ul></details>`;
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function renderNode(feature) {
+      const kids = feature.children || [];
+      const hasKids = kids.length > 0;
+      const row = document.createElement("div");
+      row.className = "node-row";
+
+      const card = document.createElement("article");
+      card.className = "card";
+      card.innerHTML = `
+        <div class="card-top">
+          <button type="button" class="expand" ${hasKids ? "" : "disabled"} aria-expanded="false" title="${hasKids ? "Expand" : "No sub-features"}">${hasKids ? "+" : "·"}</button>
+          <div>
+            <h2>${escapeHtml(feature.title || feature.id || "Feature")}</h2>
+            ${feature.description ? `<p class="desc">${escapeHtml(feature.description)}</p>` : ""}
+            ${feature.available_when ? `<p class="when">Available when: ${escapeHtml(feature.available_when)}</p>` : ""}
+            ${codeList(feature.code)}
+          </div>
+        </div>
+      `;
+      row.appendChild(card);
+
+      if (!hasKids) return row;
+
+      const branch = document.createElement("div");
+      branch.className = "branch";
+
+      const connector = document.createElement("div");
+      connector.className = "connector";
+      connector.hidden = true;
+
+      const kidsWrap = document.createElement("div");
+      kidsWrap.className = "kids-wrap";
+
+      for (const child of kids) {
+        const kid = document.createElement("div");
+        kid.className = "kid";
+        kid.appendChild(renderNode(child));
+        kidsWrap.appendChild(kid);
+      }
+
+      const btn = card.querySelector(".expand");
+      btn.addEventListener("click", () => {
+        const open = kidsWrap.classList.toggle("open");
+        connector.hidden = !open;
+        btn.textContent = open ? "−" : "+";
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        btn.title = open ? "Collapse" : "Expand";
+      });
+
+      branch.appendChild(connector);
+      branch.appendChild(kidsWrap);
+      row.appendChild(branch);
+      return row;
+    }
+
+    function render(data) {
+      forestEl.innerHTML = "";
+      if (data.meta?.title) titleEl.textContent = data.meta.title;
+      if (data.meta?.description) subtitleEl.textContent = data.meta.description;
+      const roots = data.features || [];
+      for (const feature of roots) {
+        forestEl.appendChild(renderNode(feature));
+      }
+      const n = countFeatures(roots);
+      setStatus(`Loaded ${n} capabilities · children start collapsed · expand left → right`);
+    }
+
+    function countFeatures(nodes) {
+      let n = 0;
+      for (const node of nodes || []) {
+        n += 1 + countFeatures(node.children);
+      }
+      return n;
+    }
+
+    function setAll(open) {
+      document.querySelectorAll(".kids-wrap").forEach((wrap) => {
+        wrap.classList.toggle("open", open);
+        const branch = wrap.parentElement;
+        const connector = branch && branch.querySelector(":scope > .connector");
+        if (connector) connector.hidden = !open;
+      });
+      document.querySelectorAll(".expand:not([disabled])").forEach((btn) => {
+        btn.textContent = open ? "−" : "+";
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        btn.title = open ? "Collapse" : "Expand";
+      });
+    }
+
+    document.getElementById("expand-all").addEventListener("click", () => setAll(true));
+    document.getElementById("collapse-all").addEventListener("click", () => setAll(false));
+    document.getElementById("file").addEventListener("change", async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        render(JSON.parse(text));
+      } catch (err) {
+        setStatus(`Could not read file: ${err.message}`, true);
+      }
+    });
+
+    async function tryLoad() {
+      let lastErr = null;
+      for (const url of JSON_CANDIDATES) {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`${url} → ${res.status}`);
+          render(await res.json());
+          setStatus(statusEl.textContent + ` · source: ${url}`);
+          return;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      setStatus(
+        `Could not auto-load JSON (${lastErr && lastErr.message}). Use “Load JSON…” and pick capability-map.json next to this page, or open via a local http server from the assets folder.`,
+        true
+      );
+    }
+
+    tryLoad();
+  </script>
+</body>
+</html>

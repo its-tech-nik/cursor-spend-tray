@@ -1,0 +1,512 @@
+{
+  "meta": {
+    "title": "Cursor Spend Tray \u2014 what people can do",
+    "description": "User-facing actions and settings only. Background automation is mentioned only when the person can change a related setting.",
+    "version": 2,
+    "product": "cursor-spend-tray"
+  },
+  "states": [
+    {
+      "id": "app_running",
+      "label": "App is running in the system tray"
+    },
+    {
+      "id": "browser_reachable",
+      "label": "Automation browser is reachable"
+    },
+    {
+      "id": "signed_in",
+      "label": "Signed in to Cursor in the dedicated browser profile"
+    },
+    {
+      "id": "signed_out",
+      "label": "Needs Cursor sign-in"
+    }
+  ],
+  "features": [
+    {
+      "id": "tray_present",
+      "title": "See the tray icon",
+      "description": "After launch, Cursor Spend Tray sits in the system tray with a small usage glyph (or a disconnected mark if the browser cannot be reached).",
+      "available_when": "The application process is running.",
+      "code": [
+        {
+          "file": "src/cursor_spend_tray/app.py",
+          "function": "TrayApp.__init__",
+          "line": 790
+        },
+        {
+          "file": "src/cursor_spend_tray/app.py",
+          "function": "make_tray_icon",
+          "line": 169
+        },
+        {
+          "file": "src/cursor_spend_tray/sni.py",
+          "function": "StatusNotifierItem",
+          "line": 110
+        }
+      ],
+      "children": [
+        {
+          "id": "open_popup",
+          "title": "Open the spending popup",
+          "description": "Left-click the tray icon to open the popup near the icon. Click again to close it.",
+          "available_when": "Tray icon is visible.",
+          "code": [
+            {
+              "file": "src/cursor_spend_tray/app.py",
+              "function": "TrayApp._on_activated",
+              "line": 1374
+            },
+            {
+              "file": "src/cursor_spend_tray/popup.py",
+              "function": "SpendPopup.show_at",
+              "line": 2357
+            }
+          ],
+          "children": [
+            {
+              "id": "view_spend_rings",
+              "title": "See AUTO and API usage rings",
+              "description": "The popup shows \u201cIncluded in Pro\u201d with circular AUTO and API percentages when spending data is available.",
+              "available_when": "Popup is open and the automation browser is reachable.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "SpendPopup.apply_snapshot",
+                  "line": 2449
+                },
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "UsageRing",
+                  "line": 232
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "countdown_refresh",
+              "title": "Refresh by clicking the countdown",
+              "description": "The popup shows time until the next update. Click the timer to refresh usage right away.",
+              "available_when": "Popup is open, sign-in is not blocking, and the browser is reachable.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "CountdownLabel",
+                  "line": 1946
+                },
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "SpendPopup._sync_countdown_visibility",
+                  "line": 2474
+                },
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp._refresh_now",
+                  "line": 1020
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "browser_help_banner",
+              "title": "Copy the browser launch command when help appears",
+              "description": "If the automation browser cannot be reached, the popup shows a help banner with a command you can click to copy.",
+              "available_when": "Popup is open and the automation browser cannot be reached.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "SpendPopup.set_browser_inaccessible",
+                  "line": 2455
+                },
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "BrowserHelpBanner",
+                  "line": 183
+                },
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "CopyableCommand.mouseReleaseEvent",
+                  "line": 175
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "composer_history",
+              "title": "Browse composer history charts",
+              "description": "A composer history panel shows trends across billing periods from local Cursor data.",
+              "available_when": "Popup is open and enough local history exists.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "ComposerHistoryPreview",
+                  "line": 1544
+                },
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "SpendPopup.refresh_habits",
+                  "line": 2336
+                }
+              ],
+              "children": [
+                {
+                  "id": "toggle_chart_series",
+                  "title": "Show or hide chart lines",
+                  "description": "Click the colored chips above the chart to turn individual metrics on or off.",
+                  "available_when": "Composer history chart is visible.",
+                  "code": [
+                    {
+                      "file": "src/cursor_spend_tray/popup.py",
+                      "function": "SeriesToggleChip",
+                      "line": 541
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/popup.py",
+                      "function": "ComposerHistoryPreview._on_series_chip_toggled",
+                      "line": 1934
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/popup.py",
+                      "function": "MultiSeriesHistoryChart.toggle_series",
+                      "line": 783
+                    }
+                  ],
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "reorder_panels",
+              "title": "Reorder popup panels by dragging",
+              "description": "Drag a panel up or down. The order is remembered for next time.",
+              "available_when": "Popup is open.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "DraggablePanel",
+                  "line": 1988
+                },
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "ReorderablePanelHost.dropEvent",
+                  "line": 2159
+                },
+                {
+                  "file": "src/cursor_spend_tray/config.py",
+                  "function": "save_popup_panel_order",
+                  "line": 80
+                }
+              ],
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "middle_click_refresh",
+          "title": "Middle-click to refresh and open",
+          "description": "Middle-click the tray icon to refresh usage immediately and open the popup.",
+          "available_when": "Tray icon is visible.",
+          "code": [
+            {
+              "file": "src/cursor_spend_tray/app.py",
+              "function": "TrayApp._on_secondary_activated",
+              "line": 1385
+            }
+          ],
+          "children": []
+        },
+        {
+          "id": "context_menu",
+          "title": "Open the context menu",
+          "description": "Right-click the tray icon for account info, refresh, browser settings, launch-at-login, and quit.",
+          "available_when": "Tray icon is visible.",
+          "code": [
+            {
+              "file": "src/cursor_spend_tray/app.py",
+              "function": "TrayApp._on_context_menu",
+              "line": 1400
+            },
+            {
+              "file": "src/cursor_spend_tray/app.py",
+              "function": "TrayContextMenu.popup_at",
+              "line": 364
+            }
+          ],
+          "children": [
+            {
+              "id": "account_card",
+              "title": "See account details",
+              "description": "When signed in, the menu shows avatar, email, and subscription. When not, it shows that you need to sign in.",
+              "available_when": "Context menu is open. Full identity details require a signed-in scrape.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "_CtxAccountCard.set_account",
+                  "line": 614
+                },
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp._sync_account_actions",
+                  "line": 958
+                },
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp._refresh_account_avatar",
+                  "line": 982
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "refresh_now_menu",
+              "title": "Refresh now from the menu",
+              "description": "Choose \u201cRefresh now\u201d to pull fresh spending numbers immediately.",
+              "available_when": "Context menu is open and the automation browser is reachable (hidden while disconnected).",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp._refresh_now",
+                  "line": 1020
+                },
+                {
+                  "file": "src/cursor_spend_tray/scheduler.py",
+                  "function": "RefreshScheduler.refresh",
+                  "line": 133
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "keep_open",
+              "title": "Keep the popup open",
+              "description": "\u201cKeep open\u201d pins the popup so it stays until you click the tray icon again.",
+              "available_when": "Context menu is open.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp._on_keep_open",
+                  "line": 1394
+                },
+                {
+                  "file": "src/cursor_spend_tray/popup.py",
+                  "function": "SpendPopup.show_at",
+                  "line": 2357
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "refresh_interval",
+              "title": "Choose how often data refreshes",
+              "description": "Under \u201cRefresh interval\u201d, pick 1, 2, 4, 8, or 16 minutes. The app then updates automatically on that schedule while you stay signed in.",
+              "available_when": "Context menu is open.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp._on_poll_interval_chosen",
+                  "line": 1569
+                },
+                {
+                  "file": "src/cursor_spend_tray/scheduler.py",
+                  "function": "RefreshScheduler.set_poll_seconds",
+                  "line": 158
+                },
+                {
+                  "file": "src/cursor_spend_tray/config.py",
+                  "function": "POLL_INTERVAL_MINUTES",
+                  "line": 31
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "browser_menu",
+              "title": "Configure the automation browser",
+              "description": "The \u201cBrowser\u201d submenu is where you open the dedicated browser and change browser-related settings.",
+              "available_when": "Context menu is open.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp.__init__",
+                  "line": 877
+                }
+              ],
+              "children": [
+                {
+                  "id": "view_browser",
+                  "title": "View the selected browser",
+                  "description": "\u201cView Browser\u201d opens the dedicated automation profile in a visible window on the Cursor spending page.",
+                  "available_when": "Browser submenu is available.",
+                  "code": [
+                    {
+                      "file": "src/cursor_spend_tray/app.py",
+                      "function": "TrayApp._on_view_browser",
+                      "line": 1242
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/app.py",
+                      "function": "TrayApp._launch_headed_view",
+                      "line": 1271
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "choose_automation_browser",
+                  "title": "Choose which browser scrapes spending",
+                  "description": "Under \u201cAutomation on\u201d, pick an installed supported browser. Each option uses its own dedicated profile.",
+                  "available_when": "Browser submenu is available and at least one supported browser is installed.",
+                  "code": [
+                    {
+                      "file": "src/cursor_spend_tray/app.py",
+                      "function": "TrayApp._rebuild_browser_actions",
+                      "line": 1443
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/app.py",
+                      "function": "TrayApp._on_browser_chosen",
+                      "line": 1477
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/config.py",
+                      "function": "AppConfig.set_browser_key",
+                      "line": 125
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "between_scrapes",
+                  "title": "Choose what happens between scrapes",
+                  "description": "Keep the automation browser running between updates, or quit it after each scrape and relaunch before the next.",
+                  "available_when": "Browser submenu is available.",
+                  "code": [
+                    {
+                      "file": "src/cursor_spend_tray/app.py",
+                      "function": "TrayApp._on_between_scrapes_chosen",
+                      "line": 1498
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/config.py",
+                      "function": "AppConfig.set_between_scrapes",
+                      "line": 132
+                    }
+                  ],
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "launch_at_login",
+              "title": "Start the app at login",
+              "description": "Check \u201cLaunch at login\u201d so the tray starts with your desktop session. Uncheck to turn that off.",
+              "available_when": "Context menu is open (not gated by Cursor sign-in).",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp._on_autostart_toggled",
+                  "line": 1415
+                },
+                {
+                  "file": "src/cursor_spend_tray/autostart.py",
+                  "function": "set_enabled",
+                  "line": 89
+                },
+                {
+                  "file": "src/cursor_spend_tray/autostart.py",
+                  "function": "is_enabled",
+                  "line": 32
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "quit_app",
+              "title": "Quit the app",
+              "description": "\u201cQuit\u201d exits the tray app.",
+              "available_when": "Context menu is open.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp.__init__",
+                  "line": 869
+                },
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp.shutdown",
+                  "line": 1713
+                }
+              ],
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "sign_in_to_cursor",
+          "title": "Sign in to Cursor in the dedicated browser",
+          "description": "When there is no Cursor session, the app opens a visible browser window so you can sign in with your Cursor credentials. After you finish, spending updates without needing a separate refresh step.",
+          "available_when": "App is running and a Cursor session is missing or login is required.",
+          "code": [
+            {
+              "file": "src/cursor_spend_tray/app.py",
+              "function": "TrayApp._prompt_login_if_no_session_cookie",
+              "line": 1147
+            },
+            {
+              "file": "src/cursor_spend_tray/app.py",
+              "function": "TrayApp._prompt_login_if_needed",
+              "line": 1134
+            },
+            {
+              "file": "src/cursor_spend_tray/app.py",
+              "function": "TrayApp._ensure_login_browser",
+              "line": 1178
+            },
+            {
+              "file": "src/cursor_spend_tray/app.py",
+              "function": "TrayApp._launch_headed_login",
+              "line": 1211
+            },
+            {
+              "file": "src/cursor_spend_tray/session_cookie.py",
+              "function": "profile_has_cursor_session_cookie",
+              "line": 23
+            },
+            {
+              "file": "src/cursor_spend_tray/auth_detect.py",
+              "function": "snapshot_needs_login",
+              "line": 84
+            }
+          ],
+          "children": [
+            {
+              "id": "signed_in_usage",
+              "title": "Track live Pro spending",
+              "description": "After you are signed in, AUTO and API percentages update in the popup and as bars on the tray icon.",
+              "available_when": "Signed in and spending data was scraped successfully.",
+              "code": [
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "TrayApp._apply_snapshot",
+                  "line": 927
+                },
+                {
+                  "file": "src/cursor_spend_tray/app.py",
+                  "function": "make_tray_icon",
+                  "line": 169
+                },
+                {
+                  "file": "src/cursor_spend_tray/scraper.py",
+                  "function": "SpendingScraper",
+                  "line": 285
+                }
+              ],
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
