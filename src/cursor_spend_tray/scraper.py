@@ -20,8 +20,21 @@ _PLAN_NAMES_JS = '["Ultra", "Pro+", "Business", "Teams", "Pro", "Hobby", "Free"]
 EXTRACT_JS = r"""
 (() => {
   const plans = __PLANS__;
-  const bodyText = document.body ? document.body.innerText : "";
   const pageUrl = String(location.href || "");
+  // Slow loads / mid-navigation: body may be null — soft-skip until next poll.
+  if (!document.body) {
+    return {
+      pageUrl,
+      cursorModelsPct: null,
+      otherModelsPct: null,
+      subscription: null,
+      loggedOut: false,
+      hasIncludedInPro: false,
+      pageReady: false,
+      hint: "",
+    };
+  }
+  const bodyText = document.body.innerText || "";
   const pickPct = (label) => {
     const re = new RegExp(
       label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[\\s\\S]{0,240}?(\\d{1,3})%\\s*used",
@@ -120,6 +133,7 @@ EXTRACT_JS = r"""
     subscription,
     loggedOut,
     hasIncludedInPro: hasDashboard,
+    pageReady: true,
     hint: bodyText.slice(0, 500),
   };
 })()
@@ -129,6 +143,16 @@ EXTRACT_JS = r"""
 ACCOUNT_EXTRACT_JS = r"""
 (() => {
   const plans = __PLANS__;
+  const pageUrl = String(location.href || "");
+  if (!document.body) {
+    return {
+      email: null,
+      subscription: null,
+      avatarUrl: null,
+      pageUrl,
+      pageReady: false,
+    };
+  }
   const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
   const matchPlan = (text) => {
     const t = (text || "").trim();
@@ -153,7 +177,7 @@ ACCOUNT_EXTRACT_JS = r"""
     if (m) email = m[0];
   }
   if (!email) {
-    const m = ((document.body && document.body.innerText) || "").match(emailRe);
+    const m = (document.body.innerText || "").match(emailRe);
     if (m) email = m[0];
   }
 
@@ -180,7 +204,7 @@ ACCOUNT_EXTRACT_JS = r"""
     }
   }
   if (!subscription) {
-    const body = (document.body && document.body.innerText) || "";
+    const body = document.body.innerText || "";
     const m = body.match(/\b(Ultra|Pro\+|Business|Teams|Pro|Hobby|Free)\b/);
     if (m) subscription = matchPlan(m[1]) || m[1];
   }
@@ -200,10 +224,34 @@ ACCOUNT_EXTRACT_JS = r"""
     email,
     subscription,
     avatarUrl,
-    pageUrl: String(location.href || ""),
+    pageUrl,
+    pageReady: true,
   };
 })()
 """.replace("__PLANS__", _PLAN_NAMES_JS)
+
+
+def _is_page_not_ready_error(exc: BaseException) -> bool:
+    """True when CDP/BiDi evaluate failed because the DOM body wasn't ready yet."""
+    msg = str(exc)
+    return (
+        "createTreeWalker" in msg
+        or "parameter 1 is not of type 'Node'" in msg
+    )
+
+
+def _soft_skip_snapshot(prev: UsageSnapshot, *, source: str) -> UsageSnapshot:
+    """Keep last good gauges; clear error so the next timer can try cleanly."""
+    keep_source = prev.source if prev.source in {"cdp", "bidi"} else source
+    return UsageSnapshot(
+        cursor_models_pct=prev.cursor_models_pct,
+        other_models_pct=prev.other_models_pct,
+        fetched_at=prev.fetched_at,
+        source=keep_source,
+        error=None,
+        raw_hint=prev.raw_hint,
+        **_account_fields(prev),
+    )
 
 
 class _ScrapeClient(Protocol):
@@ -359,6 +407,13 @@ class SpendingScraper:
                 print("[scrape] navigated to spending url", flush=True)
 
             data = await self._extract_with_retry(client, handle)
+            if data.get("pageReady") is False:
+                print(
+                    "[scrape] page not ready (no document.body); "
+                    "keeping previous snapshot until next poll",
+                    flush=True,
+                )
+                return _soft_skip_snapshot(prev, source=source)
             print(
                 f"[scrape] extract raw cursorModelsPct={data.get('cursorModelsPct')!r} "
                 f"otherModelsPct={data.get('otherModelsPct')!r} "
@@ -468,6 +523,13 @@ class SpendingScraper:
             return snap
         except Exception as exc:
             print(f"[scrape] exception: {exc!r}", flush=True)
+            if _is_page_not_ready_error(exc):
+                print(
+                    "[scrape] page not ready during evaluate; "
+                    "keeping previous snapshot until next poll",
+                    flush=True,
+                )
+                return _soft_skip_snapshot(prev, source=source)
             is_session_stuck = "maximum number of active sessions" in str(exc).lower()
             if is_session_stuck:
                 log.warning("BiDi session stuck; will retry: %s", exc)
@@ -502,7 +564,17 @@ class SpendingScraper:
     ) -> dict[str, Any]:
         last: dict[str, Any] = {}
         for i in range(attempts):
-            last = await client.evaluate(handle, EXTRACT_JS) or {}
+            try:
+                last = await client.evaluate(handle, EXTRACT_JS) or {}
+            except (BidiError, CdpError) as exc:
+                if _is_page_not_ready_error(exc):
+                    print(
+                        f"[scrape] attempt {i + 1}/{attempts}: page not ready — "
+                        "skipping until next poll",
+                        flush=True,
+                    )
+                    return {"pageReady": False}
+                raise
             if not isinstance(last, dict):
                 last = {}
             print(
@@ -511,9 +583,13 @@ class SpendingScraper:
                 f"other={last.get('otherModelsPct')!r} "
                 f"loggedOut={last.get('loggedOut')!r} "
                 f"pageUrl={last.get('pageUrl')!r} "
-                f"hasIncludedInPro={last.get('hasIncludedInPro')!r}",
+                f"hasIncludedInPro={last.get('hasIncludedInPro')!r} "
+                f"pageReady={last.get('pageReady')!r}",
                 flush=True,
             )
+            # Body missing — do not burn retries; next scheduled poll will try again.
+            if last.get("pageReady") is False:
+                return last
             if last.get("cursorModelsPct") is not None or last.get("otherModelsPct") is not None:
                 return last
             if page_requires_login_from_extract(last):
