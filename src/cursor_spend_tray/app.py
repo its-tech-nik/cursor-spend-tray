@@ -43,7 +43,7 @@ from .config import (
     poll_interval_label,
 )
 from .popup import SpendPopup
-from .login_network_watch import LoginNetworkWatcher
+from .login_network_watch import LoginNetworkWatcher, LogoutNetworkWatcher
 from .scheduler import RefreshScheduler
 from .session_cookie import profile_has_cursor_session_cookie
 from .sni import StatusNotifierItem
@@ -915,6 +915,8 @@ class TrayApp(QWidget):
         self._login_watch = LoginNetworkWatcher(config, self)
         self._login_watch.detected.connect(self._on_login_network_detected)
         self._login_watch.status.connect(self.popup.set_status)
+        self._logout_watch = LogoutNetworkWatcher(config, self)
+        self._logout_watch.detected.connect(self._on_logout_network_detected)
         # Early cookie presence check: brand-new / never-signed-in profiles open
         # headed login immediately; profiles with a session cookie scrape in background.
         if self._prompt_login_if_no_session_cookie():
@@ -1018,6 +1020,7 @@ class TrayApp(QWidget):
     def _refresh_now(self) -> None:
         # Release the BiDi/CDP watch session before a scrape (Firefox allows one).
         self._stop_login_network_watch()
+        self._stop_logout_network_watch()
         self.scheduler.refresh()
 
     def _on_login_network_detected(self, url: str) -> None:
@@ -1027,11 +1030,40 @@ class TrayApp(QWidget):
             url,
         )
         self._stop_login_network_watch()
+        self._stop_logout_network_watch()
         self._login_launch_pending = False
         self._viewing_browser = False
         self._refresh_after_headless = True
         self.popup.set_status("Sign-in detected — switching to headless…")
         QTimer.singleShot(0, self._switch_to_headless_after_login)
+
+    def _on_logout_network_detected(self, url: str) -> None:
+        """After sign-out traffic in View Browser: signed-out UI + headed re-auth."""
+        log.info(
+            "Sign-out network activity detected (%s) — switching to signed-out UI",
+            url,
+        )
+        self._stop_logout_network_watch()
+        self._viewing_browser = False
+        # Drop cached identity so the menu/tray match poll-logout behaviour.
+        self.snapshot.account_email = None
+        self.snapshot.subscription_level = None
+        self.snapshot.account_avatar_url = None
+        self.snapshot.cursor_models_pct = None
+        self.snapshot.other_models_pct = None
+        self.snapshot.source = "logged_out"
+        self.snapshot.error = (
+            "Signed out — sign in to Cursor in the dedicated browser window."
+        )
+        self.snapshot.save()
+        self._apply_snapshot(self.snapshot)
+        self.scheduler.pause_for_login()
+        self.popup.set_awaiting_login(True)
+        self.popup.set_status(
+            "Signed out — sign in to Cursor in the dedicated browser window "
+            "(refresh runs automatically when the dashboard loads)."
+        )
+        self._ensure_login_browser()
 
     def _start_login_network_watch(self) -> None:
         """Watch headed-browser traffic only while awaiting Cursor sign-in."""
@@ -1039,17 +1071,40 @@ class TrayApp(QWidget):
             return
         if self.scheduler.is_refreshing():
             return
+        self._stop_logout_network_watch()
         self._login_watch.start()
 
     def _stop_login_network_watch(self) -> None:
         if hasattr(self, "_login_watch"):
             self._login_watch.stop()
 
+    def _start_logout_network_watch(self) -> None:
+        """Watch headed View Browser traffic for Cursor sign-out."""
+        if not self._viewing_browser:
+            return
+        # Known headless means View Browser ended; None = still starting (thread retries).
+        if self.config.browser_is_headless() is True:
+            return
+        if getattr(self.popup, "_awaiting_login", False):
+            return
+        if self.scheduler.is_refreshing():
+            return
+        self._stop_login_network_watch()
+        self._logout_watch.start()
+
+    def _stop_logout_network_watch(self) -> None:
+        if hasattr(self, "_logout_watch"):
+            self._logout_watch.stop()
+
     def _on_refreshing(self, refreshing: bool) -> None:
         self.popup.set_refreshing(refreshing)
         self.popup.set_remaining(self.scheduler.remaining_seconds())
         if refreshing:
             self._stop_login_network_watch()
+            self._stop_logout_network_watch()
+        elif self._viewing_browser:
+            # Resume logout watch after a scrape while View Browser stays headed.
+            QTimer.singleShot(500, self._start_logout_network_watch)
 
     def _on_snapshot(self, snap: object) -> None:
         assert isinstance(snap, UsageSnapshot)
@@ -1057,6 +1112,7 @@ class TrayApp(QWidget):
         self._apply_snapshot(snap)
         # Single entry for first launch, browser switch, and poll failures.
         if self._prompt_login_if_needed(snap):
+            self._stop_logout_network_watch()
             return
         self._stop_login_network_watch()
         if snap.source in ("bidi", "cdp") and not snap.error:
@@ -1065,10 +1121,13 @@ class TrayApp(QWidget):
                 # Manual "View Browser" stays headed; login windows flip back to headless.
                 if self._viewing_browser:
                     self._headless_switch_pending = False
+                    QTimer.singleShot(500, self._start_logout_network_watch)
                 elif not self._headless_switch_pending:
+                    self._stop_logout_network_watch()
                     QTimer.singleShot(0, self._switch_to_headless_after_login)
             else:
                 self._headless_switch_pending = False
+                self._stop_logout_network_watch()
                 if self.config.between_scrapes == "quit":
                     QTimer.singleShot(0, self._quit_browser_between_scrapes)
 
@@ -1188,6 +1247,7 @@ class TrayApp(QWidget):
         name = self.config.browser.display_name
         if self.config.browser_is_headless() is False:
             self.popup.set_status(f"{name} is already open on the spending page.")
+            QTimer.singleShot(500, self._start_logout_network_watch)
             return
         if self.config.browser_is_running():
             self.popup.set_status(f"Opening {name} on the spending page…")
@@ -1200,6 +1260,7 @@ class TrayApp(QWidget):
         if self.config.browser_is_headless() is True:
             if not self.config.stop_browser(timeout=8.0):
                 self._viewing_browser = False
+                self._stop_logout_network_watch()
                 self.popup.set_status(
                     f"Could not stop headless {self.config.browser.display_name} "
                     "to open a visible window."
@@ -1212,6 +1273,7 @@ class TrayApp(QWidget):
             self.popup.set_status(
                 f"{self.config.browser.display_name} is already open on the spending page."
             )
+            QTimer.singleShot(500, self._start_logout_network_watch)
             return
         argv = self.config.browser_login_argv()
         try:
@@ -1227,6 +1289,7 @@ class TrayApp(QWidget):
                 self.config.browser.display_name,
             )
             self._viewing_browser = False
+            self._stop_logout_network_watch()
             self.popup.set_status(f"Could not open browser: {exc}")
             return
 
@@ -1235,6 +1298,8 @@ class TrayApp(QWidget):
             f"{self.config.browser.display_name} open on the Cursor spending page."
         )
         QTimer.singleShot(2_000, self._stop_spinner)
+        # Watch for sign-out once remote debugging is up (headed View Browser only).
+        QTimer.singleShot(2_500, self._start_logout_network_watch)
 
     def _switch_to_headless_after_login(self) -> None:
         """Close the headed login window and relaunch the dedicated profile headless.
@@ -1248,6 +1313,7 @@ class TrayApp(QWidget):
         if self._viewing_browser:
             self._refresh_after_headless = False
             return
+        self._stop_logout_network_watch()
         refresh_after = self._refresh_after_headless
         self._refresh_after_headless = False
 
@@ -1421,6 +1487,7 @@ class TrayApp(QWidget):
         self._login_launch_pending = False
         self._headless_switch_pending = False
         self._viewing_browser = False
+        self._stop_logout_network_watch()
         if self._prompt_login_if_no_session_cookie():
             return
         self.popup.set_status(
@@ -1583,6 +1650,7 @@ class TrayApp(QWidget):
             return
 
         self._viewing_browser = False
+        self._stop_logout_network_watch()
         argv = self.config.browser_launch_argv()
         try:
             subprocess.Popen(
@@ -1645,6 +1713,7 @@ class TrayApp(QWidget):
     def shutdown(self) -> None:
         """Stop polling and tear down the dedicated automation browser on quit."""
         self._stop_login_network_watch()
+        self._stop_logout_network_watch()
         if hasattr(self, "scheduler"):
             self.scheduler.stop()
         if hasattr(self, "_launch_retry_timer"):
