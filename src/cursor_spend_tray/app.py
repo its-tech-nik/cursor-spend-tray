@@ -728,6 +728,12 @@ class TrayApp(QWidget):
         self._between_group.addAction(self._between_quit_action)
         self._sync_between_scrapes_actions()
 
+        self._view_browser_action = QAction("View Browser", self)
+        self._view_browser_action.setToolTip(
+            "Open the selected automation browser on the Cursor spending page."
+        )
+        self._view_browser_action.triggered.connect(self._on_view_browser)
+
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         self._ctx.add_action(self._refresh_action)
@@ -735,6 +741,7 @@ class TrayApp(QWidget):
         self._ctx.add_separator()
         self._ctx.add_submenu("Refresh interval", self._poll_actions)
         browser_menu = self._ctx.add_submenu("Browser")
+        browser_menu.add_action(self._view_browser_action)
         self._automation_menu = browser_menu.add_submenu("Automation on")
         self._rebuild_browser_actions()
         between_menu = browser_menu.add_submenu("Between Scrapes")
@@ -751,6 +758,7 @@ class TrayApp(QWidget):
         self._spin_timer.timeout.connect(self._on_spin_tick)
         self._login_launch_pending = False
         self._headless_switch_pending = False
+        self._viewing_browser = False
         self._warmup_only = False
         self._pending_scrape_ready: Callable[[], None] | None = None
 
@@ -820,8 +828,10 @@ class TrayApp(QWidget):
         if snap.source in ("bidi", "cdp") and not snap.error:
             self._login_launch_pending = False
             if self.config.browser_is_headless() is False:
-                # Login window did its job — flip back to headless for background polls.
-                if not self._headless_switch_pending:
+                # Manual "View Browser" stays headed; login windows flip back to headless.
+                if self._viewing_browser:
+                    self._headless_switch_pending = False
+                elif not self._headless_switch_pending:
                     QTimer.singleShot(0, self._switch_to_headless_after_login)
             else:
                 self._headless_switch_pending = False
@@ -922,9 +932,67 @@ class TrayApp(QWidget):
         # manual refresh / poll verifies the session (cookie + page check).
         QTimer.singleShot(2_000, self._stop_spinner)
 
+    def _on_view_browser(self) -> None:
+        """Open the selected automation browser headed on the Cursor spending page."""
+        self._viewing_browser = True
+        self._login_launch_pending = False
+        self._headless_switch_pending = False
+        name = self.config.browser.display_name
+        if self.config.browser_is_headless() is False:
+            self.popup.set_status(f"{name} is already open on the spending page.")
+            return
+        if self.config.browser_is_running():
+            self.popup.set_status(f"Opening {name} on the spending page…")
+            QTimer.singleShot(0, self._restart_headed_for_view)
+            return
+        self.popup.set_status(f"Opening {name} on the spending page…")
+        QTimer.singleShot(0, self._launch_headed_view)
+
+    def _restart_headed_for_view(self) -> None:
+        if self.config.browser_is_headless() is True:
+            if not self.config.stop_browser(timeout=8.0):
+                self._viewing_browser = False
+                self.popup.set_status(
+                    f"Could not stop headless {self.config.browser.display_name} "
+                    "to open a visible window."
+                )
+                return
+        self._launch_headed_view()
+
+    def _launch_headed_view(self) -> None:
+        if self.config.browser_is_headless() is False:
+            self.popup.set_status(
+                f"{self.config.browser.display_name} is already open on the spending page."
+            )
+            return
+        argv = self.config.browser_login_argv()
+        try:
+            subprocess.Popen(
+                argv,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            log.exception(
+                "Failed to launch headed %s for View Browser",
+                self.config.browser.display_name,
+            )
+            self._viewing_browser = False
+            self.popup.set_status(f"Could not open browser: {exc}")
+            return
+
+        self._start_spinner()
+        self.popup.set_status(
+            f"{self.config.browser.display_name} open on the Cursor spending page."
+        )
+        QTimer.singleShot(2_000, self._stop_spinner)
+
     def _switch_to_headless_after_login(self) -> None:
         """Close the headed login window and relaunch the dedicated profile headless."""
         if self._headless_switch_pending:
+            return
+        if self._viewing_browser:
             return
         if self.config.browser_is_headless() is not False:
             self._headless_switch_pending = False
@@ -959,6 +1027,7 @@ class TrayApp(QWidget):
             self._stop_spinner()
             self.popup.set_status(f"Could not relaunch headless {name}: {exc}")
             return
+        self._viewing_browser = False
         self._arm_launch_retry()
 
     def _on_activated(self, pos: QPoint) -> None:
@@ -1076,6 +1145,7 @@ class TrayApp(QWidget):
         # otherwise scrape so auth/bot pages still open headed sign-in.
         self._login_launch_pending = False
         self._headless_switch_pending = False
+        self._viewing_browser = False
         if self._prompt_login_if_no_session_cookie():
             return
         self.popup.set_status(
@@ -1237,6 +1307,7 @@ class TrayApp(QWidget):
         if self.config.browser_is_running():
             return
 
+        self._viewing_browser = False
         argv = self.config.browser_launch_argv()
         try:
             subprocess.Popen(
