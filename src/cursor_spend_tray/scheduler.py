@@ -123,6 +123,13 @@ class RefreshScheduler(QObject):
         """Clear the browser-launch gate so a later refresh can run."""
         self._awaiting_ready = False
 
+    def pause_for_login(self) -> None:
+        """Stop the countdown until the user signs in and refreshes manually."""
+        self._paused = True
+        self._stop_probe()
+        self._warmup_fired = True
+        self._emit_seconds()
+
     def refresh(self) -> None:
         if self._worker and self._worker.isRunning():
             self.status_changed.emit("Refresh already in progress…")
@@ -213,6 +220,14 @@ class RefreshScheduler(QObject):
             self.status_changed.emit(
                 f"Browser inaccessible — waiting for {self.config.browser.display_name} "
                 "with remote debugging. Copy the launch command below, then relaunch."
+            )
+        elif snap.source == "logged_out":
+            # No auto-poll while signed out — hide countdown; wait for manual refresh.
+            self.pause_for_login()
+            self.refreshing_changed.emit(False)
+            self.status_changed.emit(
+                snap.error
+                or "Sign in to Cursor in the dedicated browser window, then refresh."
             )
         else:
             self.refreshing_changed.emit(False)

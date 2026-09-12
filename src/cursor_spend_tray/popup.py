@@ -2234,6 +2234,8 @@ class SpendPopup(QFrame):
         self._refreshing = False
         self._dismiss_armed = False
         self._keep_open = False
+        self._awaiting_login = False
+        self._browser_inaccessible = False
         self._arm_timer = QTimer(self)
         self._arm_timer.setSingleShot(True)
         self._arm_timer.timeout.connect(self._arm_dismiss)
@@ -2460,16 +2462,29 @@ class SpendPopup(QFrame):
 
     def set_browser_inaccessible(self, inaccessible: bool, launch_command: str = "") -> None:
         """Show or hide the Browser inaccessible banner with a copyable launch command."""
+        self._browser_inaccessible = inaccessible
         if inaccessible:
             self._spend_panel.hide()
             self.browser_help.set_launch_command(launch_command)
             self.browser_help.show()
-            self.countdown.hide()
         else:
             self._spend_panel.show()
             self.browser_help.hide()
-            self.countdown.show()
+        self._sync_countdown_visibility()
         self.adjustSize()
+
+    def set_awaiting_login(self, awaiting: bool) -> None:
+        """Hide the countdown while signed out; only the sign-in status should show."""
+        self._awaiting_login = awaiting
+        self._sync_countdown_visibility()
+        self.adjustSize()
+
+    def _sync_countdown_visibility(self) -> None:
+        hide = bool(
+            getattr(self, "_browser_inaccessible", False)
+            or getattr(self, "_awaiting_login", False)
+        )
+        self.countdown.setVisible(not hide)
 
     def set_status(self, text: str) -> None:
         clean = (text or "").strip()

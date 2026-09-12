@@ -163,6 +163,15 @@ def _account_fields(prev: UsageSnapshot) -> dict[str, str | None]:
     }
 
 
+def _cleared_account_fields() -> dict[str, str | None]:
+    """Drop cached identity when the session is logged out / unauthenticated."""
+    return {
+        "account_email": None,
+        "subscription_level": None,
+        "account_avatar_url": None,
+    }
+
+
 class SpendingScraper:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -304,7 +313,7 @@ class SpendingScraper:
                     f"(url={data.get('pageUrl')!r})",
                     flush=True,
                 )
-                return UsageSnapshot(
+                snap = UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
                     error=(
@@ -315,8 +324,11 @@ class SpendingScraper:
                     fetched_at=time.time(),
                     source="logged_out",
                     raw_hint=data.get("hint") or prev.raw_hint,
-                    **_account_fields(prev),
+                    **_cleared_account_fields(),
                 )
+                snap.save()
+                print("[scrape] cleared account identity (logged out)", flush=True)
+                return snap
 
             cursor_pct = _clamp_pct(data.get("cursorModelsPct"))
             other_pct = _clamp_pct(data.get("otherModelsPct"))

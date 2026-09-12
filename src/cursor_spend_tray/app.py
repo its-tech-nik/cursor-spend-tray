@@ -613,12 +613,22 @@ class _CtxAccountCard(QFrame):
     def set_account(
         self,
         *,
-        email: str,
-        subscription: str,
+        email: str | None,
+        subscription: str | None,
         avatar: QPixmap | None = None,
+        authenticated: bool = True,
     ) -> None:
+        if not authenticated or not email:
+            self._email.setText("Not authenticated")
+            self._email.setStyleSheet("color: #F2F2F2;")
+            self._plan.setText("Sign in to Cursor to track spending")
+            self._plan.setStyleSheet("color: #B0B0B0;")
+            self._avatar.clear()
+            return
         self._email.setText(f"Authenticated as: {email}")
-        self._plan.setText(f"Subscription: {subscription}")
+        self._email.setStyleSheet("color: #F2F2F2;")
+        self._plan.setText(f"Subscription: {subscription or '—'}")
+        self._plan.setStyleSheet("color: #B0B0B0;")
         if avatar is not None and not avatar.isNull():
             self._avatar.setPixmap(_circular_avatar(avatar))
             self._avatar.show()
@@ -916,10 +926,12 @@ class TrayApp(QWidget):
 
         self._stop_spinner()
         disconnected = bidi_unavailable(snap)
+        needs_login = session_logged_out(snap) and not disconnected
         self.popup.apply_snapshot(snap)
         self.popup.set_browser_inaccessible(
             disconnected, self.config.zen_launch_command()
         )
+        self.popup.set_awaiting_login(needs_login)
         self._refresh_action.setVisible(not disconnected)
         self._sync_account_actions(snap)
         self.tray.set_icon(
@@ -933,17 +945,37 @@ class TrayApp(QWidget):
         self.tray.set_tooltip(body, title=title)
 
     def _sync_account_actions(self, snap: UsageSnapshot) -> None:
-        email = snap.account_email or "—"
-        plan = snap.subscription_level or "—"
+        authenticated = bool(snap.account_email) and not session_logged_out(snap)
+        if not authenticated:
+            self._refresh_account_avatar(None)
+            self._account_card.set_account(
+                email=None,
+                subscription=None,
+                avatar=None,
+                authenticated=False,
+            )
+            return
         self._refresh_account_avatar(snap.account_avatar_url)
         avatar = self._avatar_pixmap if not self._avatar_pixmap.isNull() else None
-        self._account_card.set_account(email=email, subscription=plan, avatar=avatar)
+        self._account_card.set_account(
+            email=snap.account_email,
+            subscription=snap.subscription_level,
+            avatar=avatar,
+            authenticated=True,
+        )
 
     def _refresh_account_avatar(self, url: str | None) -> None:
         """Download/cache the sidebar avatar as a full-color pixmap (not a disabled QIcon)."""
         if not url:
             self._avatar_url_cached = None
             self._avatar_pixmap = QPixmap()
+            cache = data_dir() / "account_avatar.bin"
+            url_file = data_dir() / "account_avatar.url"
+            for path in (cache, url_file):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return
         if url == self._avatar_url_cached and not self._avatar_pixmap.isNull():
             return
@@ -1005,6 +1037,8 @@ class TrayApp(QWidget):
         """
         if not snapshot_needs_login(snap):
             return False
+        self.scheduler.pause_for_login()
+        self.popup.set_awaiting_login(True)
         self._ensure_login_browser()
         return True
 
@@ -1026,6 +1060,16 @@ class TrayApp(QWidget):
             name,
         )
         self.popup.set_status(f"No Cursor session in {name} — opening sign-in…")
+        # Drop stale identity from a previous session so the menu shows logged-out.
+        self.snapshot.account_email = None
+        self.snapshot.subscription_level = None
+        self.snapshot.account_avatar_url = None
+        self.snapshot.source = "logged_out"
+        self.snapshot.save()
+        self._sync_account_actions(self.snapshot)
+        self.popup.set_awaiting_login(True)
+        if hasattr(self, "scheduler"):
+            self.scheduler.pause_for_login()
         self._ensure_login_browser()
         return True
 
