@@ -9,7 +9,7 @@ from .auth_detect import page_requires_login_from_extract
 from .bidi_client import BidiClient, BidiError
 from .browser import BrowserFamily
 from .cdp_client import CdpClient, CdpError
-from .config import AppConfig, UsageSnapshot
+from .config import SETTINGS_URL, AppConfig, UsageSnapshot
 from .usage_csv import associate_spend_pct, sync_usage_csvs
 
 log = logging.getLogger(__name__)
@@ -86,6 +86,63 @@ EXTRACT_JS = r"""
 })()
 """
 
+# Settings page: email cell + left-sidebar plan / avatar at the bottom.
+ACCOUNT_EXTRACT_JS = r"""
+(() => {
+  const plans = ["Ultra", "Pro+", "Business", "Teams", "Pro", "Hobby", "Free"];
+  const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+  let email = null;
+  const label = Array.from(document.querySelectorAll(".dashboard-cell-label")).find(
+    (el) => (el.textContent || "").trim() === "Email"
+  );
+  if (label) {
+    const cell = label.closest(".dashboard-cell");
+    const m = ((cell && cell.innerText) || "").match(emailRe);
+    if (m) email = m[0];
+  }
+  if (!email) {
+    const m = ((document.body && document.body.innerText) || "").match(emailRe);
+    if (m) email = m[0];
+  }
+
+  let subscription = null;
+  const secondary = Array.from(
+    document.querySelectorAll('span[class*="text-secondary"]')
+  );
+  for (const el of secondary) {
+    const t = (el.textContent || "").trim();
+    if (plans.includes(t)) subscription = t;
+  }
+  if (!subscription) {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n.children.length !== 0) continue;
+      const t = (n.textContent || "").trim();
+      if (plans.includes(t)) subscription = t;
+    }
+  }
+
+  let avatarUrl = null;
+  // Prefer display size (sidebar avatars are ~28–40px); naturalWidth is often full-res.
+  const imgs = Array.from(document.querySelectorAll("img")).filter((img) => {
+    const w = img.width || img.clientWidth || 0;
+    const h = img.height || img.clientHeight || 0;
+    return w >= 16 && w <= 64 && h >= 16 && h <= 64 && (img.src || "").startsWith("http");
+  });
+  if (imgs.length) {
+    avatarUrl = imgs[imgs.length - 1].src;
+  }
+
+  return {
+    email,
+    subscription,
+    avatarUrl,
+    pageUrl: String(location.href || ""),
+  };
+})()
+"""
+
 
 class _ScrapeClient(Protocol):
     http_base: str
@@ -96,6 +153,14 @@ class _ScrapeClient(Protocol):
     async def find_or_open_tab(self, url: str, reuse: bool = True) -> str: ...
     async def reload(self, handle: str) -> None: ...
     async def evaluate(self, handle: str, expression: str) -> Any: ...
+
+
+def _account_fields(prev: UsageSnapshot) -> dict[str, str | None]:
+    return {
+        "account_email": prev.account_email,
+        "subscription_level": prev.subscription_level,
+        "account_avatar_url": prev.account_avatar_url,
+    }
 
 
 class SpendingScraper:
@@ -116,6 +181,62 @@ class SpendingScraper:
             BidiClient(self.config.bidi_host, self.config.bidi_port),
             "bidi",
         )
+
+    async def _navigate(self, client: _ScrapeClient, handle: str, url: str) -> None:
+        if isinstance(client, BidiClient):
+            await client.call(
+                "browsingContext.navigate",
+                {"context": handle, "url": url, "wait": "complete"},
+            )
+            return
+        assert isinstance(client, CdpClient)
+        await client.call("Page.navigate", {"url": url}, session_id=handle)
+        await client._wait_load(handle)
+
+    async def _fetch_account(
+        self,
+        client: _ScrapeClient,
+        handle: str,
+        prev: UsageSnapshot,
+    ) -> dict[str, str | None]:
+        """Navigate to settings, scrape email / plan / avatar, return to spending."""
+        fields = _account_fields(prev)
+        try:
+            await self._navigate(client, handle, SETTINGS_URL)
+            print("[scrape] navigated to settings for account info", flush=True)
+            data: dict[str, Any] = {}
+            for i in range(6):
+                raw = await client.evaluate(handle, ACCOUNT_EXTRACT_JS) or {}
+                data = raw if isinstance(raw, dict) else {}
+                if data.get("email") or data.get("subscription"):
+                    break
+                await asyncio.sleep(0.6 + i * 0.15)
+            email = data.get("email")
+            subscription = data.get("subscription")
+            avatar = data.get("avatarUrl")
+            if isinstance(email, str) and email.strip():
+                fields["account_email"] = email.strip()
+            if isinstance(subscription, str) and subscription.strip():
+                fields["subscription_level"] = subscription.strip()
+            if isinstance(avatar, str) and avatar.startswith("http"):
+                fields["account_avatar_url"] = avatar
+            print(
+                f"[scrape] account email={fields['account_email']!r} "
+                f"subscription={fields['subscription_level']!r} "
+                f"avatar={'yes' if fields['account_avatar_url'] else 'no'}",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — keep spend result
+            print(f"[scrape] account extract failed: {exc!r}", flush=True)
+            log.exception("Account extract failed")
+        finally:
+            try:
+                await self._navigate(client, handle, self.config.spending_url)
+                print("[scrape] returned to spending tab", flush=True)
+            except Exception as back_exc:  # noqa: BLE001
+                print(f"[scrape] return to spending failed: {back_exc!r}", flush=True)
+                log.warning("Could not navigate back to spending: %s", back_exc)
+        return fields
 
     async def fetch(self) -> UsageSnapshot:
         prev = UsageSnapshot.load()
@@ -149,6 +270,7 @@ class SpendingScraper:
                     fetched_at=time.time(),
                     source="unavailable",
                     raw_hint=prev.raw_hint,
+                    **_account_fields(prev),
                 )
             await client.connect()
             print(f"[scrape] {source.upper()} connected", flush=True)
@@ -162,23 +284,7 @@ class SpendingScraper:
                 print("[scrape] reloaded spending tab", flush=True)
             except (BidiError, CdpError) as reload_exc:
                 print(f"[scrape] reload failed ({reload_exc}); navigating", flush=True)
-                if isinstance(client, BidiClient):
-                    await client.call(
-                        "browsingContext.navigate",
-                        {
-                            "context": handle,
-                            "url": self.config.spending_url,
-                            "wait": "complete",
-                        },
-                    )
-                else:
-                    assert isinstance(client, CdpClient)
-                    await client.call(
-                        "Page.navigate",
-                        {"url": self.config.spending_url},
-                        session_id=handle,
-                    )
-                    await client._wait_load(handle)
+                await self._navigate(client, handle, self.config.spending_url)
                 print("[scrape] navigated to spending url", flush=True)
 
             data = await self._extract_with_retry(client, handle)
@@ -209,6 +315,7 @@ class SpendingScraper:
                     fetched_at=time.time(),
                     source="logged_out",
                     raw_hint=data.get("hint") or prev.raw_hint,
+                    **_account_fields(prev),
                 )
 
             cursor_pct = _clamp_pct(data.get("cursorModelsPct"))
@@ -226,14 +333,17 @@ class SpendingScraper:
                     fetched_at=time.time(),
                     source=source,
                     raw_hint=data.get("hint") or prev.raw_hint,
+                    **_account_fields(prev),
                 )
 
+            account = await self._fetch_account(client, handle, prev)
             snap = UsageSnapshot(
                 cursor_models_pct=cursor_pct,
                 other_models_pct=other_pct,
                 fetched_at=time.time(),
                 source=source,
                 raw_hint=data.get("hint"),
+                **account,
             )
             snap.save()
             print(
@@ -285,6 +395,7 @@ class SpendingScraper:
                         "with remote debugging to clear it."
                     ),
                     raw_hint=prev.raw_hint,
+                    **_account_fields(prev),
                 )
             log.exception("Scrape failed")
             return UsageSnapshot(
@@ -294,6 +405,7 @@ class SpendingScraper:
                 source="error",
                 error=str(exc),
                 raw_hint=prev.raw_hint,
+                **_account_fields(prev),
             )
         finally:
             await client.close()

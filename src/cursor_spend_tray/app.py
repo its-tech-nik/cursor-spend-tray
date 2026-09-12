@@ -5,6 +5,7 @@ import math
 import subprocess
 from collections.abc import Callable
 
+import httpx
 from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import (
     QAction,
@@ -14,6 +15,7 @@ from PyQt6.QtGui import (
     QGuiApplication,
     QIcon,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QPolygonF,
@@ -37,6 +39,7 @@ from .config import (
     AppConfig,
     BetweenScrapesMode,
     UsageSnapshot,
+    data_dir,
     poll_interval_label,
 )
 from .popup import SpendPopup
@@ -68,6 +71,17 @@ QLabel {
     border: none;
 }
 """
+_CTX_ACCOUNT_STYLE = """
+QFrame#ctxAccount {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+}
+QLabel {
+    background: transparent;
+    border: none;
+}
+"""
 _CTX_MENU_STYLE = """
 TrayContextMenu, TrayContextSubmenu {
     background: #2B2B2B;
@@ -81,6 +95,32 @@ QFrame#ctxSep {
     margin: 6px 10px;
 }
 """
+
+_ACCOUNT_AVATAR_PX = 40
+
+
+def _circular_avatar(src: QPixmap, size: int = _ACCOUNT_AVATAR_PX) -> QPixmap:
+    """Center-crop to a smooth circular mask (full color)."""
+    if src.isNull():
+        return QPixmap()
+    scaled = src.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    x = max(0, (scaled.width() - size) // 2)
+    y = max(0, (scaled.height() - size) // 2)
+    out = QPixmap(size, size)
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    path = QPainterPath()
+    path.addEllipse(0.0, 0.0, float(size), float(size))
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, scaled, x, y, size, size)
+    painter.end()
+    return out
 
 
 def bidi_unavailable(snap: UsageSnapshot) -> bool:
@@ -279,6 +319,13 @@ class TrayContextMenu(QFrame):
         self._layout.addWidget(row)
         self._rows.append(row)
         return row
+
+    def add_account_card(self) -> _CtxAccountCard:
+        """Non-interactive account summary (avatar + email + plan)."""
+        card = _CtxAccountCard(self)
+        self._layout.addWidget(card)
+        self._rows.append(card)
+        return card
 
     def add_submenu(
         self,
@@ -517,6 +564,74 @@ class TrayContextSubmenu(QFrame):
         super().hideEvent(event)
 
 
+class _CtxAccountCard(QFrame):
+    """Single non-interactive field: circular avatar spanning email + subscription."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ctxAccount")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(56)
+        self.setStyleSheet(_CTX_ACCOUNT_STYLE)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        self._avatar = QLabel()
+        self._avatar.setFixedSize(_ACCOUNT_AVATAR_PX, _ACCOUNT_AVATAR_PX)
+        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._email = QLabel("Authenticated as: —")
+        email_font = self._email.font()
+        email_font.setPointSize(10)
+        self._email.setFont(email_font)
+        self._email.setStyleSheet("color: #F2F2F2;")
+        self._email.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._email.setWordWrap(False)
+
+        self._plan = QLabel("Subscription: —")
+        plan_font = self._plan.font()
+        plan_font.setPointSize(10)
+        self._plan.setFont(plan_font)
+        self._plan.setStyleSheet("color: #B0B0B0;")
+        self._plan.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+        text_col.addWidget(self._email)
+        text_col.addWidget(self._plan)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 8, 10, 8)
+        row.setSpacing(10)
+        row.addWidget(self._avatar, alignment=Qt.AlignmentFlag.AlignVCenter)
+        row.addLayout(text_col, stretch=1)
+
+    def set_account(
+        self,
+        *,
+        email: str,
+        subscription: str,
+        avatar: QPixmap | None = None,
+    ) -> None:
+        self._email.setText(f"Authenticated as: {email}")
+        self._plan.setText(f"Subscription: {subscription}")
+        if avatar is not None and not avatar.isNull():
+            self._avatar.setPixmap(_circular_avatar(avatar))
+            self._avatar.show()
+        else:
+            self._avatar.clear()
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        parent = self.parent()
+        if isinstance(parent, (TrayContextMenu, TrayContextSubmenu)):
+            parent.close_child_flyouts()
+        super().enterEvent(event)
+
+
 class _CtxMenuRow(QFrame):
     """Left-aligned menu row with optional trailing checkmark (Notion-style)."""
 
@@ -734,8 +849,13 @@ class TrayApp(QWidget):
         )
         self._view_browser_action.triggered.connect(self._on_view_browser)
 
+        self._avatar_url_cached: str | None = None
+        self._avatar_pixmap = QPixmap()
+
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
+        self._account_card = self._ctx.add_account_card()
+        self._ctx.add_separator()
         self._ctx.add_action(self._refresh_action)
         self._ctx.add_action(self._keep_open_action)
         self._ctx.add_separator()
@@ -801,6 +921,7 @@ class TrayApp(QWidget):
             disconnected, self.config.zen_launch_command()
         )
         self._refresh_action.setVisible(not disconnected)
+        self._sync_account_actions(snap)
         self.tray.set_icon(
             make_tray_icon(
                 snap.cursor_models_pct,
@@ -810,6 +931,44 @@ class TrayApp(QWidget):
         )
         title, body = tray_tooltip(snap)
         self.tray.set_tooltip(body, title=title)
+
+    def _sync_account_actions(self, snap: UsageSnapshot) -> None:
+        email = snap.account_email or "—"
+        plan = snap.subscription_level or "—"
+        self._refresh_account_avatar(snap.account_avatar_url)
+        avatar = self._avatar_pixmap if not self._avatar_pixmap.isNull() else None
+        self._account_card.set_account(email=email, subscription=plan, avatar=avatar)
+
+    def _refresh_account_avatar(self, url: str | None) -> None:
+        """Download/cache the sidebar avatar as a full-color pixmap (not a disabled QIcon)."""
+        if not url:
+            self._avatar_url_cached = None
+            self._avatar_pixmap = QPixmap()
+            return
+        if url == self._avatar_url_cached and not self._avatar_pixmap.isNull():
+            return
+        cache = data_dir() / "account_avatar.bin"
+        url_file = data_dir() / "account_avatar.url"
+        try:
+            data_dir().mkdir(parents=True, exist_ok=True)
+            cached_url = url_file.read_text(encoding="utf-8").strip() if url_file.is_file() else None
+            raw: bytes | None = None
+            if cached_url == url and cache.is_file():
+                raw = cache.read_bytes()
+            else:
+                with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+                    resp = client.get(url)
+                    resp.raise_for_status()
+                    raw = resp.content
+                cache.write_bytes(raw)
+                url_file.write_text(url, encoding="utf-8")
+            pix = QPixmap()
+            if not pix.loadFromData(raw):
+                return
+            self._avatar_pixmap = pix
+            self._avatar_url_cached = url
+        except Exception as exc:  # noqa: BLE001 — avatar is decorative
+            log.debug("Could not load account avatar: %s", exc)
 
     def _refresh_now(self) -> None:
         self.scheduler.refresh()

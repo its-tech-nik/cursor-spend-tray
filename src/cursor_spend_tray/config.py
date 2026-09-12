@@ -24,6 +24,7 @@ BetweenScrapesMode = Literal["keep_open", "quit"]
 
 APP_NAME = "cursor-spend-tray"
 SPENDING_URL = "https://cursor.com/dashboard/spending"
+SETTINGS_URL = "https://cursor.com/dashboard/settings"
 # Spending URL redirects to sign-in when the dedicated profile has no session.
 LOGIN_URL = SPENDING_URL
 # Context-menu choices (minutes). Default is 8; older installs may still have 10.
@@ -192,6 +193,10 @@ class AppConfig(BaseModel):
 class UsageSnapshot(BaseModel):
     cursor_models_pct: int | None = None
     other_models_pct: int | None = None
+    # From dashboard settings / sidebar (refreshed with each successful scrape).
+    account_email: str | None = None
+    subscription_level: str | None = None
+    account_avatar_url: str | None = None
     fetched_at: float | None = None
     source: str = "none"
     error: str | None = None
