@@ -1,164 +1,434 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Capability map</title>
+  <title>Capability map — Cursor Spend Tray</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
-    :root {
-      --bg: #f4f4f1;
-      --ink: #1c1c1a;
-      --muted: #5c5c56;
-      --card: #fffef8;
-      --line: #9a9a90;
-      --accent: #2f5d50;
-      --border: #d2d2c8;
+    :root,
+    [data-theme="dark"] {
+      --canvas: #12171f;
+      --canvas-deep: #1a222e;
+      --ink: #e6edf5;
+      --muted: #8b9aab;
+      --node: #1c2430;
+      --node-open: #243040;
+      --rail: #5a6d82;
+      --gate: #4db3b8;
+      --signal: #e07a3a;
+      --line: #3d4f63;
+      --focus: #4db3b8;
+      --err: #f0a0a0;
+      --err-bg: #3a2226;
+      --chrome: #161d28;
+      --grid: rgba(90, 109, 130, 0.14);
+      --radius: 12px;
+      --radius-sm: 8px;
+      --node-w: 252px;
+      --font-ui: "Space Grotesk", system-ui, sans-serif;
+      --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+      color-scheme: dark;
     }
+
+    [data-theme="light"] {
+      --canvas: #d5dde8;
+      --canvas-deep: #c4cfdd;
+      --ink: #15202b;
+      --muted: #5a6878;
+      --node: #f3f6fa;
+      --node-open: #eef4f5;
+      --rail: #6a7b90;
+      --gate: #1a6b73;
+      --signal: #c45c26;
+      --line: #8a9aac;
+      --focus: #1a6b73;
+      --err: #9b2f2f;
+      --err-bg: #f3e4e4;
+      --chrome: #e8eef5;
+      --grid: rgba(106, 123, 144, 0.07);
+      color-scheme: light;
+    }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
-      font-family: Georgia, "Times New Roman", serif;
-      color: var(--ink);
-      background: var(--bg);
       min-height: 100vh;
+      color: var(--ink);
+      font-family: var(--font-ui);
+      font-size: 15px;
+      line-height: 1.45;
+      background-color: var(--canvas);
+      background-image:
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+        linear-gradient(var(--grid) 1px, transparent 1px);
+      background-size: 28px 28px;
+      background-attachment: fixed;
     }
-    header {
-      padding: 1rem 1.25rem;
-      border-bottom: 1px solid var(--border);
-      background: #ebebe4;
+
+    .chrome {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: color-mix(in srgb, var(--chrome) 92%, transparent);
+      backdrop-filter: blur(8px);
+      border-bottom: 2px solid color-mix(in srgb, var(--ink) 35%, var(--line));
+    }
+
+    .chrome-inner {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.75rem 1rem;
-      align-items: center;
+      gap: 0.85rem 1.25rem;
+      align-items: flex-end;
       justify-content: space-between;
+      padding: 1rem 1.25rem 0.85rem;
+      max-width: 100%;
     }
-    header h1 {
+
+    .brand {
+      min-width: min(100%, 18rem);
+    }
+
+    .brand-product {
       margin: 0;
-      font-size: 1.15rem;
-      font-weight: normal;
-      letter-spacing: 0.02em;
+      font-size: clamp(1.35rem, 2.4vw, 1.75rem);
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
     }
-    header p {
-      margin: 0.2rem 0 0;
+
+    .brand-job {
+      margin: 0.35rem 0 0;
+      max-width: 36rem;
       color: var(--muted);
-      font-size: 0.85rem;
-      max-width: 42rem;
+      font-size: 0.92rem;
+      font-weight: 400;
+      line-height: 1.4;
     }
+
     .controls {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.5rem;
+      gap: 0.45rem;
       align-items: center;
     }
-    button, label.file-btn {
-      font: inherit;
-      font-size: 0.85rem;
-      padding: 0.35rem 0.7rem;
-      border: 1px solid var(--border);
-      background: var(--card);
+
+    button,
+    label.file-btn {
+      font-family: var(--font-ui);
+      font-size: 0.82rem;
+      font-weight: 500;
+      padding: 0.4rem 0.75rem;
+      border: 1.5px solid color-mix(in srgb, var(--ink) 55%, var(--line));
+      background: var(--node);
       color: var(--ink);
-      border-radius: 4px;
+      border-radius: var(--radius-sm);
       cursor: pointer;
     }
-    button:hover, label.file-btn:hover { border-color: var(--accent); }
+
+    button:hover,
+    label.file-btn:hover {
+      background: var(--gate);
+      border-color: var(--gate);
+      color: var(--canvas);
+    }
+
+    button:focus-visible,
+    label.file-btn:focus-visible,
+    .expand:focus-visible,
+    .card details summary:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+
     input[type="file"] { display: none; }
+
+    .meter-row {
+      display: grid;
+      gap: 0.35rem;
+      padding: 0.55rem 1.25rem 0.75rem;
+      border-top: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+    }
+
+    .meter-label {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem 0.85rem;
+      align-items: baseline;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    .meter-label strong {
+      color: var(--ink);
+      font-weight: 500;
+    }
+
+    .meter-track {
+      height: 6px;
+      background: var(--canvas-deep);
+      border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent);
+      border-radius: 1px;
+      overflow: hidden;
+    }
+
+    .meter-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--signal);
+      transform-origin: left center;
+      transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
     #status {
-      padding: 0.5rem 1.25rem;
+      padding: 0.45rem 1.25rem;
       font-size: 0.8rem;
       color: var(--muted);
-      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--canvas-deep) 55%, var(--chrome));
+      border-bottom: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
     }
-    #status.error { color: #8a3030; }
+
+    #status.error {
+      color: var(--err);
+      background: var(--err-bg);
+    }
+
     #viewport {
       overflow: auto;
-      padding: 1.5rem;
-      min-height: calc(100vh - 7rem);
+      padding: 1.5rem 1.25rem 3rem;
+      min-height: calc(100vh - 9rem);
     }
+
     .forest {
       display: flex;
       flex-direction: column;
-      gap: 1.75rem;
+      gap: 2rem;
       width: max-content;
       min-width: 100%;
     }
+
     .node-row {
       display: flex;
       flex-direction: row;
       align-items: stretch;
     }
+
     .card {
-      width: 240px;
-      flex: 0 0 240px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 0.7rem 0.8rem;
+      width: var(--node-w);
+      flex: 0 0 var(--node-w);
+      background: var(--node);
+      border: 1.5px solid color-mix(in srgb, var(--ink) 28%, var(--line));
+      border-radius: var(--radius);
+      border-left-width: 5px;
+      border-left-color: var(--rail);
+      padding: 0.75rem 0.85rem 0.8rem;
       align-self: center;
       position: relative;
       z-index: 1;
     }
+
+    .card.has-kids {
+      border-left-color: var(--gate);
+    }
+
+    .card.is-open {
+      background: var(--node-open);
+      border-left-color: var(--signal);
+    }
+
     .card-top {
       display: flex;
-      gap: 0.45rem;
+      gap: 0.5rem;
       align-items: flex-start;
     }
+
     .expand {
       flex: 0 0 auto;
-      width: 1.4rem;
-      height: 1.4rem;
+      width: 1.55rem;
+      height: 1.55rem;
+      margin-top: 0.05rem;
       padding: 0;
-      line-height: 1.3rem;
-      text-align: center;
-      border-radius: 3px;
-      border: 1px solid var(--border);
-      background: #f7f7f2;
-      color: var(--accent);
-      font-family: monospace;
+      display: grid;
+      place-items: center;
+      border: 1.5px solid color-mix(in srgb, var(--ink) 40%, var(--line));
+      border-radius: var(--radius-sm);
+      background: var(--chrome);
+      color: var(--ink);
+      font-family: var(--font-mono);
       font-size: 0.95rem;
+      font-weight: 500;
+      line-height: 1;
+      cursor: pointer;
     }
+
+    .expand:not([disabled]):hover {
+      background: var(--gate);
+      border-color: var(--gate);
+      color: var(--canvas);
+    }
+
     .expand[disabled] {
-      opacity: 0.35;
+      opacity: 0.28;
       cursor: default;
+      border-style: dashed;
     }
+
+    .card-body {
+      min-width: 0;
+      flex: 1;
+    }
+
     .card h2 {
       margin: 0;
-      font-size: 0.95rem;
-      font-weight: normal;
-      line-height: 1.3;
+      font-size: 0.98rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.25;
     }
+
+    .card .id {
+      margin: 0.2rem 0 0;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--muted);
+    }
+
     .card .desc {
       margin: 0.45rem 0 0;
-      font-size: 0.78rem;
+      font-size: 0.8rem;
       color: var(--muted);
-      line-height: 1.35;
+      line-height: 1.4;
     }
+
     .card .when {
-      margin: 0.4rem 0 0;
+      margin: 0.5rem 0 0;
+      padding: 0.35rem 0.45rem;
       font-size: 0.72rem;
-      color: var(--accent);
-      line-height: 1.3;
+      line-height: 1.35;
+      color: var(--gate);
+      background: color-mix(in srgb, var(--gate) 8%, var(--node));
+      border-left: 2px solid var(--gate);
     }
+
+    .card .when span {
+      display: block;
+      margin-bottom: 0.15rem;
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      color: var(--muted);
+    }
+
     .card details {
-      margin-top: 0.4rem;
+      margin-top: 0.5rem;
       font-size: 0.7rem;
       color: var(--muted);
     }
-    .card details summary { cursor: pointer; }
-    .card code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    .card details summary {
+      cursor: pointer;
+      font-family: var(--font-mono);
       font-size: 0.68rem;
+      font-weight: 500;
+      color: var(--ink);
+      list-style: none;
     }
+
+    .card details summary::-webkit-details-marker { display: none; }
+
+    .card details summary::before {
+      content: "▸ ";
+      color: var(--gate);
+    }
+
+    .card details[open] summary::before {
+      content: "▾ ";
+    }
+
+    .card details ul {
+      margin: 0.35rem 0 0;
+      padding: 0.4rem 0.5rem;
+      list-style: none;
+      background: color-mix(in srgb, var(--canvas) 55%, var(--node));
+      border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+      border-radius: var(--radius-sm);
+    }
+
+    .card details li {
+      margin: 0.35rem 0;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .card .code-path {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.25rem;
+    }
+
+    .card .code-path > code {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .card .copy-path {
+      flex: 0 0 auto;
+      width: 1.35rem;
+      height: 1.35rem;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .card .copy-path:hover {
+      background: color-mix(in srgb, var(--gate) 18%, transparent);
+      border-color: color-mix(in srgb, var(--gate) 35%, transparent);
+      color: var(--gate);
+    }
+
+    .card .copy-path:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 1px;
+    }
+
+    .card .copy-path svg {
+      width: 0.85rem;
+      height: 0.85rem;
+      display: block;
+    }
+
+    .card .copy-path.is-copied {
+      color: var(--gate);
+    }
+
+    .card code {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      color: var(--ink);
+    }
+
     .branch {
       display: flex;
       flex-direction: row;
       align-items: stretch;
     }
+
     .connector {
-      width: 36px;
-      flex: 0 0 36px;
+      width: 40px;
+      flex: 0 0 40px;
       position: relative;
       align-self: stretch;
     }
+
     .connector::before {
       content: "";
       position: absolute;
@@ -167,14 +437,19 @@
       width: 100%;
       border-top: 2px solid var(--line);
     }
+
     .kids-wrap {
       display: none;
       flex-direction: column;
       justify-content: center;
       position: relative;
-      padding: 0.25rem 0;
+      padding: 0.2rem 0;
     }
-    .kids-wrap.open { display: flex; }
+
+    .kids-wrap.open {
+      display: flex;
+    }
+
     .kids-wrap::before {
       content: "";
       position: absolute;
@@ -184,6 +459,7 @@
       width: 2px;
       background: var(--line);
     }
+
     .kid {
       display: flex;
       flex-direction: row;
@@ -191,62 +467,198 @@
       position: relative;
       padding: 0.55rem 0;
     }
+
     .kid::before {
       content: "";
       position: absolute;
       left: 0;
       top: 50%;
-      width: 28px;
+      width: 30px;
       border-top: 2px solid var(--line);
     }
+
     .kid > .node-row {
-      margin-left: 28px;
+      margin-left: 30px;
     }
-    .kids-wrap > .kid:only-child::before {
-      /* single child: still draw stub from vertical rail */
+
+    @media (prefers-reduced-motion: no-preference) {
+      .kids-wrap.open > .kid {
+        animation: branch-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+
+      .kids-wrap.open > .kid:nth-child(2) { animation-delay: 0.04s; }
+      .kids-wrap.open > .kid:nth-child(3) { animation-delay: 0.08s; }
+      .kids-wrap.open > .kid:nth-child(4) { animation-delay: 0.12s; }
+      .kids-wrap.open > .kid:nth-child(n+5) { animation-delay: 0.16s; }
+    }
+
+    @keyframes branch-in {
+      from {
+        opacity: 0;
+        transform: translateX(-8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .meter-fill { transition: none; }
+    }
+
+    @media (max-width: 640px) {
+      :root { --node-w: min(252px, calc(100vw - 3rem)); }
+      .chrome-inner { align-items: stretch; }
+      .controls { width: 100%; }
     }
   </style>
 </head>
 <body>
-  <header>
-    <div>
-      <h1 id="title">Capability map</h1>
-      <p id="subtitle">Expand nodes left → right. Nested capabilities stay collapsed until you open them.</p>
+  <header class="chrome">
+    <div class="chrome-inner">
+      <div class="brand">
+        <h1 class="brand-product" id="title">Cursor Spend Tray</h1>
+        <p class="brand-job" id="subtitle">What people can do — expand gates left to right.</p>
+      </div>
+      <div class="controls">
+        <button type="button" id="theme-toggle" aria-pressed="true" title="Switch to light theme">Light</button>
+        <button type="button" id="expand-all">Expand all</button>
+        <button type="button" id="collapse-all">Collapse all</button>
+        <label class="file-btn">Load JSON…<input type="file" id="file" accept="application/json,.json" /></label>
+      </div>
     </div>
-    <div class="controls">
-      <button type="button" id="expand-all">Expand all</button>
-      <button type="button" id="collapse-all">Collapse all</button>
-      <label class="file-btn">Load JSON…<input type="file" id="file" accept="application/json,.json" /></label>
+    <div class="meter-row" id="coverage" hidden>
+      <div class="meter-label">
+        <strong id="coverage-main">Definition coverage</strong>
+        <span id="coverage-kinds"></span>
+      </div>
+      <div class="meter-track" aria-hidden="true">
+        <div class="meter-fill" id="coverage-fill"></div>
+      </div>
     </div>
   </header>
-  <div id="status">Loading…</div>
+
+  <div id="status">Loading map…</div>
   <div id="viewport">
     <div class="forest" id="forest"></div>
   </div>
 
+  <script src="./coverage.js"></script>
   <script>
-    const JSON_CANDIDATES = [
-      "./capability-map.json",
-    ];
+    const JSON_CANDIDATES = ["./capability-map.json"];
+    const DEFINITIONS_URL = "./definitions.json";
+    const THEME_KEY = "cst-capability-map-theme";
 
     const statusEl = document.getElementById("status");
+    const coverageEl = document.getElementById("coverage");
+    const coverageMain = document.getElementById("coverage-main");
+    const coverageKinds = document.getElementById("coverage-kinds");
+    const coverageFill = document.getElementById("coverage-fill");
     const forestEl = document.getElementById("forest");
     const titleEl = document.getElementById("title");
     const subtitleEl = document.getElementById("subtitle");
+    const themeToggle = document.getElementById("theme-toggle");
+
+    let mapDefinitions = null;
+
+    function applyTheme(theme) {
+      const next = theme === "light" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      try {
+        localStorage.setItem(THEME_KEY, next);
+      } catch (_) { /* ignore */ }
+      const dark = next === "dark";
+      themeToggle.textContent = dark ? "Light" : "Dark";
+      themeToggle.setAttribute("aria-pressed", dark ? "true" : "false");
+      themeToggle.title = dark ? "Switch to light theme" : "Switch to dark theme";
+    }
+
+    function initTheme() {
+      let saved = null;
+      try {
+        saved = localStorage.getItem(THEME_KEY);
+      } catch (_) { /* ignore */ }
+      applyTheme(saved === "light" || saved === "dark" ? saved : "dark");
+    }
+
+    themeToggle.addEventListener("click", () => {
+      const current = document.documentElement.getAttribute("data-theme") || "dark";
+      applyTheme(current === "dark" ? "light" : "dark");
+    });
+
+    initTheme();
 
     function setStatus(text, isError) {
       statusEl.textContent = text;
       statusEl.classList.toggle("error", !!isError);
     }
 
+    function setCoverage(mapData) {
+      if (!window.CapabilityCoverage || !mapDefinitions) {
+        coverageEl.hidden = true;
+        return null;
+      }
+      const report = window.CapabilityCoverage.computeCoverage(mapData, mapDefinitions);
+      const kinds = report.by_kind;
+      coverageEl.hidden = false;
+      coverageMain.textContent = window.CapabilityCoverage.formatCoverageLine(report);
+      coverageKinds.textContent =
+        `class ${kinds.class.covered}/${kinds.class.total}` +
+        `  function ${kinds.function.covered}/${kinds.function.total}` +
+        `  method ${kinds.method.covered}/${kinds.method.total}`;
+      coverageFill.style.width = `${Math.min(100, report.coverage_percent)}%`;
+      return report;
+    }
+
+    const COPY_ICON =
+      '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const CHECK_ICON =
+      '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+
     function codeList(code) {
       if (!code || !code.length) return "";
       const items = code.map((c) => {
-        const fn = c.function ? ` · <code>${escapeHtml(c.function)}</code>` : "";
-        const line = c.line != null ? `:${c.line}` : "";
-        return `<li><code>${escapeHtml(c.file)}${line}</code>${fn}</li>`;
+        const pathText = c.line != null ? `${c.file}:${c.line}` : String(c.file);
+        const fn = c.function ? `<br /><code>${escapeHtml(c.function)}</code>` : "";
+        return (
+          `<li>` +
+          `<div class="code-path">` +
+          `<code>${escapeHtml(pathText)}</code>` +
+          `<button type="button" class="copy-path" data-copy="${escapeHtml(pathText)}" title="Copy path" aria-label="Copy ${escapeHtml(pathText)}">${COPY_ICON}</button>` +
+          `</div>${fn}</li>`
+        );
       }).join("");
       return `<details><summary>Code</summary><ul>${items}</ul></details>`;
+    }
+
+    async function copyPath(btn) {
+      const text = btn.getAttribute("data-copy") || "";
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand("copy");
+        } finally {
+          document.body.removeChild(ta);
+        }
+      }
+      btn.classList.add("is-copied");
+      btn.innerHTML = CHECK_ICON;
+      btn.title = "Copied";
+      window.setTimeout(() => {
+        btn.classList.remove("is-copied");
+        btn.innerHTML = COPY_ICON;
+        btn.title = "Copy path";
+      }, 1200);
     }
 
     function escapeHtml(s) {
@@ -257,6 +669,15 @@
         .replace(/"/g, "&quot;");
     }
 
+    function setBranchOpen(card, kidsWrap, connector, btn, open) {
+      kidsWrap.classList.toggle("open", open);
+      connector.hidden = !open;
+      card.classList.toggle("is-open", open);
+      btn.textContent = open ? "−" : "+";
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      btn.title = open ? "Collapse" : "Expand";
+    }
+
     function renderNode(feature) {
       const kids = feature.children || [];
       const hasKids = kids.length > 0;
@@ -264,14 +685,15 @@
       row.className = "node-row";
 
       const card = document.createElement("article");
-      card.className = "card";
+      card.className = "card" + (hasKids ? " has-kids" : "");
       card.innerHTML = `
         <div class="card-top">
-          <button type="button" class="expand" ${hasKids ? "" : "disabled"} aria-expanded="false" title="${hasKids ? "Expand" : "No sub-features"}">${hasKids ? "+" : "·"}</button>
-          <div>
+          <button type="button" class="expand" ${hasKids ? "" : "disabled"} aria-expanded="false" title="${hasKids ? "Expand" : "No nested capabilities"}">${hasKids ? "+" : "·"}</button>
+          <div class="card-body">
             <h2>${escapeHtml(feature.title || feature.id || "Feature")}</h2>
+            ${feature.id ? `<p class="id">${escapeHtml(feature.id)}</p>` : ""}
             ${feature.description ? `<p class="desc">${escapeHtml(feature.description)}</p>` : ""}
-            ${feature.available_when ? `<p class="when">Available when: ${escapeHtml(feature.available_when)}</p>` : ""}
+            ${feature.available_when ? `<p class="when"><span>Available when</span>${escapeHtml(feature.available_when)}</p>` : ""}
             ${codeList(feature.code)}
           </div>
         </div>
@@ -299,11 +721,8 @@
 
       const btn = card.querySelector(".expand");
       btn.addEventListener("click", () => {
-        const open = kidsWrap.classList.toggle("open");
-        connector.hidden = !open;
-        btn.textContent = open ? "−" : "+";
-        btn.setAttribute("aria-expanded", open ? "true" : "false");
-        btn.title = open ? "Collapse" : "Expand";
+        const open = !kidsWrap.classList.contains("open");
+        setBranchOpen(card, kidsWrap, connector, btn, open);
       });
 
       branch.appendChild(connector);
@@ -314,14 +733,22 @@
 
     function render(data) {
       forestEl.innerHTML = "";
-      if (data.meta?.title) titleEl.textContent = data.meta.title;
-      if (data.meta?.description) subtitleEl.textContent = data.meta.description;
+      if (data.meta?.title) {
+        // Keep product name as the brand signal; meta title becomes the job line when present.
+        titleEl.textContent = "Cursor Spend Tray";
+      }
+      if (data.meta?.description) {
+        subtitleEl.textContent = data.meta.description;
+      } else if (data.meta?.title) {
+        subtitleEl.textContent = data.meta.title;
+      }
       const roots = data.features || [];
       for (const feature of roots) {
         forestEl.appendChild(renderNode(feature));
       }
       const n = countFeatures(roots);
-      setStatus(`Loaded ${n} capabilities · children start collapsed · expand left → right`);
+      setCoverage(data);
+      setStatus(`${n} capabilities loaded. Nested gates start closed — expand left → right.`);
     }
 
     function countFeatures(nodes) {
@@ -334,20 +761,25 @@
 
     function setAll(open) {
       document.querySelectorAll(".kids-wrap").forEach((wrap) => {
-        wrap.classList.toggle("open", open);
         const branch = wrap.parentElement;
         const connector = branch && branch.querySelector(":scope > .connector");
-        if (connector) connector.hidden = !open;
-      });
-      document.querySelectorAll(".expand:not([disabled])").forEach((btn) => {
-        btn.textContent = open ? "−" : "+";
-        btn.setAttribute("aria-expanded", open ? "true" : "false");
-        btn.title = open ? "Collapse" : "Expand";
+        const row = branch && branch.parentElement;
+        const card = row && row.querySelector(":scope > .card");
+        const btn = card && card.querySelector(".expand:not([disabled])");
+        if (card && wrap && connector && btn) {
+          setBranchOpen(card, wrap, connector, btn, open);
+        }
       });
     }
 
     document.getElementById("expand-all").addEventListener("click", () => setAll(true));
     document.getElementById("collapse-all").addEventListener("click", () => setAll(false));
+    forestEl.addEventListener("click", (ev) => {
+      const btn = ev.target.closest(".copy-path");
+      if (!btn || !forestEl.contains(btn)) return;
+      ev.preventDefault();
+      copyPath(btn);
+    });
     document.getElementById("file").addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];
       if (!file) return;
@@ -359,21 +791,36 @@
       }
     });
 
+    async function loadDefinitions() {
+      try {
+        const res = await fetch(DEFINITIONS_URL);
+        if (!res.ok) throw new Error(`${DEFINITIONS_URL} → ${res.status}`);
+        mapDefinitions = await res.json();
+      } catch (err) {
+        mapDefinitions = null;
+        coverageEl.hidden = false;
+        coverageMain.textContent = "Definition coverage unavailable";
+        coverageKinds.textContent = "Could not load definitions.json — use a local server or rebuild the snapshot.";
+        coverageFill.style.width = "0%";
+      }
+    }
+
     async function tryLoad() {
+      await loadDefinitions();
       let lastErr = null;
       for (const url of JSON_CANDIDATES) {
         try {
           const res = await fetch(url);
           if (!res.ok) throw new Error(`${url} → ${res.status}`);
           render(await res.json());
-          setStatus(statusEl.textContent + ` · source: ${url}`);
+          setStatus(statusEl.textContent + ` Source: ${url}`);
           return;
         } catch (err) {
           lastErr = err;
         }
       }
       setStatus(
-        `Could not auto-load JSON (${lastErr && lastErr.message}). Use “Load JSON…” and pick capability-map.json next to this page, or open via a local http server from the assets folder.`,
+        `Could not auto-load JSON (${lastErr && lastErr.message}). Use Load JSON… and pick capability-map.json, or serve this folder over http.`,
         true
       );
     }

@@ -20,6 +20,8 @@ lives in code.
 |------|------|
 | [assets/capability-map.json](assets/capability-map.json) | Source of truth for the feature tree |
 | [assets/index.html](assets/index.html) | Offline left→right tree viewer (loads the JSON beside it) |
+| [assets/coverage.js](assets/coverage.js) | Pure JS coverage math (browser + `node coverage.js`) |
+| [assets/definitions.json](assets/definitions.json) | Snapshot of class/function defs for offline coverage % |
 
 Do **not** recreate `docs/features/` or a top-level `feature-viewer/` folder.
 Keep data + viewer under this skill’s `assets/`.
@@ -30,6 +32,20 @@ Open the viewer:
 xdg-open .agents/skills/map-user-features/assets/index.html
 # or: cd .agents/skills/map-user-features/assets && python3 -m http.server
 ```
+
+The viewer loads `capability-map.json` + `definitions.json` and shows definition
+coverage via `coverage.js`.
+
+Refresh the definitions snapshot after large code moves:
+
+```bash
+node .agents/skills/map-user-features/assets/coverage.js --write-definitions
+node .agents/skills/map-user-features/assets/coverage.js --show-unmatched
+node .agents/skills/map-user-features/assets/coverage.js --json
+```
+
+Coverage = definitions referenced by the map ÷ all `class`/`def` symbols under
+`src/cursor_spend_tray/` (nested helpers inside functions are excluded).
 
 ## When invoked
 
