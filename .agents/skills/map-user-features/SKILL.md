@@ -47,6 +47,16 @@ node .agents/skills/map-user-features/assets/coverage.js --json
 Coverage = definitions referenced by the map ÷ all `class`/`def` symbols under
 `src/cursor_spend_tray/` (nested helpers inside functions are excluded).
 
+### How to read the numbers
+
+| Stat | Meaning |
+|------|---------|
+| `50/500 (10%)` | Unique definitions the map points at ÷ all definitions in the package. The meter bar is this %. Low is expected — most symbols are internal, not user-facing. |
+| `55/56 code refs matched` | Map `code` entries that resolve to a real `class`/`def`. Unmatched usually means a constant, rename, or stale line. |
+| `class` / `function` / `method` | Same coverage split by definition kind. |
+
+This is **not** test coverage and **not** a completeness score for the product — only “how much of the code surface the map cites.”
+
 ## When invoked
 
 1. Read the current [assets/capability-map.json](assets/capability-map.json).
