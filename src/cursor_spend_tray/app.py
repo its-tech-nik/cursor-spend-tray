@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 import math
 import subprocess
+from collections.abc import Callable
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QConicalGradient,
     QGuiApplication,
@@ -28,14 +30,18 @@ from PyQt6.QtWidgets import (
 )
 
 from . import autostart
+from .auth_detect import snapshot_needs_login
 from .config import (
+    APP_NAME,
     POLL_INTERVAL_MINUTES,
     AppConfig,
+    BetweenScrapesMode,
     UsageSnapshot,
     poll_interval_label,
 )
 from .popup import SpendPopup
 from .scheduler import RefreshScheduler
+from .session_cookie import profile_has_cursor_session_cookie
 from .sni import StatusNotifierItem
 
 log = logging.getLogger(__name__)
@@ -47,6 +53,7 @@ _ICON_PAD = 12
 _LAUNCH_SETTLE_MS = 10_000
 _LAUNCH_RETRY_MS = 5_000      # retry interval while waiting for BiDi after launch
 _SPIN_INTERVAL_MS = 80        # icon animation frame interval (~12 fps)
+# Keep in sync with scheduler.BROWSER_WARMUP_SECONDS / quit-between pre-launch.
 _CTX_ROW_STYLE = """
 QFrame#ctxRow {
     background: transparent;
@@ -85,8 +92,8 @@ def bidi_unavailable(snap: UsageSnapshot) -> bool:
 
 
 def session_logged_out(snap: UsageSnapshot) -> bool:
-    """True when the spending page scrape indicates no Cursor web session."""
-    return snap.source == "logged_out"
+    """True when scrape shows auth redirect / logged-out (needs headed sign-in)."""
+    return snapshot_needs_login(snap)
 
 
 def tray_tooltip(snap: UsageSnapshot) -> tuple[str, str]:
@@ -273,13 +280,17 @@ class TrayContextMenu(QFrame):
         self._rows.append(row)
         return row
 
-    def add_submenu(self, title: str, actions: list[QAction]) -> QWidget:
-        submenu = TrayContextSubmenu(actions, self)
+    def add_submenu(
+        self,
+        title: str,
+        actions: list[QAction] | None = None,
+    ) -> TrayContextSubmenu:
+        submenu = TrayContextSubmenu(self, root_menu=self, actions=actions or [])
         self._submenus.append(submenu)
-        row = _CtxSubmenuRow(title, submenu, self)
+        row = _CtxSubmenuRow(title, submenu, host=self, root_menu=self)
         self._layout.addWidget(row)
         self._rows.append(row)
-        return row
+        return submenu
 
     def add_separator(self) -> QFrame:
         sep = QFrame(self)
@@ -290,9 +301,12 @@ class TrayContextMenu(QFrame):
         self._rows.append(sep)
         return sep
 
-    def close_submenus(self) -> None:
+    def close_child_flyouts(self) -> None:
         for submenu in self._submenus:
             submenu.hide()
+
+    def close_submenus(self) -> None:
+        self.close_child_flyouts()
 
     @staticmethod
     def _sync_row(row: QWidget, action: QAction) -> None:
@@ -355,18 +369,12 @@ class TrayContextMenu(QFrame):
             return False
         if window is self.windowHandle():
             return True
-        return any(
-            submenu.isVisible() and window is submenu.windowHandle()
-            for submenu in self._submenus
-        )
+        return any(submenu.owns_window(window) for submenu in self._submenus)
 
     def _contains_global(self, global_pos: QPoint) -> bool:
         if self.frameGeometry().contains(global_pos):
             return True
-        return any(
-            submenu.isVisible() and submenu.frameGeometry().contains(global_pos)
-            for submenu in self._submenus
-        )
+        return any(submenu.contains_global(global_pos) for submenu in self._submenus)
 
     def _arm_dismiss(self) -> None:
         self._dismiss_armed = True
@@ -405,11 +413,20 @@ class TrayContextMenu(QFrame):
 
 
 class TrayContextSubmenu(QFrame):
-    """Flyout panel for nested context-menu choices."""
+    """Flyout panel for nested context-menu choices (one or more levels deep)."""
 
-    def __init__(self, actions: list[QAction], parent_menu: TrayContextMenu) -> None:
+    def __init__(
+        self,
+        host: TrayContextMenu | TrayContextSubmenu,
+        *,
+        root_menu: TrayContextMenu,
+        actions: list[QAction] | None = None,
+    ) -> None:
         super().__init__(None)
-        self._parent_menu = parent_menu
+        self._host = host
+        self._root_menu = root_menu
+        self._child_flyouts: list[TrayContextSubmenu] = []
+        self._rows: list[QWidget] = []
         self.setWindowFlags(
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
@@ -420,15 +437,59 @@ class TrayContextSubmenu(QFrame):
         self.setMinimumWidth(160)
         self.setStyleSheet(_CTX_MENU_STYLE)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(2)
-        for action in actions:
-            row = _CtxMenuRow(action, self)
-            action.changed.connect(lambda r=row, a=action: TrayContextMenu._sync_row(r, a))
-            action.triggered.connect(parent_menu.hide)
-            TrayContextMenu._sync_row(row, action)
-            layout.addWidget(row)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(6, 6, 6, 6)
+        self._layout.setSpacing(2)
+        for action in actions or []:
+            self.add_action(action)
+
+    def add_action(self, action: QAction) -> QWidget:
+        row = _CtxMenuRow(action, self)
+        action.changed.connect(lambda r=row, a=action: TrayContextMenu._sync_row(r, a))
+        action.triggered.connect(self._root_menu.hide)
+        TrayContextMenu._sync_row(row, action)
+        self._layout.addWidget(row)
+        self._rows.append(row)
+        return row
+
+    def add_submenu(
+        self,
+        title: str,
+        actions: list[QAction] | None = None,
+    ) -> TrayContextSubmenu:
+        child = TrayContextSubmenu(self, root_menu=self._root_menu, actions=actions or [])
+        self._child_flyouts.append(child)
+        row = _CtxSubmenuRow(title, child, host=self, root_menu=self._root_menu)
+        self._layout.addWidget(row)
+        self._rows.append(row)
+        return child
+
+    def clear_actions(self) -> None:
+        """Remove action rows (keeps nested submenu rows). Used to rebuild browser lists."""
+        kept: list[QWidget] = []
+        for row in self._rows:
+            if isinstance(row, _CtxSubmenuRow):
+                kept.append(row)
+                continue
+            self._layout.removeWidget(row)
+            row.deleteLater()
+        self._rows = kept
+
+    def close_child_flyouts(self) -> None:
+        for child in self._child_flyouts:
+            child.hide()
+
+    def owns_window(self, window) -> bool:  # noqa: ANN001
+        if not self.isVisible():
+            return any(c.owns_window(window) for c in self._child_flyouts)
+        if window is self.windowHandle():
+            return True
+        return any(c.owns_window(window) for c in self._child_flyouts)
+
+    def contains_global(self, global_pos: QPoint) -> bool:
+        if self.isVisible() and self.frameGeometry().contains(global_pos):
+            return True
+        return any(c.contains_global(global_pos) for c in self._child_flyouts)
 
     def popup_beside(self, anchor: QWidget) -> None:
         self.adjustSize()
@@ -437,10 +498,11 @@ class TrayContextSubmenu(QFrame):
         w = max(self.sizeHint().width(), 160)
         h = max(self.sizeHint().height(), 1)
         top_left = anchor.mapToGlobal(QPoint(0, 0))
-        # Prefer opening to the right; flip left if it would clip.
-        x = top_left.x() + self._parent_menu.width() - 4
+        host_width = self._host.width() if self._host.isVisible() else self._root_menu.width()
+        # Prefer opening to the right of the host panel; flip left if it would clip.
+        x = top_left.x() + host_width - 4
         if x + w > bounds.right() - 4:
-            x = self._parent_menu.x() - w + 4
+            x = self._host.x() - w + 4
         y = top_left.y() - 6
         x = min(max(x, bounds.left() + 4), bounds.right() - w - 4)
         y = min(max(y, bounds.top() + 4), bounds.bottom() - h - 4)
@@ -449,6 +511,10 @@ class TrayContextSubmenu(QFrame):
         self.show()
         self.move(x, y)
         self.raise_()
+
+    def hideEvent(self, event) -> None:  # noqa: ANN001
+        self.close_child_flyouts()
+        super().hideEvent(event)
 
 
 class _CtxMenuRow(QFrame):
@@ -496,11 +562,11 @@ class _CtxMenuRow(QFrame):
             self._trailing.setText("")
 
     def enterEvent(self, event) -> None:  # noqa: ANN001
-        # Hovering another main-menu item should dismiss any open flyout
-        # (QMenu-style). Rows inside TrayContextSubmenu must not close it.
+        # Hovering another item should dismiss sibling flyouts at this level
+        # (QMenu-style). Nested hosts close only their children.
         parent = self.parent()
-        if isinstance(parent, TrayContextMenu):
-            parent.close_submenus()
+        if isinstance(parent, (TrayContextMenu, TrayContextSubmenu)):
+            parent.close_child_flyouts()
         super().enterEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
@@ -516,11 +582,14 @@ class _CtxSubmenuRow(QFrame):
         self,
         title: str,
         submenu: TrayContextSubmenu,
-        parent: TrayContextMenu,
+        *,
+        host: TrayContextMenu | TrayContextSubmenu,
+        root_menu: TrayContextMenu,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(host)
         self._submenu = submenu
-        self._parent_menu = parent
+        self._host = host
+        self._root_menu = root_menu
         self.setObjectName("ctxRow")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -550,7 +619,7 @@ class _CtxSubmenuRow(QFrame):
         row.addWidget(trailing)
 
     def enterEvent(self, event) -> None:  # noqa: ANN001
-        self._parent_menu.close_submenus()
+        self._host.close_child_flyouts()
         self._submenu.popup_beside(self)
         super().enterEvent(event)
 
@@ -559,7 +628,7 @@ class _CtxSubmenuRow(QFrame):
             if self._submenu.isVisible():
                 self._submenu.hide()
             else:
-                self._parent_menu.close_submenus()
+                self._host.close_child_flyouts()
                 self._submenu.popup_beside(self)
         super().mouseReleaseEvent(event)
 
@@ -621,6 +690,8 @@ class TrayApp(QWidget):
         self._autostart_action.setChecked(autostart.is_enabled())
         self._autostart_action.toggled.connect(self._on_autostart_toggled)
         self._poll_actions: list[QAction] = []
+        self._poll_group = QActionGroup(self)
+        self._poll_group.setExclusive(True)
         for minutes in POLL_INTERVAL_MINUTES:
             action = QAction(poll_interval_label(minutes), self)
             action.setCheckable(True)
@@ -628,14 +699,47 @@ class TrayApp(QWidget):
             action.triggered.connect(
                 lambda checked=False, m=minutes: self._on_poll_interval_chosen(m)
             )
+            self._poll_group.addAction(action)
             self._poll_actions.append(action)
         self._sync_poll_actions()
+
+        self._browser_actions: list[QAction] = []
+        self._browser_group = QActionGroup(self)
+        self._browser_group.setExclusive(True)
+        self._between_keep_action = QAction("Keep open", self)
+        self._between_keep_action.setCheckable(True)
+        self._between_keep_action.setToolTip(
+            "Leave the automation browser running between scrapes."
+        )
+        self._between_keep_action.triggered.connect(
+            lambda checked=False: self._on_between_scrapes_chosen("keep_open")
+        )
+        self._between_quit_action = QAction("Quit between scrapes", self)
+        self._between_quit_action.setCheckable(True)
+        self._between_quit_action.setToolTip(
+            "Stop the automation browser after each scrape and relaunch before the next."
+        )
+        self._between_quit_action.triggered.connect(
+            lambda checked=False: self._on_between_scrapes_chosen("quit")
+        )
+        self._between_group = QActionGroup(self)
+        self._between_group.setExclusive(True)
+        self._between_group.addAction(self._between_keep_action)
+        self._between_group.addAction(self._between_quit_action)
+        self._sync_between_scrapes_actions()
+
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         self._ctx.add_action(self._refresh_action)
         self._ctx.add_action(self._keep_open_action)
         self._ctx.add_separator()
         self._ctx.add_submenu("Refresh interval", self._poll_actions)
+        browser_menu = self._ctx.add_submenu("Browser")
+        self._automation_menu = browser_menu.add_submenu("Automation on")
+        self._rebuild_browser_actions()
+        between_menu = browser_menu.add_submenu("Between Scrapes")
+        between_menu.add_action(self._between_keep_action)
+        between_menu.add_action(self._between_quit_action)
         self._ctx.add_action(self._autostart_action)
         self._ctx.add_separator()
         self._ctx.add_action(quit_action)
@@ -647,21 +751,29 @@ class TrayApp(QWidget):
         self._spin_timer.timeout.connect(self._on_spin_tick)
         self._login_launch_pending = False
         self._headless_switch_pending = False
+        self._warmup_only = False
+        self._pending_scrape_ready: Callable[[], None] | None = None
 
         self._apply_snapshot(self.snapshot)
         self.show()
         self.tray.show()
 
-        self.scheduler = RefreshScheduler(config, self)
+        self.scheduler = RefreshScheduler(
+            config,
+            self,
+            ensure_ready=self._ensure_browser_ready,
+        )
         self.scheduler.snapshot_updated.connect(self._on_snapshot)
         self.scheduler.seconds_changed.connect(self.popup.set_remaining)
         self.scheduler.status_changed.connect(self.popup.set_status)
         self.scheduler.refreshing_changed.connect(self._on_refreshing)
-        self.scheduler.start()
-
-        # On first run, start the dedicated browser so scrape + login checks can proceed.
-        if not self.config.browser_is_running():
-            QTimer.singleShot(0, self._launch_browser)
+        self.scheduler.browser_warmup_requested.connect(self._warmup_browser_for_scrape)
+        # Early cookie presence check: brand-new / never-signed-in profiles open
+        # headed login immediately; profiles with a session cookie scrape in background.
+        if self._prompt_login_if_no_session_cookie():
+            self.scheduler.start(refresh=False)
+        else:
+            self.scheduler.start(refresh=True)
 
     def _apply_snapshot(self, snap: UsageSnapshot) -> None:
         # If we're still in the launch-wait loop and the scrape came back unavailable,
@@ -702,9 +814,10 @@ class TrayApp(QWidget):
         assert isinstance(snap, UsageSnapshot)
         self.snapshot = snap
         self._apply_snapshot(snap)
-        if session_logged_out(snap):
-            self._ensure_login_browser()
-        elif snap.source in ("bidi", "cdp") and not snap.error:
+        # Single entry for first launch, browser switch, and poll failures.
+        if self._prompt_login_if_needed(snap):
+            return
+        if snap.source in ("bidi", "cdp") and not snap.error:
             self._login_launch_pending = False
             if self.config.browser_is_headless() is False:
                 # Login window did its job — flip back to headless for background polls.
@@ -712,6 +825,40 @@ class TrayApp(QWidget):
                     QTimer.singleShot(0, self._switch_to_headless_after_login)
             else:
                 self._headless_switch_pending = False
+                if self.config.between_scrapes == "quit":
+                    QTimer.singleShot(0, self._quit_browser_between_scrapes)
+
+    def _prompt_login_if_needed(self, snap: UsageSnapshot) -> bool:
+        """Open headed sign-in when scrape hit auth/bot page instead of spending.
+
+        Shared by first launch, browser switches, and scheduled polls.
+        Returns True when login flow was started or is already in progress.
+        """
+        if not snapshot_needs_login(snap):
+            return False
+        self._ensure_login_browser()
+        return True
+
+    def _prompt_login_if_no_session_cookie(self) -> bool:
+        """Fast path: no WorkosCursorSessionToken in the profile → headed login now.
+
+        Used at startup and browser switch before any scrape settle delay.
+        Returns True when login was prompted (caller should skip headless scrape).
+        """
+        if profile_has_cursor_session_cookie(self.config.browser, app_name=APP_NAME):
+            log.info(
+                "Cursor session cookie present in %s profile — background auth scrape OK",
+                self.config.browser.display_name,
+            )
+            return False
+        name = self.config.browser.display_name
+        log.info(
+            "No WorkosCursorSessionToken in %s profile — opening sign-in early",
+            name,
+        )
+        self.popup.set_status(f"No Cursor session in {name} — opening sign-in…")
+        self._ensure_login_browser()
+        return True
 
     def _ensure_login_browser(self) -> None:
         """Open a headed dedicated-profile window so the user can sign into Cursor."""
@@ -771,7 +918,9 @@ class TrayApp(QWidget):
         self.popup.set_status(
             f"Sign in to Cursor in the {self.config.browser.display_name} window…"
         )
-        self._arm_launch_retry()
+        # Do not arm a scrape retry — wait for the user to finish sign-in; the next
+        # manual refresh / poll verifies the session (cookie + page check).
+        QTimer.singleShot(2_000, self._stop_spinner)
 
     def _switch_to_headless_after_login(self) -> None:
         """Close the headed login window and relaunch the dedicated profile headless."""
@@ -788,6 +937,13 @@ class TrayApp(QWidget):
             self._headless_switch_pending = False
             self._stop_spinner()
             self.popup.set_status(f"Could not restart {name} in headless mode.")
+            return
+        if self.config.between_scrapes == "quit":
+            self._headless_switch_pending = False
+            self._stop_spinner()
+            self.popup.set_status(
+                f"Sign-in complete — {name} will relaunch on the next refresh."
+            )
             return
         argv = self.config.browser_launch_argv(headless=True)
         try:
@@ -842,6 +998,8 @@ class TrayApp(QWidget):
         self._autostart_action.setChecked(autostart.is_enabled())
         self._autostart_action.blockSignals(False)
         self._sync_poll_actions()
+        self._rebuild_browser_actions()
+        self._sync_between_scrapes_actions()
         self._ctx.popup_at(pos)
 
     def _on_autostart_toggled(self, enabled: bool) -> None:
@@ -858,12 +1016,143 @@ class TrayApp(QWidget):
                 f"Could not update launch at login:\n{exc}",
             )
 
+    @staticmethod
+    def _set_action_checked(action: QAction, checked: bool) -> None:
+        """Update check state without re-entering triggered handlers; refresh row UI."""
+        action.blockSignals(True)
+        action.setChecked(checked)
+        action.blockSignals(False)
+        # blockSignals swallows QAction.changed, so custom menu rows need a nudge.
+        action.changed.emit()
+
     def _sync_poll_actions(self) -> None:
         current = self.config.poll_seconds
         for action in self._poll_actions:
-            action.blockSignals(True)
-            action.setChecked(action.data() == current)
-            action.blockSignals(False)
+            self._set_action_checked(action, action.data() == current)
+
+    def _rebuild_browser_actions(self) -> None:
+        for action in self._browser_actions:
+            self._browser_group.removeAction(action)
+            action.deleteLater()
+        self._browser_actions.clear()
+        self._automation_menu.clear_actions()
+
+        browsers = self.config.installed_browsers()
+        current_key = self.config.browser.key
+        if not browsers:
+            empty = QAction("No supported browsers found", self)
+            empty.setEnabled(False)
+            self._browser_actions.append(empty)
+            self._automation_menu.add_action(empty)
+            return
+
+        for info in browsers:
+            action = QAction(info.display_name, self)
+            action.setCheckable(True)
+            action.setData(info.key)
+            action.setToolTip(f"{info.family.value.title()}-family · {info.binary}")
+            action.triggered.connect(
+                lambda checked=False, key=info.key: self._on_browser_chosen(key)
+            )
+            self._browser_group.addAction(action)
+            self._browser_actions.append(action)
+            self._automation_menu.add_action(action)
+            self._set_action_checked(action, info.key == current_key)
+
+    def _sync_between_scrapes_actions(self) -> None:
+        mode = self.config.between_scrapes
+        self._set_action_checked(self._between_keep_action, mode == "keep_open")
+        self._set_action_checked(self._between_quit_action, mode == "quit")
+
+    def _on_browser_chosen(self, key: str) -> None:
+        if self.config.browser.key == key:
+            self._rebuild_browser_actions()
+            return
+        if self.config.browser_is_running():
+            self.config.stop_browser(timeout=8.0)
+        info = self.config.set_browser_key(key)
+        self._rebuild_browser_actions()
+        # New profile may have no Cursor session — cookie check first (instant),
+        # otherwise scrape so auth/bot pages still open headed sign-in.
+        self._login_launch_pending = False
+        self._headless_switch_pending = False
+        if self._prompt_login_if_no_session_cookie():
+            return
+        self.popup.set_status(
+            f"Automation browser: {info.display_name} — checking sign-in…"
+        )
+        self.scheduler.refresh()
+
+    def _on_between_scrapes_chosen(self, mode: BetweenScrapesMode) -> None:
+        if self.config.between_scrapes == mode:
+            self._sync_between_scrapes_actions()
+            return
+        self.config.set_between_scrapes(mode)
+        self._sync_between_scrapes_actions()
+        if mode == "keep_open":
+            self.popup.set_status("Browser will stay open between scrapes")
+            if not self.config.browser_is_running():
+                self._launch_browser()
+            return
+        self.popup.set_status("Browser will quit between scrapes")
+        scraping = hasattr(self, "scheduler") and self.scheduler.is_refreshing()
+        if (
+            not scraping
+            and self.config.browser_is_running()
+            and self.config.browser_is_headless() is not False
+        ):
+            self._quit_browser_between_scrapes()
+
+    def _quit_browser_between_scrapes(self) -> None:
+        if self.config.between_scrapes != "quit":
+            return
+        if self.config.browser_is_headless() is False:
+            return
+        if not self.config.browser_is_running():
+            return
+        name = self.config.browser.display_name
+        if self.config.stop_browser(timeout=8.0):
+            log.info("Stopped dedicated %s between scrapes", name)
+        else:
+            log.warning("Could not stop dedicated %s between scrapes", name)
+
+    def _ensure_browser_ready(self, on_ready: Callable[[], None]) -> None:
+        """Launch the automation browser if needed, then invoke on_ready."""
+        launch_pending = (
+            hasattr(self, "_launch_retry_timer") and self._launch_retry_timer.isActive()
+        )
+        if self.config.browser_is_running():
+            # Warmup may have the process up before Remote Agent is ready — wait.
+            if launch_pending or self._warmup_only:
+                self._pending_scrape_ready = on_ready
+                self._warmup_only = False
+                return
+            on_ready()
+            return
+        already_waiting = self._pending_scrape_ready is not None
+        self._pending_scrape_ready = on_ready
+        self._warmup_only = False
+        if already_waiting or launch_pending:
+            return
+        self._launch_browser()
+
+    def _warmup_browser_for_scrape(self) -> None:
+        """Pre-launch headless browser ~10s before the poll deadline (quit-between)."""
+        if self.config.between_scrapes != "quit":
+            return
+        if self.config.browser_is_running():
+            return
+        if self._pending_scrape_ready is not None:
+            return
+        launch_pending = (
+            hasattr(self, "_launch_retry_timer") and self._launch_retry_timer.isActive()
+        )
+        if launch_pending:
+            return
+        name = self.config.browser.display_name
+        self._warmup_only = True
+        self.popup.set_status(f"Starting {name} for upcoming scrape…")
+        self._launch_browser()
 
     def _on_poll_interval_chosen(self, minutes: int) -> None:
         seconds = minutes * 60
@@ -958,6 +1247,9 @@ class TrayApp(QWidget):
             )
         except OSError:
             log.exception("Failed to launch %s", self.config.browser.display_name)
+            self._pending_scrape_ready = None
+            self._warmup_only = False
+            self.scheduler.cancel_awaiting_ready()
             self.popup.set_status(
                 f"Could not start {self.config.browser.display_name} "
                 "(see popup for the launch command)."
@@ -965,7 +1257,8 @@ class TrayApp(QWidget):
             return
 
         self._start_spinner()
-        self.popup.set_status(f"Starting {self.config.browser.display_name}…")
+        if not self._warmup_only:
+            self.popup.set_status(f"Starting {self.config.browser.display_name}…")
         self._arm_launch_retry()
 
     def _arm_launch_retry(self) -> None:
@@ -976,9 +1269,28 @@ class TrayApp(QWidget):
         self._launch_retry_timer.start(_LAUNCH_SETTLE_MS)
 
     def _refresh_after_launch(self) -> None:
-        """Probe remote debugging; if up scrape (spinner stops on snapshot), otherwise retry."""
+        """Probe remote debugging; if up scrape (or finish warmup), otherwise retry."""
+
+        def on_available() -> None:
+            pending = self._pending_scrape_ready
+            self._pending_scrape_ready = None
+            warmup = self._warmup_only
+            self._warmup_only = False
+            if pending is not None:
+                pending()
+            elif warmup:
+                self._stop_spinner()
+                self.popup.set_status("")
+                log.info(
+                    "Warmup complete — %s ready for scheduled scrape",
+                    self.config.browser.display_name,
+                )
+            else:
+                self.scheduler.refresh()
+
         self.scheduler.probe_or_refresh(
             on_unavailable=self._reschedule_launch_retry,
+            on_available=on_available,
         )
 
     def _reschedule_launch_retry(self) -> None:

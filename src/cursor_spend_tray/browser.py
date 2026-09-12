@@ -99,8 +99,72 @@ def profile_dir_for(info: BrowserInfo, app_name: str = "cursor-spend-tray") -> P
     return path
 
 
-def resolve_automation_browser() -> BrowserInfo:
-    """Pick the browser used for scraping: default if supported, else Chromium, else Firefox."""
+def list_installed_browsers() -> list[BrowserInfo]:
+    """Return automation-capable browsers whose binaries resolve on this machine.
+
+    Dedupes by key (brave / brave-browser → one Brave). Order: default browser
+    first when it is supported, then remaining display names alphabetically.
+    """
+    meta_by_key: dict[str, tuple[BrowserFamily, str, str]] = {}
+    for _token, (family, key, display) in _KNOWN.items():
+        meta_by_key.setdefault(key, (family, key, display))
+
+    installed: list[BrowserInfo] = []
+    for key, (family, _key, display) in meta_by_key.items():
+        binary = _resolve_binary(_binaries_for_key(key))
+        if not binary:
+            continue
+        installed.append(
+            BrowserInfo(
+                family=family,
+                key=key,
+                binary=binary,
+                display_name=display,
+            )
+        )
+
+    default = detect_default_browser()
+    default_key = default.key if default is not None else None
+
+    def sort_key(info: BrowserInfo) -> tuple[int, str]:
+        primary = 0 if info.key == default_key else 1
+        return (primary, info.display_name.lower())
+
+    return sorted(installed, key=sort_key)
+
+
+def resolve_browser_by_key(key: str) -> BrowserInfo | None:
+    """Resolve a known automation browser key if its binary is installed."""
+    key = key.strip().lower()
+    if not key:
+        return None
+    for info in list_installed_browsers():
+        if info.key == key:
+            return info
+    # Prefer an explicit binary resolve even if list_installed skipped a race.
+    binary = _resolve_binary(_binaries_for_key(key))
+    if not binary:
+        return None
+    for token, (family, known_key, display) in _KNOWN.items():
+        if known_key == key:
+            return BrowserInfo(family=family, key=known_key, binary=binary, display_name=display)
+    return None
+
+
+def resolve_automation_browser(preferred_key: str | None = None) -> BrowserInfo:
+    """Pick the browser used for scraping: preferred key, else default, else fallbacks."""
+    if preferred_key:
+        chosen = resolve_browser_by_key(preferred_key)
+        if chosen is not None:
+            log.info(
+                "Using configured browser %s (%s, %s)",
+                chosen.display_name,
+                chosen.family.value,
+                chosen.binary,
+            )
+            return chosen
+        log.info("Configured browser key %r not installed; falling back", preferred_key)
+
     detected = detect_default_browser()
     if detected is not None:
         log.info(

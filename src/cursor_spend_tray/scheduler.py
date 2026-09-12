@@ -17,6 +17,9 @@ log = logging.getLogger(__name__)
 
 # Quiet check while paused — not a spending scrape, just “is Remote Agent up?”
 _PROBE_INTERVAL_MS = 30_000
+# Launch this many seconds before the poll deadline in quit-between mode so the
+# scrape can start on time (matches TrayApp._LAUNCH_SETTLE_MS).
+BROWSER_WARMUP_SECONDS = 10
 
 
 class _ScrapeWorker(QThread):
@@ -68,14 +71,25 @@ class RefreshScheduler(QObject):
     seconds_changed = pyqtSignal(int)
     status_changed = pyqtSignal(str)
     refreshing_changed = pyqtSignal(bool)
+    # Fired once per poll cycle when quit-between should pre-launch the browser.
+    browser_warmup_requested = pyqtSignal()
 
-    def __init__(self, config: AppConfig, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        parent: QObject | None = None,
+        *,
+        ensure_ready: Callable[[Callable[[], None]], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.config = config
+        self._ensure_ready = ensure_ready
         self._worker: _ScrapeWorker | None = None
         self._probe_worker: _ProbeWorker | None = None
         self._deadline = time.monotonic() + config.poll_seconds
         self._paused = False
+        self._awaiting_ready = False
+        self._warmup_fired = False
         self._tick = QTimer(self)
         self._tick.setInterval(250)
         self._tick.timeout.connect(self._on_tick)
@@ -83,10 +97,11 @@ class RefreshScheduler(QObject):
         self._probe.setInterval(_PROBE_INTERVAL_MS)
         self._probe.timeout.connect(self._on_probe)
 
-    def start(self) -> None:
+    def start(self, *, refresh: bool = True) -> None:
         self._tick.start()
         self._emit_seconds()
-        self.refresh()
+        if refresh:
+            self.refresh()
 
     def stop(self) -> None:
         self._tick.stop()
@@ -101,18 +116,37 @@ class RefreshScheduler(QObject):
             return -1
         return max(0, int(round(self._deadline - time.monotonic())))
 
+    def is_refreshing(self) -> bool:
+        return bool(self._worker and self._worker.isRunning())
+
+    def cancel_awaiting_ready(self) -> None:
+        """Clear the browser-launch gate so a later refresh can run."""
+        self._awaiting_ready = False
+
     def refresh(self) -> None:
         if self._worker and self._worker.isRunning():
             self.status_changed.emit("Refresh already in progress…")
             return
-        # While a manual/auto scrape runs, keep the countdown from firing again.
-        self._deadline = time.monotonic() + self.config.poll_seconds
-        self.refreshing_changed.emit(True)
-        self.status_changed.emit("Refreshing…")
-        self._worker = _ScrapeWorker(self.config)
-        self._worker.finished_ok.connect(self._on_ok)
-        self._worker.finished_err.connect(self._on_err)
-        self._worker.start()
+        if self._awaiting_ready:
+            return
+
+        def start_worker() -> None:
+            self._awaiting_ready = False
+            self._warmup_fired = True  # scrape owns this cycle; no more warmup
+            # While a manual/auto scrape runs, keep the countdown from firing again.
+            self._deadline = time.monotonic() + self.config.poll_seconds
+            self.refreshing_changed.emit(True)
+            self.status_changed.emit("Refreshing…")
+            self._worker = _ScrapeWorker(self.config)
+            self._worker.finished_ok.connect(self._on_ok)
+            self._worker.finished_err.connect(self._on_err)
+            self._worker.start()
+
+        if self._ensure_ready is not None:
+            self._awaiting_ready = True
+            self._ensure_ready(start_worker)
+        else:
+            start_worker()
 
     def set_poll_seconds(self, seconds: int) -> None:
         """Update the poll interval, persist it, and re-arm the countdown."""
@@ -121,12 +155,14 @@ class RefreshScheduler(QObject):
         self.config.save()
         if not self._paused and not (self._worker and self._worker.isRunning()):
             self._deadline = time.monotonic() + seconds
+            self._warmup_fired = False
             self._emit_seconds()
 
     def _arm_next(self) -> None:
         self._paused = False
         self._stop_probe()
         self._deadline = time.monotonic() + self.config.poll_seconds
+        self._warmup_fired = False
         self._emit_seconds()
 
     def probe_or_refresh(
@@ -154,7 +190,8 @@ class RefreshScheduler(QObject):
         if available:
             if avail_cb is not None:
                 avail_cb()
-            self.refresh()
+            else:
+                self.refresh()
         elif unavail_cb is not None:
             unavail_cb()
 
@@ -198,7 +235,17 @@ class RefreshScheduler(QObject):
         if self._paused:
             return
         self._emit_seconds()
-        if self.remaining_seconds() <= 0 and not (self._worker and self._worker.isRunning()):
+        remaining = self.remaining_seconds()
+        if (
+            not self._warmup_fired
+            and self.config.between_scrapes == "quit"
+            and 0 < remaining <= BROWSER_WARMUP_SECONDS
+            and not self.is_refreshing()
+            and not self._awaiting_ready
+        ):
+            self._warmup_fired = True
+            self.browser_warmup_requested.emit()
+        if remaining <= 0 and not self.is_refreshing():
             self.refresh()
 
     def _on_probe(self) -> None:

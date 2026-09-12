@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, PrivateAttr
 
@@ -12,10 +13,13 @@ from .browser import (
     browser_is_running,
     data_dir_for_app,
     launch_argv,
+    list_installed_browsers,
     profile_dir_for,
     resolve_automation_browser,
     stop_automation_browser,
 )
+
+BetweenScrapesMode = Literal["keep_open", "quit"]
 
 
 APP_NAME = "cursor-spend-tray"
@@ -93,6 +97,11 @@ class AppConfig(BaseModel):
     poll_seconds: int = DEFAULT_POLL_SECONDS
     spending_url: str = SPENDING_URL
     dedicated_tab: bool = True
+    # Preferred automation browser key (zen, chrome, …). None → auto-detect.
+    browser_key: str | None = None
+    # keep_open: leave headless browser running between polls.
+    # quit: stop after each scrape and relaunch before the next.
+    between_scrapes: BetweenScrapesMode = "keep_open"
 
     _browser: BrowserInfo | None = PrivateAttr(default=None)
 
@@ -105,12 +114,26 @@ class AppConfig(BaseModel):
     @property
     def browser(self) -> BrowserInfo:
         if self._browser is None:
-            self._browser = resolve_automation_browser()
+            self._browser = resolve_automation_browser(self.browser_key)
         return self._browser
 
     def refresh_browser(self) -> BrowserInfo:
-        self._browser = resolve_automation_browser()
+        self._browser = resolve_automation_browser(self.browser_key)
         return self._browser
+
+    def set_browser_key(self, key: str | None) -> BrowserInfo:
+        """Persist a preferred automation browser and refresh the resolved BrowserInfo."""
+        self.browser_key = key
+        self._browser = resolve_automation_browser(key)
+        self.save()
+        return self._browser
+
+    def set_between_scrapes(self, mode: BetweenScrapesMode) -> None:
+        self.between_scrapes = mode
+        self.save()
+
+    def installed_browsers(self) -> list[BrowserInfo]:
+        return list_installed_browsers()
 
     def browser_is_running(self) -> bool:
         return browser_is_running(self.browser, app_name=APP_NAME)

@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any, Protocol
 
+from .auth_detect import page_requires_login_from_extract
 from .bidi_client import BidiClient, BidiError
 from .browser import BrowserFamily
 from .cdp_client import CdpClient, CdpError
@@ -16,6 +17,7 @@ log = logging.getLogger(__name__)
 EXTRACT_JS = r"""
 (() => {
   const bodyText = document.body ? document.body.innerText : "";
+  const pageUrl = String(location.href || "");
   const pickPct = (label) => {
     const re = new RegExp(
       label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[\\s\\S]{0,240}?(\\d{1,3})%\\s*used",
@@ -61,14 +63,24 @@ EXTRACT_JS = r"""
   const dom = fromDom();
   const cursorModelsPct = dom.cursorModelsPct ?? pickPct("Cursor Models");
   const otherModelsPct = dom.otherModelsPct ?? pickPct("Other Models");
-  const loggedOut = /sign\s*in|log\s*in|authenticate/i.test(bodyText)
-    && !/Included in Pro/i.test(bodyText);
+  const hasDashboard = /Included in Pro/i.test(bodyText);
+  const loggedOut = (
+    /authenticator\.cursor\.sh/i.test(pageUrl)
+    || /authenticator\.cursor\.sh/i.test(bodyText)
+    || /performing security verification/i.test(bodyText)
+    || (/verify you are not a bot/i.test(bodyText) && /cursor/i.test(pageUrl + bodyText))
+    || (
+      /sign\s*in|log\s*in|authenticate/i.test(bodyText)
+      && !hasDashboard
+    )
+  );
 
   return {
+    pageUrl,
     cursorModelsPct,
     otherModelsPct,
     loggedOut,
-    hasIncludedInPro: /Included in Pro/i.test(bodyText),
+    hasIncludedInPro: hasDashboard,
     hint: bodyText.slice(0, 500),
   };
 })()
@@ -174,19 +186,25 @@ class SpendingScraper:
                 f"[scrape] extract raw cursorModelsPct={data.get('cursorModelsPct')!r} "
                 f"otherModelsPct={data.get('otherModelsPct')!r} "
                 f"loggedOut={data.get('loggedOut')!r} "
+                f"pageUrl={data.get('pageUrl')!r} "
                 f"hasIncludedInPro={data.get('hasIncludedInPro')!r}",
                 flush=True,
             )
             hint = data.get("hint") or ""
             print(f"[scrape] page hint ({len(hint)} chars): {hint[:400]!r}", flush=True)
-            if data.get("loggedOut"):
-                print("[scrape] page looks logged out; keeping previous snapshot", flush=True)
+            if page_requires_login_from_extract(data):
+                print(
+                    "[scrape] auth/bot page detected; needs headed sign-in "
+                    f"(url={data.get('pageUrl')!r})",
+                    flush=True,
+                )
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
                     error=(
-                        f"Cursor session looks logged out in {browser.display_name}. "
-                        "A sign-in window will open — sign in, then refresh."
+                        f"Cursor sign-in required in {browser.display_name}. "
+                        "A sign-in window will open — complete any security check, "
+                        "sign in, then refresh."
                     ),
                     fetched_at=time.time(),
                     source="logged_out",
@@ -294,12 +312,13 @@ class SpendingScraper:
                 f"cursor={last.get('cursorModelsPct')!r} "
                 f"other={last.get('otherModelsPct')!r} "
                 f"loggedOut={last.get('loggedOut')!r} "
+                f"pageUrl={last.get('pageUrl')!r} "
                 f"hasIncludedInPro={last.get('hasIncludedInPro')!r}",
                 flush=True,
             )
             if last.get("cursorModelsPct") is not None or last.get("otherModelsPct") is not None:
                 return last
-            if last.get("loggedOut"):
+            if page_requires_login_from_extract(last):
                 return last
             await asyncio.sleep(0.75 + i * 0.15)
         print("[scrape] extract retries exhausted", flush=True)
