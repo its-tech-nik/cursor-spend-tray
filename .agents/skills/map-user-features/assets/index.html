@@ -434,34 +434,34 @@
     }
 
     .expand {
-      flex: 0 0 auto;
+      position: absolute;
+      top: 50%;
+      right: 0;
+      z-index: 3;
       width: 1.55rem;
       height: 1.55rem;
-      margin-top: 0.05rem;
+      margin: 0;
       padding: 0;
       display: grid;
       place-items: center;
+      transform: translate(50%, -50%);
       border: 1.5px solid color-mix(in srgb, var(--ink) 40%, var(--line));
-      border-radius: var(--radius-sm);
+      border-radius: 50%;
       background: var(--chrome);
       color: var(--ink);
-      font-family: var(--font-mono);
-      font-size: 0.95rem;
-      font-weight: 500;
-      line-height: 1;
       cursor: pointer;
     }
 
-    .expand:not([disabled]):hover {
+    .expand svg {
+      width: 0.72rem;
+      height: 0.72rem;
+      display: block;
+    }
+
+    .expand:hover {
       background: var(--gate);
       border-color: var(--gate);
       color: var(--canvas);
-    }
-
-    .expand[disabled] {
-      opacity: 0.28;
-      cursor: default;
-      border-style: dashed;
     }
 
     .card-body {
@@ -980,6 +980,10 @@
       '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
     const CHECK_ICON =
       '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+    const PLUS_ICON =
+      '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+    const MINUS_ICON =
+      '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/></svg>';
 
     function codeList(code) {
       if (!code || !code.length) return "";
@@ -1052,7 +1056,7 @@
       kidsWrap.classList.toggle("open", open);
       connector.hidden = !open;
       card.classList.toggle("is-open", open);
-      btn.textContent = open ? "−" : "+";
+      btn.innerHTML = open ? MINUS_ICON : PLUS_ICON;
       btn.setAttribute("aria-expanded", open ? "true" : "false");
       btn.title = open ? "Collapse" : "Expand";
     }
@@ -1069,7 +1073,6 @@
       card.innerHTML = `
         <button type="button" class="card-copy" data-copy="${escapeHtml(copyPayload)}" title="Copy title and function names" aria-label="Copy title and function names">${COPY_ICON}</button>
         <div class="card-top">
-          <button type="button" class="expand" ${hasKids ? "" : "disabled"} aria-expanded="false" title="${hasKids ? "Expand" : "No nested capabilities"}">${hasKids ? "+" : "·"}</button>
           <div class="card-body">
             <h2>${escapeHtml(feature.title || feature.id || "Feature")}</h2>
             ${feature.id ? `<p class="id">${escapeHtml(feature.id)}</p>` : ""}
@@ -1078,6 +1081,7 @@
             ${codeList(feature.code)}
           </div>
         </div>
+        ${hasKids ? `<button type="button" class="expand" aria-expanded="false" title="Expand">${PLUS_ICON}</button>` : ""}
       `;
       row.appendChild(card);
 
@@ -1174,7 +1178,7 @@
         const connector = branch && branch.querySelector(":scope > .connector");
         const row = branch && branch.parentElement;
         const card = row && row.querySelector(":scope > .card");
-        const btn = card && card.querySelector(".expand:not([disabled])");
+        const btn = card && card.querySelector(".expand");
         if (card && wrap && connector && btn) {
           setBranchOpen(card, wrap, connector, btn, open);
         }
