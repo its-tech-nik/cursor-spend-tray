@@ -57,6 +57,10 @@ Coverage = definitions referenced by the map ÷ all `class`/`def` symbols under
 
 This is **not** test coverage and **not** a completeness score for the product — only “how much of the code surface the map cites.”
 
+The viewer includes fuzzy search over each card’s **title** (id is used only
+when title is missing). Matching nodes stay visible with ancestors expanded;
+the search meta line reports match count and filter time.
+
 ## When invoked
 
 1. Read the current [assets/capability-map.json](assets/capability-map.json).

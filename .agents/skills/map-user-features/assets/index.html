@@ -116,6 +116,77 @@
       align-items: center;
     }
 
+    .search-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      padding: 0.55rem 1.25rem 0.7rem;
+      border-top: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+    }
+
+    .search-wrap {
+      position: relative;
+      flex: 1 1 16rem;
+      min-width: min(100%, 12rem);
+    }
+
+    #search {
+      width: 100%;
+      font-family: var(--font-ui);
+      font-size: 0.9rem;
+      padding: 0.45rem 2.1rem 0.45rem 0.7rem;
+      border: 1.5px solid color-mix(in srgb, var(--ink) 40%, var(--line));
+      border-radius: var(--radius-sm);
+      background: var(--node);
+      color: var(--ink);
+    }
+
+    #search::placeholder {
+      color: var(--muted);
+    }
+
+    #search:focus {
+      outline: 2px solid var(--focus);
+      outline-offset: 1px;
+      border-color: var(--gate);
+    }
+
+    .search-clear {
+      position: absolute;
+      right: 0.3rem;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 1.5rem;
+      height: 1.5rem;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      border: none;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .search-clear:hover {
+      color: var(--ink);
+      background: color-mix(in srgb, var(--gate) 15%, transparent);
+    }
+
+    .search-clear[hidden] {
+      display: none;
+    }
+
+    #search-meta {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
     button,
     label.file-btn {
       font-family: var(--font-ui);
@@ -344,6 +415,16 @@
     .card.is-open {
       background: var(--node-open);
       border-left-color: var(--signal);
+    }
+
+    .card.is-match {
+      box-shadow: inset 0 0 0 1.5px var(--signal);
+      border-left-color: var(--signal);
+    }
+
+    .node-row.is-filtered-out,
+    .kid.is-filtered-out {
+      display: none;
     }
 
     .card-top {
@@ -634,6 +715,20 @@
         <label class="file-btn">Load JSON…<input type="file" id="file" accept="application/json,.json" /></label>
       </div>
     </div>
+    <div class="search-row">
+      <div class="search-wrap">
+        <input
+          type="search"
+          id="search"
+          placeholder="Fuzzy search by title…"
+          autocomplete="off"
+          spellcheck="false"
+          enterkeyhint="search"
+        />
+        <button type="button" class="search-clear" id="search-clear" hidden title="Clear search" aria-label="Clear search">×</button>
+      </div>
+      <span id="search-meta" aria-live="polite"></span>
+    </div>
     <div class="meter-row" id="coverage" hidden>
       <div class="meter-label">
         <strong id="coverage-main">Definition coverage</strong>
@@ -705,8 +800,14 @@
     const titleEl = document.getElementById("title");
     const subtitleEl = document.getElementById("subtitle");
     const themeToggle = document.getElementById("theme-toggle");
+    const searchInput = document.getElementById("search");
+    const searchClear = document.getElementById("search-clear");
+    const searchMeta = document.getElementById("search-meta");
 
     let mapDefinitions = null;
+    let searchIndex = [];
+    let lastStatusBase = "";
+    let searchTimer = 0;
 
     function applyTheme(theme) {
       const next = theme === "light" ? "light" : "dark";
@@ -736,8 +837,126 @@
     initTheme();
 
     function setStatus(text, isError) {
+      lastStatusBase = text;
       statusEl.textContent = text;
       statusEl.classList.toggle("error", !!isError);
+    }
+
+    /** Build lowercase haystack from the card title only. */
+    function featureHaystack(feature) {
+      return String(feature.title || feature.id || "").toLowerCase();
+    }
+
+    /**
+     * Fuzzy subsequence score. Higher is better; 0 = no match.
+     * Rewards early hits, consecutive runs, and matches after separators.
+     */
+    function fuzzyScore(query, haystack) {
+      if (!query) return 1;
+      if (!haystack) return 0;
+      let qi = 0;
+      let score = 0;
+      let streak = 0;
+      let prev = -2;
+      for (let hi = 0; hi < haystack.length && qi < query.length; hi++) {
+        if (haystack.charCodeAt(hi) !== query.charCodeAt(qi)) continue;
+        streak = hi === prev + 1 ? streak + 1 : 1;
+        score += 1 + streak * 3;
+        if (hi === 0 || /[\s_/.:-]/.test(haystack.charAt(hi - 1))) score += 8;
+        prev = hi;
+        qi += 1;
+      }
+      if (qi !== query.length) return 0;
+      // Prefer denser / shorter haystacks slightly.
+      return score / (1 + Math.log(1 + haystack.length));
+    }
+
+    function clearSearchFilter() {
+      for (const entry of searchIndex) {
+        entry.row.classList.remove("is-filtered-out");
+        entry.card.classList.remove("is-match");
+        if (entry.kidEl) entry.kidEl.classList.remove("is-filtered-out");
+      }
+      searchMeta.textContent = "";
+      searchClear.hidden = true;
+    }
+
+    function applySearch(rawQuery) {
+      const t0 = performance.now();
+      const query = String(rawQuery || "").trim().toLowerCase();
+      searchClear.hidden = !query;
+
+      if (!searchIndex.length) {
+        searchMeta.textContent = "";
+        return;
+      }
+
+      if (!query) {
+        clearSearchFilter();
+        const t1 = performance.now();
+        searchMeta.textContent = `cleared · ${(t1 - t0).toFixed(2)} ms`;
+        return;
+      }
+
+      const tokens = query.split(/\s+/).filter(Boolean);
+      const selfMatch = Object.create(null);
+      let matched = 0;
+
+      for (const entry of searchIndex) {
+        let ok = true;
+        let best = 0;
+        for (const token of tokens) {
+          const s = fuzzyScore(token, entry.haystack);
+          if (!s) {
+            ok = false;
+            break;
+          }
+          best += s;
+        }
+        entry.score = ok ? best : 0;
+        selfMatch[entry.id] = ok;
+        if (ok) matched += 1;
+      }
+
+      // Visible if self matches or any descendant matches.
+      const visible = Object.create(null);
+      for (let i = searchIndex.length - 1; i >= 0; i--) {
+        const entry = searchIndex[i];
+        let show = selfMatch[entry.id];
+        if (!show) {
+          for (const childId of entry.childIds) {
+            if (visible[childId]) {
+              show = true;
+              break;
+            }
+          }
+        }
+        visible[entry.id] = show;
+      }
+
+      for (const entry of searchIndex) {
+        const show = !!visible[entry.id];
+        entry.row.classList.toggle("is-filtered-out", !show);
+        entry.card.classList.toggle("is-match", !!selfMatch[entry.id]);
+        if (entry.kidEl) entry.kidEl.classList.toggle("is-filtered-out", !show);
+
+        if (show && entry.parent) {
+          // Expand ancestors so matches are reachable left → right.
+          const p = entry.parent;
+          if (p.kidsWrap && p.card && p.connector && p.expandBtn) {
+            setBranchOpen(p.card, p.kidsWrap, p.connector, p.expandBtn, true);
+          }
+        }
+      }
+
+      const t1 = performance.now();
+      searchMeta.textContent =
+        `${matched}/${searchIndex.length} match${matched === 1 ? "" : "es"} · ${(t1 - t0).toFixed(2)} ms`;
+    }
+
+    function scheduleSearch() {
+      window.clearTimeout(searchTimer);
+      searchTimer = window.setTimeout(() => applySearch(searchInput.value), 40);
     }
 
     function setCoverage(mapData) {
@@ -838,7 +1057,7 @@
       btn.title = open ? "Collapse" : "Expand";
     }
 
-    function renderNode(feature) {
+    function renderNode(feature, parentEntry) {
       const kids = feature.children || [];
       const hasKids = kids.length > 0;
       const row = document.createElement("div");
@@ -862,7 +1081,24 @@
       `;
       row.appendChild(card);
 
-      if (!hasKids) return row;
+      const entry = {
+        id: String(feature.id || searchIndex.length),
+        feature,
+        row,
+        card,
+        kidEl: null,
+        parent: parentEntry || null,
+        childIds: [],
+        haystack: featureHaystack(feature),
+        kidsWrap: null,
+        connector: null,
+        expandBtn: null,
+        score: 0,
+      };
+      searchIndex.push(entry);
+      if (parentEntry) parentEntry.childIds.push(entry.id);
+
+      if (!hasKids) return { row, entry };
 
       const branch = document.createElement("div");
       branch.className = "branch";
@@ -874,29 +1110,35 @@
       const kidsWrap = document.createElement("div");
       kidsWrap.className = "kids-wrap";
 
+      const expandBtn = card.querySelector(".expand");
+      entry.kidsWrap = kidsWrap;
+      entry.connector = connector;
+      entry.expandBtn = expandBtn;
+
       for (const child of kids) {
         const kid = document.createElement("div");
         kid.className = "kid";
-        kid.appendChild(renderNode(child));
+        const rendered = renderNode(child, entry);
+        rendered.entry.kidEl = kid;
+        kid.appendChild(rendered.row);
         kidsWrap.appendChild(kid);
       }
 
-      const btn = card.querySelector(".expand");
-      btn.addEventListener("click", () => {
+      expandBtn.addEventListener("click", () => {
         const open = !kidsWrap.classList.contains("open");
-        setBranchOpen(card, kidsWrap, connector, btn, open);
+        setBranchOpen(card, kidsWrap, connector, expandBtn, open);
       });
 
       branch.appendChild(connector);
       branch.appendChild(kidsWrap);
       row.appendChild(branch);
-      return row;
+      return { row, entry };
     }
 
     function render(data) {
       forestEl.innerHTML = "";
+      searchIndex = [];
       if (data.meta?.title) {
-        // Keep product name as the brand signal; meta title becomes the job line when present.
         titleEl.textContent = "Cursor Spend Tray";
       }
       if (data.meta?.description) {
@@ -906,11 +1148,16 @@
       }
       const roots = data.features || [];
       for (const feature of roots) {
-        forestEl.appendChild(renderNode(feature));
+        forestEl.appendChild(renderNode(feature, null).row);
       }
       const n = countFeatures(roots);
       setCoverage(data);
       setStatus(`${n} capabilities loaded. Nested gates start closed — expand left → right.`);
+      if (searchInput.value.trim()) applySearch(searchInput.value);
+      else {
+        searchMeta.textContent = `${searchIndex.length} indexed`;
+        searchClear.hidden = true;
+      }
     }
 
     function countFeatures(nodes) {
@@ -936,6 +1183,19 @@
 
     document.getElementById("expand-all").addEventListener("click", () => setAll(true));
     document.getElementById("collapse-all").addEventListener("click", () => setAll(false));
+    searchInput.addEventListener("input", scheduleSearch);
+    searchInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") {
+        searchInput.value = "";
+        applySearch("");
+        searchInput.blur();
+      }
+    });
+    searchClear.addEventListener("click", () => {
+      searchInput.value = "";
+      applySearch("");
+      searchInput.focus();
+    });
     forestEl.addEventListener("click", (ev) => {
       const btn = ev.target.closest(".copy-path, .card-copy");
       if (!btn || !forestEl.contains(btn)) return;
