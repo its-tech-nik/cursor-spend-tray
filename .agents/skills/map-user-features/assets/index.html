@@ -299,6 +299,44 @@
       z-index: 1;
     }
 
+    .card-copy {
+      position: absolute;
+      top: 0.45rem;
+      right: 0.45rem;
+      z-index: 2;
+      width: 1.45rem;
+      height: 1.45rem;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .card-copy:hover {
+      background: color-mix(in srgb, var(--gate) 18%, transparent);
+      border-color: color-mix(in srgb, var(--gate) 35%, transparent);
+      color: var(--gate);
+    }
+
+    .card-copy:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 1px;
+    }
+
+    .card-copy svg {
+      width: 0.85rem;
+      height: 0.85rem;
+      display: block;
+    }
+
+    .card-copy.is-copied {
+      color: var(--gate);
+    }
+
     .card.has-kids {
       border-left-color: var(--gate);
     }
@@ -348,6 +386,7 @@
     .card-body {
       min-width: 0;
       flex: 1;
+      padding-right: 1.5rem;
     }
 
     .card h2 {
@@ -739,7 +778,7 @@
       return `<details><summary>Code</summary><ul>${items}</ul></details>`;
     }
 
-    async function copyPath(btn) {
+    async function copyText(btn, { restoreTitle = "Copy" } = {}) {
       const text = btn.getAttribute("data-copy") || "";
       if (!text) return;
       try {
@@ -764,8 +803,22 @@
       window.setTimeout(() => {
         btn.classList.remove("is-copied");
         btn.innerHTML = COPY_ICON;
-        btn.title = "Copy path";
+        btn.title = restoreTitle;
       }, 1200);
+    }
+
+    function featureCopyText(feature) {
+      const title = feature.title || feature.id || "Feature";
+      const seen = Object.create(null);
+      const names = [];
+      for (const c of feature.code || []) {
+        if (!c || !c.function) continue;
+        const name = String(c.function);
+        if (seen[name]) continue;
+        seen[name] = true;
+        names.push(name);
+      }
+      return names.length ? `${title}\n${names.join("\n")}` : title;
     }
 
     function escapeHtml(s) {
@@ -791,9 +844,11 @@
       const row = document.createElement("div");
       row.className = "node-row";
 
+      const copyPayload = featureCopyText(feature);
       const card = document.createElement("article");
       card.className = "card" + (hasKids ? " has-kids" : "");
       card.innerHTML = `
+        <button type="button" class="card-copy" data-copy="${escapeHtml(copyPayload)}" title="Copy title and function names" aria-label="Copy title and function names">${COPY_ICON}</button>
         <div class="card-top">
           <button type="button" class="expand" ${hasKids ? "" : "disabled"} aria-expanded="false" title="${hasKids ? "Expand" : "No nested capabilities"}">${hasKids ? "+" : "·"}</button>
           <div class="card-body">
@@ -882,10 +937,13 @@
     document.getElementById("expand-all").addEventListener("click", () => setAll(true));
     document.getElementById("collapse-all").addEventListener("click", () => setAll(false));
     forestEl.addEventListener("click", (ev) => {
-      const btn = ev.target.closest(".copy-path");
+      const btn = ev.target.closest(".copy-path, .card-copy");
       if (!btn || !forestEl.contains(btn)) return;
       ev.preventDefault();
-      copyPath(btn);
+      const restoreTitle = btn.classList.contains("card-copy")
+        ? "Copy title and function names"
+        : "Copy path";
+      copyText(btn, { restoreTitle });
     });
     document.getElementById("file").addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];
