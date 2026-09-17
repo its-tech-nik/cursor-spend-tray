@@ -2,7 +2,7 @@
   "meta": {
     "title": "Cursor Spend Tray \u2014 what people can do",
     "description": "User-facing actions and settings only. Background automation is mentioned only when the person can change a related setting.",
-    "version": 2,
+    "version": 3,
     "product": "cursor-spend-tray"
   },
   "states": [
@@ -74,7 +74,7 @@
                 {
                   "file": "src/cursor_spend_tray/popup.py",
                   "function": "SpendPopup.apply_snapshot",
-                  "line": 2449
+                  "line": 2465
                 },
                 {
                   "file": "src/cursor_spend_tray/popup.py",
@@ -82,7 +82,37 @@
                   "line": 232
                 }
               ],
-              "children": []
+              "children": [
+                {
+                  "id": "see_usage_reset_time",
+                  "title": "See when AUTO usage last reset",
+                  "description": "Beside \u201cIncluded in Pro\u201d, a muted label shows when AUTO usage last returned to 0% (for example \u201c- resets on the 18th at 04:00\u201d). The stamp is remembered across app restarts and updates only the first time usage drops from above zero to zero in a billing cycle\u2014not on later polls that stay at 0%.",
+                  "available_when": "Spend rings are visible and a reset timestamp is known.",
+                  "code": [
+                    {
+                      "file": "src/cursor_spend_tray/popup.py",
+                      "function": "SpendPopup.apply_snapshot",
+                      "line": 2465
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/config.py",
+                      "function": "format_usage_reset_label",
+                      "line": 209
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/config.py",
+                      "function": "resolve_usage_reset_at",
+                      "line": 215
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/scraper.py",
+                      "function": "SpendingScraper.fetch",
+                      "line": 361
+                    }
+                  ],
+                  "children": []
+                }
+              ]
             },
             {
               "id": "countdown_refresh",

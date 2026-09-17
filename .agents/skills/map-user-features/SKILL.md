@@ -33,6 +33,19 @@ xdg-open .agents/skills/map-user-features/assets/index.html
 # or: cd .agents/skills/map-user-features/assets && python3 -m http.server
 ```
 
+Deep-link to a feature by stable `id` (expands ancestors, highlights, scrolls).
+Prefer a **hash** so `file://` opens stay a single Zen/Firefox tab (query strings
+on local files often open twice):
+
+```bash
+xdg-open '.agents/skills/map-user-features/assets/index.html#id=see_usage_reset_time'
+# shorthand also works: .../index.html#see_usage_reset_time
+```
+
+`?id=` / `?q=` still work over `http://` (local server). Title fuzzy search can
+be seeded with `#q=…` or `?q=…`. The search box keeps the hash in sync via
+`history.replaceState`; clearing search removes it.
+
 The viewer loads `capability-map.json` + `definitions.json` and shows definition
 coverage via `coverage.js`.
 
@@ -59,7 +72,9 @@ This is **not** test coverage and **not** a completeness score for the product �
 
 The viewer includes fuzzy search over each card’s **title** (id is used only
 when title is missing). Matching nodes stay visible with ancestors expanded;
-the search meta line reports match count and filter time.
+the search meta line reports match count and filter time. Pass
+`#id=<feature_id>` (preferred for `file://`) or `?id=<feature_id>` to open that
+node’s path directly, or `#q=…` / `?q=…` to seed title search from the URL.
 
 ## When invoked
 

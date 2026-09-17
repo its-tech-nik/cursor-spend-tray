@@ -1090,181 +1090,205 @@
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "poll_interval_label",
-      "line": 38,
+      "line": 40,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "data_dir",
-      "line": 43,
+      "line": 45,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "config_path",
-      "line": 47,
+      "line": 49,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "state_path",
-      "line": 51,
+      "line": 53,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "panel_order_path",
-      "line": 55,
+      "line": 57,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "load_popup_panel_order",
-      "line": 62,
+      "line": 64,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "save_popup_panel_order",
-      "line": 80,
+      "line": 82,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "zen_is_running",
-      "line": 90,
+      "line": 92,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig",
-      "line": 95,
+      "line": 97,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.bidi_http_base",
-      "line": 109,
+      "line": 111,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.debug_http_base",
-      "line": 112,
+      "line": 114,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.browser",
-      "line": 116,
+      "line": 118,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.refresh_browser",
-      "line": 121,
+      "line": 123,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.set_browser_key",
-      "line": 125,
+      "line": 127,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.set_between_scrapes",
-      "line": 132,
+      "line": 134,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.installed_browsers",
-      "line": 136,
+      "line": 138,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.browser_is_running",
-      "line": 139,
+      "line": 141,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.browser_is_headless",
-      "line": 142,
+      "line": 144,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.stop_browser",
-      "line": 145,
+      "line": 147,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.profile_dir",
-      "line": 148,
+      "line": 150,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.browser_launch_argv",
-      "line": 151,
+      "line": 153,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.browser_login_argv",
-      "line": 166,
+      "line": 168,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.browser_launch_command",
-      "line": 170,
+      "line": 172,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.zen_launch_argv",
-      "line": 174,
+      "line": 176,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.zen_launch_command",
-      "line": 177,
+      "line": 179,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.save",
-      "line": 180,
+      "line": 182,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "AppConfig.load",
-      "line": 184,
+      "line": 186,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
+      "name": "default_usage_reset_at",
+      "line": 195,
+      "kind": "function"
+    },
+    {
+      "file": "src/cursor_spend_tray/config.py",
+      "name": "_day_ordinal",
+      "line": 201,
+      "kind": "function"
+    },
+    {
+      "file": "src/cursor_spend_tray/config.py",
+      "name": "format_usage_reset_label",
+      "line": 209,
+      "kind": "function"
+    },
+    {
+      "file": "src/cursor_spend_tray/config.py",
+      "name": "resolve_usage_reset_at",
+      "line": 215,
+      "kind": "function"
+    },
+    {
+      "file": "src/cursor_spend_tray/config.py",
       "name": "UsageSnapshot",
-      "line": 193,
+      "line": 235,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "UsageSnapshot.save",
-      "line": 205,
+      "line": 249,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "UsageSnapshot.load",
-      "line": 209,
+      "line": 253,
       "kind": "method"
     },
     {
@@ -1432,751 +1456,751 @@
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout",
-      "line": 52,
+      "line": 53,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.__init__",
-      "line": 55,
+      "line": 56,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.addItem",
-      "line": 68,
+      "line": 69,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.count",
-      "line": 71,
+      "line": 72,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.itemAt",
-      "line": 74,
+      "line": 75,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.takeAt",
-      "line": 79,
+      "line": 80,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.expandingDirections",
-      "line": 84,
+      "line": 85,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.hasHeightForWidth",
-      "line": 87,
+      "line": 88,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.heightForWidth",
-      "line": 90,
+      "line": 91,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.setGeometry",
-      "line": 93,
+      "line": 94,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.sizeHint",
-      "line": 97,
+      "line": 98,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout.minimumSize",
-      "line": 100,
+      "line": 101,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "FlowLayout._do_layout",
-      "line": 108,
+      "line": 109,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CopyableCommand",
-      "line": 132,
+      "line": 133,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CopyableCommand.__init__",
-      "line": 135,
+      "line": 136,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CopyableCommand.set_command",
-      "line": 167,
+      "line": 168,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CopyableCommand._show_command",
-      "line": 172,
+      "line": 173,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CopyableCommand.mouseReleaseEvent",
-      "line": 175,
+      "line": 176,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BrowserHelpBanner",
-      "line": 183,
+      "line": 184,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BrowserHelpBanner.__init__",
-      "line": 186,
+      "line": 187,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BrowserHelpBanner.set_launch_command",
-      "line": 228,
+      "line": 229,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "UsageRing",
-      "line": 232,
+      "line": 233,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "UsageRing.__init__",
-      "line": 235,
+      "line": 236,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "UsageRing.set_percent",
-      "line": 271,
+      "line": 272,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_RingGlyph",
-      "line": 275,
+      "line": 276,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_RingGlyph.__init__",
-      "line": 278,
+      "line": 279,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_RingGlyph.set_percent",
-      "line": 291,
+      "line": 292,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_RingGlyph._arc_color",
-      "line": 295,
+      "line": 296,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_RingGlyph.paintEvent",
-      "line": 305,
+      "line": 306,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_habits_chip",
-      "line": 350,
+      "line": 351,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BubbleTip",
-      "line": 373,
+      "line": 374,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BubbleTip.__init__",
-      "line": 385,
+      "line": 386,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BubbleTip._set_arrow_margins",
-      "line": 425,
+      "line": 426,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BubbleTip.paintEvent",
-      "line": 444,
+      "line": 445,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BubbleTip.show_for",
-      "line": 484,
+      "line": 485,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BubbleTip.shared",
-      "line": 530,
+      "line": 531,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "BubbleTip.hide_shared",
-      "line": 536,
+      "line": 537,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip",
-      "line": 541,
+      "line": 542,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip.__init__",
-      "line": 546,
+      "line": 547,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip.set_series_on",
-      "line": 578,
+      "line": 579,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip.is_series_on",
-      "line": 584,
+      "line": 585,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip._apply_style",
-      "line": 587,
+      "line": 588,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip._show_bubble_tip",
-      "line": 607,
+      "line": 608,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip.enterEvent",
-      "line": 612,
+      "line": 613,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip.leaveEvent",
-      "line": 617,
+      "line": 618,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip.hideEvent",
-      "line": 622,
+      "line": 623,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SeriesToggleChip.mouseReleaseEvent",
-      "line": 627,
+      "line": 628,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_habits_metric_row",
-      "line": 635,
+      "line": 636,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ChartSeries",
-      "line": 664,
+      "line": 665,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_format_chart_value",
-      "line": 674,
+      "line": 675,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart",
-      "line": 686,
+      "line": 687,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.__init__",
-      "line": 699,
+      "line": 700,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._legend_font",
-      "line": 712,
+      "line": 713,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._legend_row_height",
-      "line": 717,
+      "line": 718,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._height_for_rows",
-      "line": 720,
+      "line": 721,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._estimate_legend_rows",
-      "line": 731,
+      "line": 732,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.sizeHint",
-      "line": 747,
+      "line": 748,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.minimumSizeHint",
-      "line": 751,
+      "line": 752,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.resizeEvent",
-      "line": 754,
+      "line": 755,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.set_data",
-      "line": 762,
+      "line": 763,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.is_series_visible",
-      "line": 780,
+      "line": 781,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.toggle_series",
-      "line": 783,
+      "line": 784,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._visible_series",
-      "line": 794,
+      "line": 795,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._draw_rect",
-      "line": 797,
+      "line": 798,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.leaveEvent",
-      "line": 811,
+      "line": 812,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.mouseMoveEvent",
-      "line": 816,
+      "line": 817,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._normalized_points",
-      "line": 829,
+      "line": 830,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart.paintEvent",
-      "line": 857,
+      "line": 858,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._paint_area_series",
-      "line": 1018,
+      "line": 1019,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "MultiSeriesHistoryChart._paint_line_series",
-      "line": 1066,
+      "line": 1067,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "HabitsHistoryCharts",
-      "line": 1112,
+      "line": 1113,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "HabitsHistoryCharts.__init__",
-      "line": 1115,
+      "line": 1116,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "HabitsHistoryCharts.apply_history",
-      "line": 1131,
+      "line": 1132,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "AgentHabitsPreview",
-      "line": 1192,
+      "line": 1193,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "AgentHabitsPreview.__init__",
-      "line": 1195,
+      "line": 1196,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "AgentHabitsPreview.apply_preview",
-      "line": 1327,
+      "line": 1328,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_format_token_chip",
-      "line": 1395,
+      "line": 1396,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "_merge_composer_usage_series",
-      "line": 1405,
+      "line": 1406,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ComposerHistoryPreview",
-      "line": 1544,
+      "line": 1545,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ComposerHistoryPreview.__init__",
-      "line": 1547,
+      "line": 1548,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ComposerHistoryPreview.apply_preview",
-      "line": 1776,
+      "line": 1777,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ComposerHistoryPreview._latest",
-      "line": 1826,
+      "line": 1827,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ComposerHistoryPreview._on_series_chip_toggled",
-      "line": 1934,
+      "line": 1935,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ComposerHistoryPreview._sync_series_chip_states",
-      "line": 1941,
+      "line": 1942,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CountdownLabel",
-      "line": 1946,
+      "line": 1947,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CountdownLabel.__init__",
-      "line": 1951,
+      "line": 1952,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CountdownLabel.mouseReleaseEvent",
-      "line": 1972,
+      "line": 1973,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "CountdownLabel.set_remaining",
-      "line": 1977,
+      "line": 1978,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "DraggablePanel",
-      "line": 1988,
+      "line": 1989,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "DraggablePanel.__init__",
-      "line": 1991,
+      "line": 1992,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "DraggablePanel._widget_blocks_drag",
-      "line": 2013,
+      "line": 2014,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "DraggablePanel._start_panel_drag",
-      "line": 2022,
+      "line": 2023,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "DraggablePanel.eventFilter",
-      "line": 2039,
+      "line": 2040,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost",
-      "line": 2081,
+      "line": 2082,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.__init__",
-      "line": 2086,
+      "line": 2087,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.add_panel",
-      "line": 2096,
+      "line": 2097,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.set_order",
-      "line": 2102,
+      "line": 2103,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.order",
-      "line": 2110,
+      "line": 2111,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.panel",
-      "line": 2113,
+      "line": 2114,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost._relayout",
-      "line": 2116,
+      "line": 2117,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost._index_for_y",
-      "line": 2127,
+      "line": 2128,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.dragEnterEvent",
-      "line": 2139,
+      "line": 2140,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.dragMoveEvent",
-      "line": 2145,
+      "line": 2146,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.dragLeaveEvent",
-      "line": 2154,
+      "line": 2155,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.dropEvent",
-      "line": 2159,
+      "line": 2160,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "ReorderablePanelHost.paintEvent",
-      "line": 2184,
+      "line": 2185,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup",
-      "line": 2215,
+      "line": 2216,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup.__init__",
-      "line": 2224,
+      "line": 2225,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup.refresh_habits",
-      "line": 2336,
+      "line": 2352,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup.show_at",
-      "line": 2357,
+      "line": 2373,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup._arm_dismiss",
-      "line": 2401,
+      "line": 2417,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup._on_focus_window_changed",
-      "line": 2409,
-      "kind": "method"
-    },
-    {
-      "file": "src/cursor_spend_tray/popup.py",
-      "name": "SpendPopup.dismiss_if_outside",
-      "line": 2416,
-      "kind": "method"
-    },
-    {
-      "file": "src/cursor_spend_tray/popup.py",
-      "name": "SpendPopup.changeEvent",
       "line": 2425,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
+      "name": "SpendPopup.dismiss_if_outside",
+      "line": 2432,
+      "kind": "method"
+    },
+    {
+      "file": "src/cursor_spend_tray/popup.py",
+      "name": "SpendPopup.changeEvent",
+      "line": 2441,
+      "kind": "method"
+    },
+    {
+      "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup.hideEvent",
-      "line": 2435,
+      "line": 2451,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup.apply_snapshot",
-      "line": 2449,
+      "line": 2465,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup.set_browser_inaccessible",
-      "line": 2455,
+      "line": 2479,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup.set_awaiting_login",
-      "line": 2468,
+      "line": 2492,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
       "name": "SpendPopup._sync_countdown_visibility",
-      "line": 2474,
-      "kind": "method"
-    },
-    {
-      "file": "src/cursor_spend_tray/popup.py",
-      "name": "SpendPopup.set_status",
-      "line": 2481,
-      "kind": "method"
-    },
-    {
-      "file": "src/cursor_spend_tray/popup.py",
-      "name": "SpendPopup.set_remaining",
-      "line": 2488,
-      "kind": "method"
-    },
-    {
-      "file": "src/cursor_spend_tray/popup.py",
-      "name": "SpendPopup.set_refreshing",
-      "line": 2491,
-      "kind": "method"
-    },
-    {
-      "file": "src/cursor_spend_tray/popup.py",
-      "name": "_OutsideClickFilter",
-      "line": 2495,
-      "kind": "class"
-    },
-    {
-      "file": "src/cursor_spend_tray/popup.py",
-      "name": "_OutsideClickFilter.__init__",
       "line": 2498,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/popup.py",
+      "name": "SpendPopup.set_status",
+      "line": 2505,
+      "kind": "method"
+    },
+    {
+      "file": "src/cursor_spend_tray/popup.py",
+      "name": "SpendPopup.set_remaining",
+      "line": 2512,
+      "kind": "method"
+    },
+    {
+      "file": "src/cursor_spend_tray/popup.py",
+      "name": "SpendPopup.set_refreshing",
+      "line": 2515,
+      "kind": "method"
+    },
+    {
+      "file": "src/cursor_spend_tray/popup.py",
+      "name": "_OutsideClickFilter",
+      "line": 2519,
+      "kind": "class"
+    },
+    {
+      "file": "src/cursor_spend_tray/popup.py",
+      "name": "_OutsideClickFilter.__init__",
+      "line": 2522,
+      "kind": "method"
+    },
+    {
+      "file": "src/cursor_spend_tray/popup.py",
       "name": "_OutsideClickFilter.eventFilter",
-      "line": 2502,
+      "line": 2526,
       "kind": "method"
     },
     {
@@ -2356,109 +2380,109 @@
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "_ScrapeClient",
-      "line": 257,
+      "line": 258,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "_ScrapeClient.is_available",
-      "line": 260,
-      "kind": "method"
-    },
-    {
-      "file": "src/cursor_spend_tray/scraper.py",
-      "name": "_ScrapeClient.connect",
       "line": 261,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
-      "name": "_ScrapeClient.close",
+      "name": "_ScrapeClient.connect",
       "line": 262,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
-      "name": "_ScrapeClient.find_or_open_tab",
+      "name": "_ScrapeClient.close",
       "line": 263,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
-      "name": "_ScrapeClient.reload",
+      "name": "_ScrapeClient.find_or_open_tab",
       "line": 264,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
-      "name": "_ScrapeClient.evaluate",
+      "name": "_ScrapeClient.reload",
       "line": 265,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
+      "name": "_ScrapeClient.evaluate",
+      "line": 266,
+      "kind": "method"
+    },
+    {
+      "file": "src/cursor_spend_tray/scraper.py",
       "name": "_account_fields",
-      "line": 268,
+      "line": 269,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "_cleared_account_fields",
-      "line": 276,
+      "line": 277,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "SpendingScraper",
-      "line": 285,
+      "line": 286,
       "kind": "class"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "SpendingScraper.__init__",
-      "line": 286,
+      "line": 287,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "SpendingScraper.fetch_sync",
-      "line": 289,
+      "line": 290,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "SpendingScraper._make_client",
-      "line": 292,
+      "line": 293,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "SpendingScraper._navigate",
-      "line": 304,
+      "line": 305,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "SpendingScraper._fetch_account",
-      "line": 315,
+      "line": 316,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "SpendingScraper.fetch",
-      "line": 360,
+      "line": 361,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "SpendingScraper._extract_with_retry",
-      "line": 562,
+      "line": 577,
       "kind": "method"
     },
     {
       "file": "src/cursor_spend_tray/scraper.py",
       "name": "_clamp_pct",
-      "line": 602,
+      "line": 617,
       "kind": "function"
     },
     {

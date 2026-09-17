@@ -720,7 +720,7 @@
         <input
           type="search"
           id="search"
-          placeholder="Fuzzy search by title…"
+          placeholder="Fuzzy search by title… (or #id=feature_id)"
           autocomplete="off"
           spellcheck="false"
           enterkeyhint="search"
@@ -808,6 +808,106 @@
     let searchIndex = [];
     let lastStatusBase = "";
     let searchTimer = 0;
+    let syncingUrl = false;
+
+    function readUrlParams() {
+      const params = new URLSearchParams(window.location.search);
+      const hash = String(window.location.hash || "").replace(/^#/, "");
+      const hashParams = new URLSearchParams(
+        hash.includes("=") ? hash : hash ? `id=${hash}` : ""
+      );
+      // Prefer hash for file:// opens (query strings can make Zen/Firefox open twice).
+      return {
+        id: String(hashParams.get("id") || params.get("id") || "").trim(),
+        q: String(hashParams.get("q") || params.get("q") || "").trim(),
+      };
+    }
+
+    function writeUrlParams({ id = "", q = "" } = {}) {
+      const url = new URL(window.location.href);
+      // Keep deep-links in the hash so file:// opens stay single-tab in Zen.
+      url.searchParams.delete("id");
+      url.searchParams.delete("q");
+      const parts = [];
+      if (id) parts.push(`id=${encodeURIComponent(id)}`);
+      if (q) parts.push(`q=${encodeURIComponent(q)}`);
+      url.hash = parts.length ? parts.join("&") : "";
+      const next = `${url.pathname}${url.search}${url.hash}`;
+      const cur = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (next === cur) return;
+      syncingUrl = true;
+      try {
+        history.replaceState(null, "", next);
+      } finally {
+        syncingUrl = false;
+      }
+    }
+
+    function expandAncestors(entry) {
+      let parent = entry && entry.parent;
+      while (parent) {
+        if (parent.kidsWrap && parent.card && parent.connector && parent.expandBtn) {
+          setBranchOpen(
+            parent.card,
+            parent.kidsWrap,
+            parent.connector,
+            parent.expandBtn,
+            true
+          );
+        }
+        parent = parent.parent;
+      }
+    }
+
+    /** Open the left→right path to a feature id; highlight and scroll into view. */
+    function focusFeatureById(featureId, { updateUrl = true } = {}) {
+      const id = String(featureId || "").trim();
+      if (!id || !searchIndex.length) return false;
+
+      const entry = searchIndex.find((e) => e.id === id);
+      if (!entry) {
+        searchMeta.textContent = `no feature id “${id}”`;
+        if (updateUrl) writeUrlParams({ id: "", q: searchInput.value.trim() });
+        return false;
+      }
+
+      clearSearchFilter();
+      expandAncestors(entry);
+      entry.card.classList.add("is-match");
+      searchClear.hidden = true;
+      searchMeta.textContent = `opened ${id}`;
+
+      window.requestAnimationFrame(() => {
+        entry.card.scrollIntoView({
+          behavior: "smooth",
+          block: "nearest",
+          inline: "center",
+        });
+      });
+
+      if (updateUrl) writeUrlParams({ id, q: "" });
+      return true;
+    }
+
+    function applyUrlState() {
+      const { id, q } = readUrlParams();
+      if (id) {
+        searchInput.value = "";
+        focusFeatureById(id, { updateUrl: false });
+        return;
+      }
+      if (q) {
+        searchInput.value = q;
+        applySearch(q, { updateUrl: false });
+        return;
+      }
+      searchInput.value = "";
+      clearSearchFilter();
+      if (searchIndex.length) {
+        searchMeta.textContent = `${searchIndex.length} indexed`;
+      }
+      searchClear.hidden = true;
+    }
 
     function applyTheme(theme) {
       const next = theme === "light" ? "light" : "dark";
@@ -881,7 +981,7 @@
       searchClear.hidden = true;
     }
 
-    function applySearch(rawQuery) {
+    function applySearch(rawQuery, { updateUrl = true } = {}) {
       const t0 = performance.now();
       const query = String(rawQuery || "").trim().toLowerCase();
       searchClear.hidden = !query;
@@ -895,6 +995,7 @@
         clearSearchFilter();
         const t1 = performance.now();
         searchMeta.textContent = `cleared · ${(t1 - t0).toFixed(2)} ms`;
+        if (updateUrl) writeUrlParams({ id: "", q: "" });
         return;
       }
 
@@ -952,6 +1053,7 @@
       const t1 = performance.now();
       searchMeta.textContent =
         `${matched}/${searchIndex.length} match${matched === 1 ? "" : "es"} · ${(t1 - t0).toFixed(2)} ms`;
+      if (updateUrl) writeUrlParams({ id: "", q: String(rawQuery || "").trim() });
     }
 
     function scheduleSearch() {
@@ -1070,6 +1172,7 @@
       const copyPayload = featureCopyText(feature);
       const card = document.createElement("article");
       card.className = "card" + (hasKids ? " has-kids" : "");
+      if (feature.id) card.dataset.featureId = String(feature.id);
       card.innerHTML = `
         <button type="button" class="card-copy" data-copy="${escapeHtml(copyPayload)}" title="Copy title and function names" aria-label="Copy title and function names">${COPY_ICON}</button>
         <div class="card-top">
@@ -1157,8 +1260,12 @@
       const n = countFeatures(roots);
       setCoverage(data);
       setStatus(`${n} capabilities loaded. Nested gates start closed — expand left → right.`);
-      if (searchInput.value.trim()) applySearch(searchInput.value);
-      else {
+      const urlState = readUrlParams();
+      if (urlState.id || urlState.q) {
+        applyUrlState();
+      } else if (searchInput.value.trim()) {
+        applySearch(searchInput.value);
+      } else {
         searchMeta.textContent = `${searchIndex.length} indexed`;
         searchClear.hidden = true;
       }
@@ -1199,6 +1306,14 @@
       searchInput.value = "";
       applySearch("");
       searchInput.focus();
+    });
+    window.addEventListener("popstate", () => {
+      if (syncingUrl) return;
+      applyUrlState();
+    });
+    window.addEventListener("hashchange", () => {
+      if (syncingUrl) return;
+      applyUrlState();
     });
     forestEl.addEventListener("click", (ev) => {
       const btn = ev.target.closest(".copy-path, .card-copy");
