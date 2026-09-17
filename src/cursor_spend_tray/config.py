@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shlex
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -190,6 +192,46 @@ class AppConfig(BaseModel):
         return cls.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def default_usage_reset_at() -> float:
+    """Placeholder reset stamp (day 18 at 04:00 local) until a real AUTO >0→0."""
+    now = datetime.now().astimezone()
+    return datetime(now.year, now.month, 18, 4, 0, tzinfo=now.tzinfo).timestamp()
+
+
+def _day_ordinal(day: int) -> str:
+    if 11 <= (day % 100) <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
+def format_usage_reset_label(ts: float) -> str:
+    """e.g. 'resets on the 18th at 04:00'."""
+    dt = datetime.fromtimestamp(ts).astimezone()
+    return f"resets on the {_day_ordinal(dt.day)} at {dt.strftime('%H:%M')}"
+
+
+def resolve_usage_reset_at(
+    *,
+    prev_cursor_pct: int | None,
+    new_cursor_pct: int | None,
+    prev_reset_at: float | None,
+    now: float | None = None,
+) -> float | None:
+    """Record reset time only the first time AUTO usage drops from >0 to 0%."""
+    if (
+        prev_cursor_pct is not None
+        and prev_cursor_pct > 0
+        and new_cursor_pct is not None
+        and new_cursor_pct == 0
+    ):
+        return time.time() if now is None else now
+    if prev_reset_at is not None:
+        return prev_reset_at
+    return default_usage_reset_at()
+
+
 class UsageSnapshot(BaseModel):
     cursor_models_pct: int | None = None
     other_models_pct: int | None = None
@@ -197,6 +239,8 @@ class UsageSnapshot(BaseModel):
     account_email: str | None = None
     subscription_level: str | None = None
     account_avatar_url: str | None = None
+    # Local clock when AUTO % first returned to 0 after being >0 (billing reset).
+    usage_reset_at: float | None = None
     fetched_at: float | None = None
     source: str = "none"
     error: str | None = None
@@ -209,8 +253,16 @@ class UsageSnapshot(BaseModel):
     def load(cls) -> UsageSnapshot:
         path = state_path()
         if not path.exists():
-            return cls()
+            snap = cls(usage_reset_at=default_usage_reset_at())
+            snap.save()
+            return snap
         try:
-            return cls.model_validate_json(path.read_text(encoding="utf-8"))
+            snap = cls.model_validate_json(path.read_text(encoding="utf-8"))
         except Exception:
-            return cls()
+            snap = cls(usage_reset_at=default_usage_reset_at())
+            snap.save()
+            return snap
+        if snap.usage_reset_at is None:
+            snap.usage_reset_at = default_usage_reset_at()
+            snap.save()
+        return snap

@@ -9,7 +9,7 @@ from .auth_detect import page_requires_login_from_extract
 from .bidi_client import BidiClient, BidiError
 from .browser import BrowserFamily
 from .cdp_client import CdpClient, CdpError
-from .config import SETTINGS_URL, AppConfig, UsageSnapshot
+from .config import SETTINGS_URL, AppConfig, UsageSnapshot, resolve_usage_reset_at
 from .usage_csv import associate_spend_pct, sync_usage_csvs
 
 log = logging.getLogger(__name__)
@@ -246,6 +246,7 @@ def _soft_skip_snapshot(prev: UsageSnapshot, *, source: str) -> UsageSnapshot:
     return UsageSnapshot(
         cursor_models_pct=prev.cursor_models_pct,
         other_models_pct=prev.other_models_pct,
+        usage_reset_at=prev.usage_reset_at,
         fetched_at=prev.fetched_at,
         source=keep_source,
         error=None,
@@ -385,6 +386,7 @@ class SpendingScraper:
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
+                    usage_reset_at=prev.usage_reset_at,
                     error=err,
                     fetched_at=time.time(),
                     source="unavailable",
@@ -433,6 +435,7 @@ class SpendingScraper:
                 snap = UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
+                    usage_reset_at=prev.usage_reset_at,
                     error=(
                         f"Cursor sign-in required in {browser.display_name}. "
                         "A sign-in window will open — complete any security check, "
@@ -458,6 +461,7 @@ class SpendingScraper:
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
+                    usage_reset_at=prev.usage_reset_at,
                     error="Could not parse spending percentages (page structure may have changed).",
                     fetched_at=time.time(),
                     source=source,
@@ -478,10 +482,18 @@ class SpendingScraper:
                     f"{account['subscription_level']!r}",
                     flush=True,
                 )
+            fetched_at = time.time()
+            usage_reset_at = resolve_usage_reset_at(
+                prev_cursor_pct=prev.cursor_models_pct,
+                new_cursor_pct=cursor_pct,
+                prev_reset_at=prev.usage_reset_at,
+                now=fetched_at,
+            )
             snap = UsageSnapshot(
                 cursor_models_pct=cursor_pct,
                 other_models_pct=other_pct,
-                fetched_at=time.time(),
+                usage_reset_at=usage_reset_at,
+                fetched_at=fetched_at,
                 source=source,
                 raw_hint=data.get("hint"),
                 **account,
@@ -489,7 +501,8 @@ class SpendingScraper:
             snap.save()
             print(
                 f"[scrape] OK saved cursor={snap.cursor_models_pct}% "
-                f"other={snap.other_models_pct}%",
+                f"other={snap.other_models_pct}% "
+                f"usage_reset_at={snap.usage_reset_at!r}",
                 flush=True,
             )
 
@@ -536,6 +549,7 @@ class SpendingScraper:
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
+                    usage_reset_at=prev.usage_reset_at,
                     fetched_at=time.time(),
                     source="unavailable",
                     error=(
@@ -549,6 +563,7 @@ class SpendingScraper:
             return UsageSnapshot(
                 cursor_models_pct=prev.cursor_models_pct,
                 other_models_pct=prev.other_models_pct,
+                usage_reset_at=prev.usage_reset_at,
                 fetched_at=time.time(),
                 source="error",
                 error=str(exc),

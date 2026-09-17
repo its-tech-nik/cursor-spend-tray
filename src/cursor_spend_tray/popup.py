@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 
 from .config import (
     UsageSnapshot,
+    format_usage_reset_label,
     load_popup_panel_order,
     save_popup_panel_order,
 )
@@ -2270,8 +2271,23 @@ class SpendPopup(QFrame):
         heading_font.setPointSize(12)
         heading_font.setWeight(QFont.Weight.DemiBold)
         self._heading.setFont(heading_font)
-        self._heading.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self._heading.setStyleSheet("color: #F2F2F2; background: transparent; border: none;")
+
+        self._reset_label = QLabel("")
+        reset_font = QFont()
+        reset_font.setPointSize(10)
+        self._reset_label.setFont(reset_font)
+        self._reset_label.setStyleSheet(
+            "color: #888888; background: transparent; border: none;"
+        )
+        self._reset_label.hide()
+
+        heading_row = QHBoxLayout()
+        heading_row.setContentsMargins(0, 0, 0, 0)
+        heading_row.setSpacing(6)
+        heading_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        heading_row.addWidget(self._heading)
+        heading_row.addWidget(self._reset_label)
 
         self.cursor_ring = UsageRing(
             "AUTO",
@@ -2293,7 +2309,7 @@ class SpendPopup(QFrame):
         card_layout = QVBoxLayout(self._card)
         card_layout.setContentsMargins(16, 16, 16, 16)
         card_layout.setSpacing(8)
-        card_layout.addWidget(self._heading)
+        card_layout.addLayout(heading_row)
         card_layout.addLayout(rings)
 
         self.browser_help = BrowserHelpBanner()
@@ -2449,6 +2465,14 @@ class SpendPopup(QFrame):
     def apply_snapshot(self, snap: UsageSnapshot) -> None:
         self.cursor_ring.set_percent(snap.cursor_models_pct)
         self.other_ring.set_percent(snap.other_models_pct)
+        if snap.usage_reset_at is not None:
+            self._reset_label.setText(
+                f"- {format_usage_reset_label(snap.usage_reset_at)}"
+            )
+            self._reset_label.show()
+        else:
+            self._reset_label.clear()
+            self._reset_label.hide()
         # Rescan local habits when Cursor usage updates (poll or Refresh).
         self.refresh_habits()
 
