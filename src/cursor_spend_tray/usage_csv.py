@@ -14,10 +14,17 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from datetime import time as time_of_day
 from pathlib import Path
 from typing import Any, Protocol
 
-from .billing import period_end_for, period_label, period_start_for, short_period_label
+from .billing import (
+    period_end_for,
+    period_label,
+    period_ms_range,
+    period_start_for,
+    short_period_label,
+)
 from .config import SUBSCRIPTION_RENEWAL_DAY, data_dir
 
 log = logging.getLogger(__name__)
@@ -25,7 +32,12 @@ log = logging.getLogger(__name__)
 # First billing period shown on the usage dashboard the user linked.
 USAGE_HISTORY_START = date(2025, 9, 19)
 EXPORT_URL = "https://cursor.com/api/dashboard/export-usage-events-csv"
-CACHE_VERSION = 1
+CACHE_VERSION = 2
+
+
+def _renewal_time_key(renewal_time: time_of_day | None) -> str:
+    tod = renewal_time or time_of_day(0, 0)
+    return tod.strftime("%H:%M:%S")
 
 
 class _EvalClient(Protocol):
@@ -79,49 +91,41 @@ def _period_csv_path(start: date, end: date) -> Path:
     return usage_csv_dir() / f"{start.isoformat()}_to_{end.isoformat()}.csv"
 
 
-def _period_ms_range(start: date) -> tuple[int, int]:
-    end = period_end_for(start)
-    start_ms = int(
-        datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp()
-        * 1000
+def _period_ms_range(
+    start: date,
+    *,
+    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
+) -> tuple[int, int]:
+    return period_ms_range(
+        start, renewal_day=renewal_day, renewal_time=renewal_time
     )
-    end_ms = int(
-        datetime(
-            end.year,
-            end.month,
-            end.day,
-            23,
-            59,
-            59,
-            999000,
-            tzinfo=timezone.utc,
-        ).timestamp()
-        * 1000
-    )
-    return start_ms, end_ms
 
 
 def _iter_period_starts(
     *,
     history_start: date = USAGE_HISTORY_START,
-    until: date | None = None,
+    until: datetime | date | None = None,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
 ) -> list[date]:
     """Billing-period starts from history_start through the period containing `until`."""
-    end_day = until or datetime.now(timezone.utc).astimezone().date()
-    last_start = period_start_for(end_day, renewal_day=renewal_day)
-    first = period_start_for(history_start, renewal_day=renewal_day)
+    end_at = until or datetime.now(timezone.utc).astimezone()
+    last_start = period_start_for(
+        end_at, renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    first = period_start_for(
+        history_start, renewal_day=renewal_day, renewal_time=renewal_time
+    )
     out: list[date] = []
     cur = first
+    day = max(1, min(28, renewal_day))
     while cur <= last_start:
         out.append(cur)
-        # Advance one billing month
         if cur.month == 12:
             nxt = date(cur.year + 1, 1, cur.day)
         else:
             nxt = date(cur.year, cur.month + 1, cur.day)
-        # Keep renewal day clamped (period_start_for already uses 1–28)
-        day = max(1, min(28, renewal_day))
         cur = date(nxt.year, nxt.month, day)
     return out
 
@@ -179,7 +183,12 @@ def parse_usage_csv(text: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _row_period(date_raw: str, *, renewal_day: int) -> date | None:
+def _row_period(
+    date_raw: str,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None = None,
+) -> date | None:
     text = date_raw.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
@@ -191,21 +200,30 @@ def _row_period(date_raw: str, *, renewal_day: int) -> date | None:
             d = date.fromisoformat(text[:10])
         except ValueError:
             return None
-        return period_start_for(d, renewal_day=renewal_day)
+        return period_start_for(
+            d, renewal_day=renewal_day, renewal_time=renewal_time
+        )
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return period_start_for(dt, renewal_day=renewal_day)
+    return period_start_for(
+        dt, renewal_day=renewal_day, renewal_time=renewal_time
+    )
 
 
 def sum_tokens_by_period(
     rows: list[dict[str, Any]],
     *,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
 ) -> dict[date, tuple[int, int]]:
     """Map period_start → (total_tokens, event_count)."""
     totals: dict[date, list[int]] = {}
     for row in rows:
-        start = _row_period(str(row.get("date") or ""), renewal_day=renewal_day)
+        start = _row_period(
+            str(row.get("date") or ""),
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+        )
         if start is None:
             continue
         bucket = totals.setdefault(start, [0, 0])
@@ -239,12 +257,15 @@ def associate_spend_pct(
     total_tokens: int | None = None,
     when: datetime | date | None = None,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
 ) -> None:
     """Record scraped AUTO/API % against the current billing period (and tokens if known)."""
     if cursor_models_pct is None and other_models_pct is None:
         return
-    now = when or datetime.now(timezone.utc)
-    start = period_start_for(now, renewal_day=renewal_day)
+    now = when or datetime.now(timezone.utc).astimezone()
+    start = period_start_for(
+        now, renewal_day=renewal_day, renewal_time=renewal_time
+    )
     key = start.isoformat()
     data = _load_assoc()
     entry = dict(data.get(key) or {})
@@ -262,7 +283,11 @@ def associate_spend_pct(
         log.debug("Could not save spend%% association: %s", exc)
 
 
-def _load_cached_totals() -> dict[str, dict[str, Any]]:
+def _load_cached_totals(
+    *,
+    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
+) -> dict[str, dict[str, Any]]:
     path = _totals_path()
     if not path.is_file():
         return {}
@@ -272,21 +297,55 @@ def _load_cached_totals() -> dict[str, dict[str, Any]]:
         return {}
     if raw.get("version") != CACHE_VERSION:
         return {}
+    if raw.get("renewal_day") != renewal_day:
+        return {}
+    if raw.get("renewal_time") != _renewal_time_key(renewal_time):
+        return {}
     periods = raw.get("periods")
     if not isinstance(periods, dict):
         return {}
     return {str(k): v for k, v in periods.items() if isinstance(v, dict)}
 
 
-def _save_cached_totals(periods: dict[str, dict[str, Any]]) -> None:
+def _save_cached_totals(
+    periods: dict[str, dict[str, Any]],
+    *,
+    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
+) -> None:
     payload = {
         "version": CACHE_VERSION,
-        "renewal_day": SUBSCRIPTION_RENEWAL_DAY,
+        "renewal_day": renewal_day,
+        "renewal_time": _renewal_time_key(renewal_time),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "periods": periods,
     }
     usage_csv_dir()
     _totals_path().write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _aggregate_all_csvs(
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None,
+) -> dict[date, tuple[int, int]]:
+    """Sum tokens across every on-disk period CSV with time-aware bucketing."""
+    totals: dict[date, list[int]] = {}
+    csv_dir = usage_csv_dir()
+    for path in sorted(csv_dir.glob("*_to_*.csv")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rows = parse_usage_csv(text)
+        by_period = sum_tokens_by_period(
+            rows, renewal_day=renewal_day, renewal_time=renewal_time
+        )
+        for start, (tok, cnt) in by_period.items():
+            bucket = totals.setdefault(start, [0, 0])
+            bucket[0] += tok
+            bucket[1] += cnt
+    return {k: (v[0], v[1]) for k, v in totals.items()}
 
 
 FETCH_JS_TEMPLATE = """
@@ -322,10 +381,12 @@ async def fetch_period_csv(
     start: date,
     *,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
 ) -> tuple[str, int]:
     """Download one billing period CSV via page-context fetch. Returns (text, http_status)."""
-    del renewal_day  # range uses period_end_for with default renewal
-    start_ms, end_ms = _period_ms_range(start)
+    start_ms, end_ms = _period_ms_range(
+        start, renewal_day=renewal_day, renewal_time=renewal_time
+    )
     url = f"{EXPORT_URL}?startDate={start_ms}&endDate={end_ms}&strategy=tokens"
     expr = FETCH_JS_TEMPLATE.format(url=url)
     result = await client.evaluate(handle, expr)
@@ -343,48 +404,45 @@ async def sync_usage_csvs(
     handle: str,
     *,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
     force_current: bool = True,
 ) -> UsageCsvPreview:
     """Ensure period CSVs exist from USAGE_HISTORY_START through now; refresh current period."""
-    starts = _iter_period_starts(renewal_day=renewal_day)
+    starts = _iter_period_starts(
+        renewal_day=renewal_day, renewal_time=renewal_time
+    )
     if not starts:
         return UsageCsvPreview.unavailable("No billing periods to sync")
 
-    today = datetime.now(timezone.utc).astimezone().date()
-    current_start = period_start_for(today, renewal_day=renewal_day)
-    cached = _load_cached_totals()
+    now = datetime.now(timezone.utc).astimezone()
+    current_start = period_start_for(
+        now, renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    cached = _load_cached_totals(
+        renewal_day=renewal_day, renewal_time=renewal_time
+    )
     errors: list[str] = []
     downloaded = 0
 
     for start in starts:
-        end = period_end_for(start, renewal_day=renewal_day)
+        end = period_end_for(
+            start, renewal_day=renewal_day, renewal_time=renewal_time
+        )
         path = _period_csv_path(start, end)
         is_current = start == current_start
         need_fetch = is_current and force_current
         if not need_fetch and path.is_file() and path.stat().st_size > 32:
-            # Re-aggregate from disk if cache missing this period
-            if start.isoformat() not in cached:
-                try:
-                    text = path.read_text(encoding="utf-8", errors="replace")
-                    rows = parse_usage_csv(text)
-                    by_period = sum_tokens_by_period(rows, renewal_day=renewal_day)
-                    tok, cnt = by_period.get(start, (0, 0))
-                    cached[start.isoformat()] = {
-                        "label": period_label(start, renewal_day=renewal_day),
-                        "total_tokens": tok,
-                        "event_count": cnt,
-                        "csv": path.name,
-                    }
-                except OSError as exc:
-                    log.debug("Could not re-read %s: %s", path, exc)
-                    need_fetch = True
             continue
 
         if not need_fetch and start.isoformat() in cached and path.is_file():
             continue
 
         text, status = await fetch_period_csv(
-            client, handle, start, renewal_day=renewal_day
+            client,
+            handle,
+            start,
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
         )
         if status == 401 or status == 403:
             return UsageCsvPreview.unavailable(
@@ -419,33 +477,52 @@ async def sync_usage_csvs(
             continue
 
         downloaded += 1
-        rows = parse_usage_csv(text)
-        by_period = sum_tokens_by_period(rows, renewal_day=renewal_day)
-        tok, cnt = by_period.get(start, (0, 0))
-        # Rows might spill slightly; prefer sum of rows whose period matches
-        if start not in by_period and rows:
-            # Sum only tokens that fall in this window by date filter
-            tok = sum(int(r.get("total_tokens") or 0) for r in rows)
-            cnt = len(rows)
-        cached[start.isoformat()] = {
-            "label": period_label(start, renewal_day=renewal_day),
-            "total_tokens": tok,
-            "event_count": cnt,
-            "csv": path.name,
-            "fetched_at": time.time(),
-        }
         print(
-            f"[usage-csv] {start.isoformat()}→{end.isoformat()} "
-            f"tokens={tok:,} events={cnt} file={path.name}",
+            f"[usage-csv] fetched {start.isoformat()}→{end.isoformat()} "
+            f"file={path.name}",
             flush=True,
         )
 
+    # Always re-bucket every CSV with the renewal clock so spillover across
+    # midnight-day files lands in the correct billing period.
+    by_period = _aggregate_all_csvs(
+        renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    cached = {}
+    for start in starts:
+        end = period_end_for(
+            start, renewal_day=renewal_day, renewal_time=renewal_time
+        )
+        path = _period_csv_path(start, end)
+        tok, cnt = by_period.get(start, (0, 0))
+        if not tok and not cnt and not path.is_file() and start != current_start:
+            continue
+        cached[start.isoformat()] = {
+            "label": period_label(
+                start, renewal_day=renewal_day, renewal_time=renewal_time
+            ),
+            "total_tokens": tok,
+            "event_count": cnt,
+            "csv": path.name if path.is_file() else "",
+            "fetched_at": time.time(),
+        }
+        if start == current_start:
+            print(
+                f"[usage-csv] {start.isoformat()}→{end.isoformat()} "
+                f"tokens={tok:,} events={cnt}",
+                flush=True,
+            )
+
     try:
-        _save_cached_totals(cached)
+        _save_cached_totals(
+            cached, renewal_day=renewal_day, renewal_time=renewal_time
+        )
     except OSError as exc:
         log.debug("Could not save period totals: %s", exc)
 
-    preview = build_usage_preview(renewal_day=renewal_day)
+    preview = build_usage_preview(
+        renewal_day=renewal_day, renewal_time=renewal_time
+    )
     if errors and not preview.available:
         return UsageCsvPreview.unavailable("; ".join(errors[:3]))
     if downloaded:
@@ -456,64 +533,43 @@ async def sync_usage_csvs(
 def build_usage_preview(
     *,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
 ) -> UsageCsvPreview:
     """Build chart-ready period buckets from on-disk CSVs / totals cache + spend % assoc."""
-    cached = _load_cached_totals()
     assoc = _load_assoc()
-    starts = _iter_period_starts(renewal_day=renewal_day)
-
-    # Also scan any CSV files we might have beyond the iterator (re-aggregate)
+    starts = _iter_period_starts(
+        renewal_day=renewal_day, renewal_time=renewal_time
+    )
     csv_dir = usage_csv_dir()
-    for path in sorted(csv_dir.glob("*_to_*.csv")):
-        stem = path.stem  # YYYY-MM-DD_to_YYYY-MM-DD
-        try:
-            start_s = stem.split("_to_")[0]
-            start = date.fromisoformat(start_s)
-        except (ValueError, IndexError):
-            continue
-        key = start.isoformat()
-        if key in cached:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        rows = parse_usage_csv(text)
-        by_period = sum_tokens_by_period(rows, renewal_day=renewal_day)
-        tok, cnt = by_period.get(start, (0, len(rows)))
-        if start not in by_period:
-            tok = sum(int(r.get("total_tokens") or 0) for r in rows)
-            cnt = len(rows)
-        cached[key] = {
-            "label": period_label(start, renewal_day=renewal_day),
-            "total_tokens": tok,
-            "event_count": cnt,
-            "csv": path.name,
-        }
+    by_period = _aggregate_all_csvs(
+        renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    now = datetime.now(timezone.utc).astimezone()
+    current_start = period_start_for(
+        now, renewal_day=renewal_day, renewal_time=renewal_time
+    )
 
     periods: list[UsagePeriodBucket] = []
     for start in starts:
         key = start.isoformat()
-        meta = cached.get(key) or {}
         a = assoc.get(key) or {}
-        tokens = int(meta.get("total_tokens") or a.get("total_tokens") or 0)
-        events = int(meta.get("event_count") or 0)
+        tok, events = by_period.get(start, (0, 0))
+        tokens = int(tok or a.get("total_tokens") or 0)
         cursor_pct = a.get("cursor_models_pct")
         other_pct = a.get("other_models_pct")
-        # Include period if we have CSV/cache, associations, or it is the current window.
         has_file = _period_csv_path(
-            start, period_end_for(start, renewal_day=renewal_day)
+            start,
+            period_end_for(
+                start, renewal_day=renewal_day, renewal_time=renewal_time
+            ),
         ).is_file()
-        is_current = start == period_start_for(
-            datetime.now(timezone.utc).astimezone().date(),
-            renewal_day=renewal_day,
-        )
-        if not meta and not a and not has_file and not is_current:
+        is_current = start == current_start
+        if not tokens and not events and not a and not has_file and not is_current:
             continue
         periods.append(
             UsagePeriodBucket(
-                label=str(
-                    meta.get("label") or period_label(start, renewal_day=renewal_day)
+                label=period_label(
+                    start, renewal_day=renewal_day, renewal_time=renewal_time
                 ),
                 period_start=key,
                 total_tokens=tokens,
@@ -523,12 +579,31 @@ def build_usage_preview(
             )
         )
 
-    if not periods or not any(p.total_tokens or p.event_count or p.cursor_models_pct is not None for p in periods):
+    if not periods or not any(
+        p.total_tokens or p.event_count or p.cursor_models_pct is not None
+        for p in periods
+    ):
         return UsageCsvPreview(
             available=False,
             error_message="No usage CSV data yet — refresh while signed in",
             csv_dir=str(csv_dir),
         )
+
+    # Refresh on-disk cache so tray restarts stay aligned with renewal clock.
+    try:
+        cached = {
+            p.period_start: {
+                "label": p.label,
+                "total_tokens": p.total_tokens,
+                "event_count": p.event_count,
+            }
+            for p in periods
+        }
+        _save_cached_totals(
+            cached, renewal_day=renewal_day, renewal_time=renewal_time
+        )
+    except OSError as exc:
+        log.debug("Could not save period totals: %s", exc)
 
     total = sum(p.total_tokens for p in periods)
     latest = periods[-1]
@@ -554,10 +629,13 @@ def build_usage_preview(
 def load_usage_preview(
     *,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
 ) -> UsageCsvPreview:
     """Read-only preview from disk (no network)."""
     try:
-        return build_usage_preview(renewal_day=renewal_day)
+        return build_usage_preview(
+            renewal_day=renewal_day, renewal_time=renewal_time
+        )
     except Exception as exc:  # noqa: BLE001
         log.debug("usage preview failed: %s", exc)
         return UsageCsvPreview.unavailable(str(exc))

@@ -9,7 +9,7 @@ from .auth_detect import page_requires_login_from_extract
 from .bidi_client import BidiClient, BidiError
 from .browser import BrowserFamily
 from .cdp_client import CdpClient, CdpError
-from .config import SETTINGS_URL, AppConfig, UsageSnapshot, resolve_usage_reset_at
+from .config import SETTINGS_URL, AppConfig, UsageSnapshot, renewal_from_usage_reset, resolve_usage_reset_at
 from .usage_csv import associate_spend_pct, sync_usage_csvs
 
 log = logging.getLogger(__name__)
@@ -508,7 +508,13 @@ class SpendingScraper:
 
             # Usage-events CSV (same signed-in session) → billing-period token totals.
             try:
-                usage_preview = await sync_usage_csvs(client, handle)
+                renewal_day, renewal_time = renewal_from_usage_reset(usage_reset_at)
+                usage_preview = await sync_usage_csvs(
+                    client,
+                    handle,
+                    renewal_day=renewal_day,
+                    renewal_time=renewal_time,
+                )
                 current_tokens = None
                 if usage_preview.available and usage_preview.periods:
                     current_tokens = usage_preview.periods[-1].total_tokens
@@ -516,6 +522,8 @@ class SpendingScraper:
                     cursor_models_pct=cursor_pct,
                     other_models_pct=other_pct,
                     total_tokens=current_tokens,
+                    renewal_day=renewal_day,
+                    renewal_time=renewal_time,
                 )
                 if usage_preview.available:
                     print(

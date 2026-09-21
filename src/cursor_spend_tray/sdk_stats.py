@@ -12,7 +12,7 @@ import sqlite3
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 from .billing import period_label, period_start_for, short_period_label
@@ -378,13 +378,18 @@ def _history_windows_by_period(
     all_runs: list[RunRow],
     *,
     renewal_day: int,
+    renewal_time: time | None = None,
 ) -> list[tuple[date, list[RunRow]]]:
     """Group runs into subscription billing periods; oldest → newest."""
     if not all_runs:
         return []
     groups: dict[date, list[RunRow]] = {}
     for row in all_runs:
-        start = period_start_for(_parse_ts(row[3]), renewal_day=renewal_day)
+        start = period_start_for(
+            _parse_ts(row[3]),
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+        )
         groups.setdefault(start, []).append(row)
     out: list[tuple[date, list[RunRow]]] = []
     for start in sorted(groups):
@@ -398,6 +403,7 @@ def collect_habits_preview(
     projects_root: Path | None = None,
     recent_runs: int = DEFAULT_RECENT_RUNS,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time | None = None,
 ) -> SdkHabitsPreview:
     """Aggregate a scannable preview plus per-billing-period history."""
     del recent_runs  # current period defines the snapshot window
@@ -425,11 +431,15 @@ def collect_habits_preview(
             lines=("No recent SDK runs found",),
         )
 
-    windows = _history_windows_by_period(all_runs, renewal_day=renewal_day)
+    windows = _history_windows_by_period(
+        all_runs, renewal_day=renewal_day, renewal_time=renewal_time
+    )
     history: list[SdkHabitsBatch] = []
     latest_exits: Counter[int] = Counter()
     for start, window in windows:
-        label = period_label(start, renewal_day=renewal_day)
+        label = period_label(
+            start, renewal_day=renewal_day, renewal_time=renewal_time
+        )
         batch, exits = _aggregate_batch(
             window, label=label, period_start=start.isoformat()
         )

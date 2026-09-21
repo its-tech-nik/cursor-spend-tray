@@ -1,7 +1,7 @@
 """Longer-range composer/tool signals from Cursor state.vscdb.
 
 Read-only. Complements sdk-agent-store habits with chat/composer history.
-Buckets use the subscription renewal day (default 19th), not calendar months.
+Buckets use the subscription renewal day + clock (from AUTO usage reset).
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from datetime import time as time_of_day
 from pathlib import Path
 
 from .billing import period_label, period_start_for
@@ -112,6 +113,7 @@ def _period_from_ms(
     ms: int | float | None,
     *,
     renewal_day: int,
+    renewal_time: time_of_day | None = None,
 ) -> date | None:
     if ms is None:
         return None
@@ -119,10 +121,17 @@ def _period_from_ms(
         dt = datetime.fromtimestamp(float(ms) / 1000.0, tz=timezone.utc)
     except (OverflowError, OSError, ValueError):
         return None
-    return period_start_for(dt, renewal_day=renewal_day)
+    return period_start_for(
+        dt, renewal_day=renewal_day, renewal_time=renewal_time
+    )
 
 
-def _period_from_iso(value: str | None, *, renewal_day: int) -> date | None:
+def _period_from_iso(
+    value: str | None,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None = None,
+) -> date | None:
     if not value or not isinstance(value, str):
         return None
     text = value.strip()
@@ -134,16 +143,25 @@ def _period_from_iso(value: str | None, *, renewal_day: int) -> date | None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return period_start_for(dt, renewal_day=renewal_day)
+    return period_start_for(
+        dt, renewal_day=renewal_day, renewal_time=renewal_time
+    )
 
 
-def _period_from_day_key(day_key: str, *, renewal_day: int) -> date | None:
+def _period_from_day_key(
+    day_key: str,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None = None,
+) -> date | None:
     """Parse YYYY-MM-DD from aiCodeTracking keys."""
     try:
         d = date.fromisoformat(day_key[:10])
     except ValueError:
         return None
-    return period_start_for(d, renewal_day=renewal_day)
+    return period_start_for(
+        d, renewal_day=renewal_day, renewal_time=renewal_time
+    )
 
 
 def _pct(num: int, den: int) -> int | None:
@@ -168,7 +186,17 @@ def _insight(periods: list[VscdbPeriodBucket]) -> str:
     return f"{latest.label}: " + " · ".join(parts)
 
 
-def _load_cache(db_path: Path) -> VscdbHabitsPreview | None:
+def _renewal_time_key(renewal_time: time_of_day | None) -> str:
+    tod = renewal_time or time_of_day(0, 0)
+    return tod.strftime("%H:%M:%S")
+
+
+def _load_cache(
+    db_path: Path,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None,
+) -> VscdbHabitsPreview | None:
     path = _cache_path()
     if not path.is_file():
         return None
@@ -178,7 +206,9 @@ def _load_cache(db_path: Path) -> VscdbHabitsPreview | None:
         return None
     if payload.get("version") != CACHE_VERSION:
         return None
-    if payload.get("renewal_day") != SUBSCRIPTION_RENEWAL_DAY:
+    if payload.get("renewal_day") != renewal_day:
+        return None
+    if payload.get("renewal_time") != _renewal_time_key(renewal_time):
         return None
     try:
         mtime_ns = db_path.stat().st_mtime_ns
@@ -204,12 +234,19 @@ def _load_cache(db_path: Path) -> VscdbHabitsPreview | None:
         return None
 
 
-def _save_cache(db_path: Path, preview: VscdbHabitsPreview) -> None:
+def _save_cache(
+    db_path: Path,
+    preview: VscdbHabitsPreview,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None,
+) -> None:
     try:
         data_dir().mkdir(parents=True, exist_ok=True)
         payload = {
             "version": CACHE_VERSION,
-            "renewal_day": SUBSCRIPTION_RENEWAL_DAY,
+            "renewal_day": renewal_day,
+            "renewal_time": _renewal_time_key(renewal_time),
             "db_mtime_ns": db_path.stat().st_mtime_ns,
             "earliest": preview.earliest,
             "latest": preview.latest,
@@ -227,6 +264,7 @@ def collect_vscdb_habits_preview(
     db_path: Path | None = None,
     use_cache: bool = True,
     renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_time: time_of_day | None = None,
 ) -> VscdbHabitsPreview:
     """Aggregate billing-period composer/tool signals from state.vscdb."""
     t0 = time.perf_counter()
@@ -238,8 +276,10 @@ def collect_vscdb_habits_preview(
     if not path.is_file():
         return VscdbHabitsPreview.unavailable("No state.vscdb found")
 
-    if use_cache and renewal_day == SUBSCRIPTION_RENEWAL_DAY:
-        cached = _load_cache(path)
+    if use_cache:
+        cached = _load_cache(
+            path, renewal_day=renewal_day, renewal_time=renewal_time
+        )
         if cached is not None:
             return cached
 
@@ -252,7 +292,11 @@ def collect_vscdb_habits_preview(
         for composer_id, created_at in con.execute(
             "SELECT composerId, createdAt FROM composerHeaders WHERE composerId IS NOT NULL"
         ):
-            start = _period_from_ms(created_at, renewal_day=renewal_day)
+            start = _period_from_ms(
+                created_at,
+                renewal_day=renewal_day,
+                renewal_time=renewal_time,
+            )
             if composer_id and start is not None:
                 composer_period[str(composer_id)] = start
     except sqlite3.Error as exc:
@@ -277,6 +321,7 @@ def collect_vscdb_habits_preview(
                 start = _period_from_iso(
                     created if isinstance(created, str) else None,
                     renewal_day=renewal_day,
+                    renewal_time=renewal_time,
                 )
             if start is None:
                 continue
@@ -339,7 +384,9 @@ def collect_vscdb_habits_preview(
         )
         for key, value in rows:
             day_key = str(key).rsplit(".", 1)[-1]
-            start = _period_from_day_key(day_key, renewal_day=renewal_day)
+            start = _period_from_day_key(
+                day_key, renewal_day=renewal_day, renewal_time=renewal_time
+            )
             if start is None:
                 continue
             obj = _loads(value)
@@ -370,7 +417,9 @@ def collect_vscdb_habits_preview(
             accept = min(accept, 100)
         periods.append(
             VscdbPeriodBucket(
-                label=period_label(start, renewal_day=renewal_day),
+                label=period_label(
+                    start, renewal_day=renewal_day, renewal_time=renewal_time
+                ),
                 period_start=start.isoformat(),
                 composers=b["composers"] or header_volume.get(start, 0),
                 completed=completed,
@@ -409,6 +458,7 @@ def collect_vscdb_habits_preview(
         cache_hit=False,
         elapsed_ms=int((time.perf_counter() - t0) * 1000),
     )
-    if renewal_day == SUBSCRIPTION_RENEWAL_DAY:
-        _save_cache(path, preview)
+    _save_cache(
+        path, preview, renewal_day=renewal_day, renewal_time=renewal_time
+    )
     return preview

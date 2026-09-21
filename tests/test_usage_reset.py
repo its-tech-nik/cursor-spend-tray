@@ -135,10 +135,10 @@ class ResolveUsageResetAtTests(unittest.TestCase):
 
 
 class FormatUsageResetLabelTests(unittest.TestCase):
-    def test_seed_placeholder_reads_eighteenth_at_0400(self) -> None:
+    def test_seed_placeholder_reads_renewal_day_at_midnight(self) -> None:
         self.assertEqual(
             format_usage_reset_label(default_usage_reset_at()),
-            "resets on the 18th at 04:00",
+            "resets on the 19th at 00:00",
         )
 
     def test_day_ordinals(self) -> None:

@@ -4,6 +4,7 @@ import json
 import shlex
 import time
 from datetime import datetime
+from datetime import time as time_of_day
 from pathlib import Path
 from typing import Literal
 
@@ -33,7 +34,7 @@ LOGIN_URL = SPENDING_URL
 POLL_INTERVAL_MINUTES: tuple[int, ...] = (1, 2, 4, 8, 16)
 DEFAULT_POLL_SECONDS = 8 * 60
 DEFAULT_BIDI_PORT = 9222
-# Billing-cycle day for habit history charts. Temporary until scraped from spending.
+# Billing-cycle day fallback when no AUTO usage-reset stamp is known yet.
 SUBSCRIPTION_RENEWAL_DAY = 19
 
 
@@ -193,9 +194,27 @@ class AppConfig(BaseModel):
 
 
 def default_usage_reset_at() -> float:
-    """Placeholder reset stamp (day 18 at 04:00 local) until a real AUTO >0→0."""
+    """Placeholder reset stamp (renewal day at midnight local) until a real AUTO >0→0."""
     now = datetime.now().astimezone()
-    return datetime(now.year, now.month, 18, 4, 0, tzinfo=now.tzinfo).timestamp()
+    return datetime(
+        now.year,
+        now.month,
+        SUBSCRIPTION_RENEWAL_DAY,
+        0,
+        0,
+        tzinfo=now.tzinfo,
+    ).timestamp()
+
+
+def renewal_from_usage_reset(
+    usage_reset_at: float | None,
+) -> tuple[int, time_of_day]:
+    """Billing-cycle day + local clock derived from the AUTO reset stamp."""
+    if usage_reset_at is None:
+        return SUBSCRIPTION_RENEWAL_DAY, time_of_day(0, 0)
+    dt = datetime.fromtimestamp(usage_reset_at).astimezone()
+    day = max(1, min(28, dt.day))
+    return day, time_of_day(dt.hour, dt.minute, dt.second)
 
 
 def _day_ordinal(day: int) -> str:
@@ -207,7 +226,7 @@ def _day_ordinal(day: int) -> str:
 
 
 def format_usage_reset_label(ts: float) -> str:
-    """e.g. 'resets on the 18th at 04:00'."""
+    """e.g. 'resets on the 19th at 20:12'."""
     dt = datetime.fromtimestamp(ts).astimezone()
     return f"resets on the {_day_ordinal(dt.day)} at {dt.strftime('%H:%M')}"
 

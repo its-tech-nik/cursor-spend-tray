@@ -41,6 +41,7 @@ from .config import (
     UsageSnapshot,
     format_usage_reset_label,
     load_popup_panel_order,
+    renewal_from_usage_reset,
     save_popup_panel_order,
 )
 from .sdk_stats import SdkHabitsBatch, SdkHabitsPreview, collect_habits_preview
@@ -2351,8 +2352,13 @@ class SpendPopup(QFrame):
 
     def refresh_habits(self) -> None:
         """Reload local SDK + state.vscdb + usage-CSV habit stats (soft-fails)."""
+        renewal_day, renewal_time = renewal_from_usage_reset(
+            UsageSnapshot.load().usage_reset_at
+        )
         try:
-            sdk = collect_habits_preview()
+            sdk = collect_habits_preview(
+                renewal_day=renewal_day, renewal_time=renewal_time
+            )
         except Exception:  # noqa: BLE001 — popup must stay usable
             sdk = SdkHabitsPreview.unavailable("Could not read local SDK stats")
         if _SHOW_AGENT_HABITS_PANEL:
@@ -2360,11 +2366,15 @@ class SpendPopup(QFrame):
         else:
             self._habits_panel.hide()
         try:
-            vscdb = collect_vscdb_habits_preview()
+            vscdb = collect_vscdb_habits_preview(
+                renewal_day=renewal_day, renewal_time=renewal_time
+            )
         except Exception:  # noqa: BLE001
             vscdb = VscdbHabitsPreview.unavailable("Could not read state.vscdb")
         try:
-            usage = load_usage_preview()
+            usage = load_usage_preview(
+                renewal_day=renewal_day, renewal_time=renewal_time
+            )
         except Exception:  # noqa: BLE001
             usage = UsageCsvPreview.unavailable("Could not read usage CSV totals")
         self.composer_history.apply_preview(vscdb, usage, sdk)
