@@ -246,12 +246,11 @@ def _soft_skip_snapshot(prev: UsageSnapshot, *, source: str) -> UsageSnapshot:
     return UsageSnapshot(
         cursor_models_pct=prev.cursor_models_pct,
         other_models_pct=prev.other_models_pct,
-        usage_reset_at=prev.usage_reset_at,
-        usage_reset_auto_discover=prev.usage_reset_auto_discover,
         fetched_at=prev.fetched_at,
         source=keep_source,
         error=None,
         raw_hint=prev.raw_hint,
+        **prev.reset_stamp_fields(),
         **_account_fields(prev),
     )
 
@@ -387,12 +386,11 @@ class SpendingScraper:
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
-                    usage_reset_at=prev.usage_reset_at,
-                    usage_reset_auto_discover=prev.usage_reset_auto_discover,
                     error=err,
                     fetched_at=time.time(),
                     source="unavailable",
                     raw_hint=prev.raw_hint,
+                    **prev.reset_stamp_fields(),
                     **_account_fields(prev),
                 )
             await client.connect()
@@ -437,8 +435,6 @@ class SpendingScraper:
                 snap = UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
-                    usage_reset_at=prev.usage_reset_at,
-                    usage_reset_auto_discover=prev.usage_reset_auto_discover,
                     error=(
                         f"Cursor sign-in required in {browser.display_name}. "
                         "A sign-in window will open — complete any security check, "
@@ -447,6 +443,7 @@ class SpendingScraper:
                     fetched_at=time.time(),
                     source="logged_out",
                     raw_hint=data.get("hint") or prev.raw_hint,
+                    **prev.reset_stamp_fields(),
                     **_cleared_account_fields(),
                 )
                 snap.save()
@@ -464,12 +461,11 @@ class SpendingScraper:
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
-                    usage_reset_at=prev.usage_reset_at,
-                    usage_reset_auto_discover=prev.usage_reset_auto_discover,
                     error="Could not parse spending percentages (page structure may have changed).",
                     fetched_at=time.time(),
                     source=source,
                     raw_hint=data.get("hint") or prev.raw_hint,
+                    **prev.reset_stamp_fields(),
                     **_account_fields(prev),
                 )
 
@@ -487,17 +483,18 @@ class SpendingScraper:
                     flush=True,
                 )
             fetched_at = time.time()
-            usage_reset_at = resolve_usage_reset_at(
+            usage_reset_at_auto = resolve_usage_reset_at(
                 prev_cursor_pct=prev.cursor_models_pct,
                 new_cursor_pct=cursor_pct,
-                prev_reset_at=prev.usage_reset_at,
+                prev_reset_at=prev.usage_reset_at_auto,
                 auto_discover=prev.usage_reset_auto_discover,
                 now=fetched_at,
             )
             snap = UsageSnapshot(
                 cursor_models_pct=cursor_pct,
                 other_models_pct=other_pct,
-                usage_reset_at=usage_reset_at,
+                usage_reset_at_auto=usage_reset_at_auto,
+                usage_reset_at_manual=prev.usage_reset_at_manual,
                 usage_reset_auto_discover=prev.usage_reset_auto_discover,
                 fetched_at=fetched_at,
                 source=source,
@@ -508,14 +505,18 @@ class SpendingScraper:
             print(
                 f"[scrape] OK saved cursor={snap.cursor_models_pct}% "
                 f"other={snap.other_models_pct}% "
-                f"usage_reset_at={snap.usage_reset_at!r} "
+                f"usage_reset_at={snap.effective_usage_reset_at()!r} "
+                f"auto={snap.usage_reset_at_auto!r} "
+                f"manual={snap.usage_reset_at_manual!r} "
                 f"auto_discover={snap.usage_reset_auto_discover}",
                 flush=True,
             )
 
             # Usage-events CSV (same signed-in session) → billing-period token totals.
             try:
-                renewal_day, renewal_time = renewal_from_usage_reset(usage_reset_at)
+                renewal_day, renewal_time = renewal_from_usage_reset(
+                    snap.effective_usage_reset_at()
+                )
                 usage_preview = await sync_usage_csvs(
                     client,
                     handle,
@@ -564,8 +565,6 @@ class SpendingScraper:
                 return UsageSnapshot(
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
-                    usage_reset_at=prev.usage_reset_at,
-                    usage_reset_auto_discover=prev.usage_reset_auto_discover,
                     fetched_at=time.time(),
                     source="unavailable",
                     error=(
@@ -573,18 +572,18 @@ class SpendingScraper:
                         "with remote debugging to clear it."
                     ),
                     raw_hint=prev.raw_hint,
+                    **prev.reset_stamp_fields(),
                     **_account_fields(prev),
                 )
             log.exception("Scrape failed")
             return UsageSnapshot(
                 cursor_models_pct=prev.cursor_models_pct,
                 other_models_pct=prev.other_models_pct,
-                usage_reset_at=prev.usage_reset_at,
-                usage_reset_auto_discover=prev.usage_reset_auto_discover,
                 fetched_at=time.time(),
                 source="error",
                 error=str(exc),
                 raw_hint=prev.raw_hint,
+                **prev.reset_stamp_fields(),
                 **_account_fields(prev),
             )
         finally:

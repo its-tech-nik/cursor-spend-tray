@@ -1594,8 +1594,7 @@ class TrayApp(QWidget):
         snap = UsageSnapshot.load()
         snap.set_usage_reset_auto_discover(enabled)
         self.snapshot = snap
-        self._reset_picker.set_enabled(not enabled)
-        self._set_action_checked(self._reset_auto_action, enabled)
+        self._sync_reset_menu()
         if enabled:
             self.popup.set_status("Reset day: auto-discover on")
         else:
@@ -1608,8 +1607,8 @@ class TrayApp(QWidget):
             return
         day = self._reset_picker.day_spin.value()
         qtime = self._reset_picker.time_edit.time()
-        if snap.usage_reset_at is not None:
-            dt = datetime.fromtimestamp(snap.usage_reset_at).astimezone()
+        if snap.usage_reset_at_manual is not None:
+            dt = datetime.fromtimestamp(snap.usage_reset_at_manual).astimezone()
             if (
                 day == max(1, min(28, dt.day))
                 and qtime.hour() == dt.hour

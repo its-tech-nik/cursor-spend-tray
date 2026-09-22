@@ -86,7 +86,7 @@
                 {
                   "id": "see_usage_reset_time",
                   "title": "See when AUTO usage last reset",
-                  "description": "Beside “Included in Pro”, a muted label shows the billing reset day/time from state.json (for example “- resets on the 19th at 20:12”). With Auto-discover on, the stamp updates the first time AUTO usage drops from above zero to zero in a cycle. With Auto-discover off, the tray Resets on menu day/time pickers write the stamp instead.",
+                  "description": "Beside “Included in Pro”, a muted label shows the billing reset day/time from state.json (for example “- resets on the 19th at 20:12”). Auto-discover and manual each keep their own stamp (usage_reset_at_auto / usage_reset_at_manual); the Resets on menu chooses which is active. With Auto-discover on, the auto stamp updates the first time AUTO usage drops from above zero to zero in a cycle. With Auto-discover off, the day/time pickers write the manual stamp instead without clearing the auto one.",
                   "available_when": "Spend rings are visible and a reset timestamp is known.",
                   "code": [
                     {

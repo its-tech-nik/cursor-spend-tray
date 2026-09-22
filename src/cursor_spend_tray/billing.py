@@ -1,7 +1,7 @@
 """Cursor subscription billing-period helpers.
 
 Period boundaries use the renewal day plus optional clock time from the
-persisted usage-reset stamp in state.json (auto-discovered or set manually).
+active usage-reset stamp in state.json (auto-discovered or set manually).
 """
 
 from __future__ import annotations

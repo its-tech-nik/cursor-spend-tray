@@ -6,9 +6,9 @@ import time
 from datetime import datetime
 from datetime import time as time_of_day
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel, PrivateAttr, model_validator
 
 from .browser import (
     BrowserInfo,
@@ -34,7 +34,7 @@ LOGIN_URL = SPENDING_URL
 POLL_INTERVAL_MINUTES: tuple[int, ...] = (1, 2, 4, 8, 16)
 DEFAULT_POLL_SECONDS = 8 * 60
 DEFAULT_BIDI_PORT = 9222
-# Stable fallback billing day when state.json has no usage_reset_at yet.
+# Stable fallback billing day when state.json has no reset stamp yet.
 SUBSCRIPTION_RENEWAL_DAY = 19
 
 
@@ -260,7 +260,7 @@ def resolve_usage_reset_at(
     auto_discover: bool = True,
     now: float | None = None,
 ) -> float | None:
-    """Update reset stamp only when auto-discover is on and AUTO drops >0 → 0%."""
+    """Update the auto stamp only when auto-discover is on and AUTO drops >0 → 0%."""
     if not auto_discover:
         return prev_reset_at
     if (
@@ -280,27 +280,65 @@ class UsageSnapshot(BaseModel):
     account_email: str | None = None
     subscription_level: str | None = None
     account_avatar_url: str | None = None
-    # Local clock for the billing-cycle boundary (auto-discovered or set manually).
-    usage_reset_at: float | None = None
-    # When True, scrapes may rewrite usage_reset_at on AUTO >0→0%.
+    # Auto-discovered billing-cycle boundary (written on AUTO >0→0% when discover is on).
+    usage_reset_at_auto: float | None = None
+    # Manual override boundary (written by Resets on day/time pickers).
+    usage_reset_at_manual: float | None = None
+    # When True, use the auto stamp and allow scrapes to rewrite usage_reset_at_auto.
     usage_reset_auto_discover: bool = True
     fetched_at: float | None = None
     source: str = "none"
     error: str | None = None
     raw_hint: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_usage_reset_at(cls, data: Any) -> Any:
+        """Split legacy single usage_reset_at into auto + manual fields."""
+        if not isinstance(data, dict) or "usage_reset_at" not in data:
+            return data
+        legacy = data.pop("usage_reset_at")
+        if legacy is not None:
+            # Seed both so toggling modes does not drop the known stamp.
+            if data.get("usage_reset_at_auto") is None:
+                data["usage_reset_at_auto"] = legacy
+            if data.get("usage_reset_at_manual") is None:
+                data["usage_reset_at_manual"] = legacy
+        return data
+
+    def effective_usage_reset_at(self) -> float | None:
+        """Stamp currently in effect for billing/UI (auto vs manual menu choice)."""
+        if self.usage_reset_auto_discover:
+            return self.usage_reset_at_auto
+        return self.usage_reset_at_manual
+
+    def reset_stamp_fields(self) -> dict[str, float | None | bool]:
+        """Copy reset-related fields for UsageSnapshot reconstruction in the scraper."""
+        return {
+            "usage_reset_at_auto": self.usage_reset_at_auto,
+            "usage_reset_at_manual": self.usage_reset_at_manual,
+            "usage_reset_auto_discover": self.usage_reset_auto_discover,
+        }
+
     def renewal_boundary(self) -> tuple[int, time_of_day]:
         """Day + clock for period splits (falls back to the 19th at midnight)."""
-        return renewal_from_usage_reset(self.usage_reset_at)
+        return renewal_from_usage_reset(self.effective_usage_reset_at())
 
     def set_usage_reset_day_time(self, day: int, hour: int, minute: int) -> None:
         """Persist a manual day/time boundary and disable auto-discover."""
-        self.usage_reset_at = usage_reset_stamp_from_day_time(day, hour, minute)
+        self.usage_reset_at_manual = usage_reset_stamp_from_day_time(day, hour, minute)
         self.usage_reset_auto_discover = False
         self.save()
 
     def set_usage_reset_auto_discover(self, enabled: bool) -> None:
         self.usage_reset_auto_discover = bool(enabled)
+        # Seed manual from auto (or default) the first time the user leaves auto.
+        if not enabled and self.usage_reset_at_manual is None:
+            self.usage_reset_at_manual = (
+                self.usage_reset_at_auto
+                if self.usage_reset_at_auto is not None
+                else default_usage_reset_at()
+            )
         self.save()
 
     def save(self) -> None:
@@ -310,16 +348,26 @@ class UsageSnapshot(BaseModel):
     def load(cls) -> UsageSnapshot:
         path = state_path()
         if not path.exists():
-            snap = cls(usage_reset_at=default_usage_reset_at())
+            snap = cls(usage_reset_at_auto=default_usage_reset_at())
             snap.save()
             return snap
         try:
-            snap = cls.model_validate_json(path.read_text(encoding="utf-8"))
+            raw = path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+            had_legacy = isinstance(payload, dict) and "usage_reset_at" in payload
+            snap = cls.model_validate(payload)
         except Exception:
-            snap = cls(usage_reset_at=default_usage_reset_at())
+            snap = cls(usage_reset_at_auto=default_usage_reset_at())
             snap.save()
             return snap
-        if snap.usage_reset_at is None:
-            snap.usage_reset_at = default_usage_reset_at()
+        changed = had_legacy
+        if snap.effective_usage_reset_at() is None:
+            fallback = default_usage_reset_at()
+            if snap.usage_reset_auto_discover:
+                snap.usage_reset_at_auto = fallback
+            else:
+                snap.usage_reset_at_manual = fallback
+            changed = True
+        if changed:
             snap.save()
         return snap

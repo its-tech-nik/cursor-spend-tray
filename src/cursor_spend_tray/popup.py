@@ -2750,9 +2750,10 @@ class SpendPopup(QFrame):
     ) -> None:
         self.cursor_ring.set_percent(snap.cursor_models_pct)
         self.other_ring.set_percent(snap.other_models_pct)
-        if snap.usage_reset_at is not None:
+        reset_at = snap.effective_usage_reset_at()
+        if reset_at is not None:
             self._reset_label.setText(
-                f"- {format_usage_reset_label(snap.usage_reset_at)}"
+                f"- {format_usage_reset_label(reset_at)}"
             )
             self._reset_label.show()
         else:

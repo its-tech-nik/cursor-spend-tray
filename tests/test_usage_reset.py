@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from cursor_spend_tray.config import (
+    UsageSnapshot,
     _day_ordinal,
     format_usage_reset_label,
     resolve_usage_reset_at,
@@ -160,6 +164,70 @@ class FormatUsageResetLabelTests(unittest.TestCase):
         local = datetime.fromtimestamp(ts).astimezone()
         self.assertIn(_day_ordinal(local.day), label)
         self.assertIn(local.strftime("%H:%M"), label)
+
+
+class SplitUsageResetStampTests(unittest.TestCase):
+    def test_effective_follows_auto_discover_flag(self) -> None:
+        snap = UsageSnapshot(
+            usage_reset_at_auto=1_111.0,
+            usage_reset_at_manual=2_222.0,
+            usage_reset_auto_discover=True,
+        )
+        self.assertEqual(snap.effective_usage_reset_at(), 1_111.0)
+        snap.usage_reset_auto_discover = False
+        self.assertEqual(snap.effective_usage_reset_at(), 2_222.0)
+
+    def test_manual_edit_does_not_clobber_auto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            with patch("cursor_spend_tray.config.state_path", return_value=state):
+                snap = UsageSnapshot(
+                    usage_reset_at_auto=1_111.0,
+                    usage_reset_at_manual=None,
+                    usage_reset_auto_discover=True,
+                )
+                snap.set_usage_reset_day_time(15, 8, 30)
+                self.assertFalse(snap.usage_reset_auto_discover)
+                self.assertEqual(snap.usage_reset_at_auto, 1_111.0)
+                self.assertIsNotNone(snap.usage_reset_at_manual)
+                self.assertEqual(snap.effective_usage_reset_at(), snap.usage_reset_at_manual)
+
+    def test_toggling_back_to_auto_keeps_prior_auto_stamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            with patch("cursor_spend_tray.config.state_path", return_value=state):
+                snap = UsageSnapshot(
+                    usage_reset_at_auto=1_111.0,
+                    usage_reset_at_manual=2_222.0,
+                    usage_reset_auto_discover=False,
+                )
+                snap.set_usage_reset_auto_discover(True)
+                self.assertTrue(snap.usage_reset_auto_discover)
+                self.assertEqual(snap.usage_reset_at_auto, 1_111.0)
+                self.assertEqual(snap.usage_reset_at_manual, 2_222.0)
+                self.assertEqual(snap.effective_usage_reset_at(), 1_111.0)
+
+    def test_legacy_usage_reset_at_migrates_into_both_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "usage_reset_at": 3_333.0,
+                        "usage_reset_auto_discover": True,
+                        "source": "none",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("cursor_spend_tray.config.state_path", return_value=state):
+                snap = UsageSnapshot.load()
+            self.assertEqual(snap.usage_reset_at_auto, 3_333.0)
+            self.assertEqual(snap.usage_reset_at_manual, 3_333.0)
+            saved = json.loads(state.read_text(encoding="utf-8"))
+            self.assertNotIn("usage_reset_at", saved)
+            self.assertEqual(saved["usage_reset_at_auto"], 3_333.0)
+            self.assertEqual(saved["usage_reset_at_manual"], 3_333.0)
 
 
 if __name__ == "__main__":
