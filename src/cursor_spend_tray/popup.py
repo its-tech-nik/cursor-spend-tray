@@ -2057,14 +2057,16 @@ class CountdownLabel(QLabel):
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Fixed height so leftover popup space cannot stretch this into a fat bar.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         font = QFont()
-        font.setPointSize(10)
+        font.setPointSize(9)
         self.setFont(font)
         self.setStyleSheet(
             """
             QLabel {
                 color: #A0A0A0;
-                padding: 6px 8px;
+                padding: 3px 8px;
                 border-radius: 6px;
             }
             QLabel:hover {
@@ -2073,6 +2075,7 @@ class CountdownLabel(QLabel):
             }
             """
         )
+        self.setFixedHeight(self.sizeHint().height())
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.MouseButton.LeftButton:
@@ -2082,12 +2085,14 @@ class CountdownLabel(QLabel):
     def set_remaining(self, seconds: int, refreshing: bool = False) -> None:
         if refreshing:
             self.setText("Refreshing… · click to retry")
-            return
-        if seconds < 0:
+        elif seconds < 0:
             self.setText("Updates paused · click to retry")
-            return
-        minutes, secs = divmod(max(0, seconds), 60)
-        self.setText(f"Next update in {minutes:02d}:{secs:02d} · click to refresh")
+        else:
+            minutes, secs = divmod(max(0, seconds), 60)
+            self.setText(f"Next update in {minutes:02d}:{secs:02d} · click to refresh")
+        hint_h = self.sizeHint().height()
+        if self.height() != hint_h:
+            self.setFixedHeight(hint_h)
 
 
 class DraggablePanel(QFrame):
