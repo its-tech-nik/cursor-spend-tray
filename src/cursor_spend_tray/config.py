@@ -34,7 +34,7 @@ LOGIN_URL = SPENDING_URL
 POLL_INTERVAL_MINUTES: tuple[int, ...] = (1, 2, 4, 8, 16)
 DEFAULT_POLL_SECONDS = 8 * 60
 DEFAULT_BIDI_PORT = 9222
-# Billing-cycle day fallback when no AUTO usage-reset stamp is known yet.
+# Stable fallback billing day when state.json has no usage_reset_at yet.
 SUBSCRIPTION_RENEWAL_DAY = 19
 
 
@@ -194,7 +194,7 @@ class AppConfig(BaseModel):
 
 
 def default_usage_reset_at() -> float:
-    """Placeholder reset stamp (renewal day at midnight local) until a real AUTO >0→0."""
+    """Placeholder reset stamp (renewal day at midnight local) until a real AUTO >0→0%."""
     now = datetime.now().astimezone()
     return datetime(
         now.year,
@@ -209,12 +209,33 @@ def default_usage_reset_at() -> float:
 def renewal_from_usage_reset(
     usage_reset_at: float | None,
 ) -> tuple[int, time_of_day]:
-    """Billing-cycle day + local clock derived from the AUTO reset stamp."""
+    """Billing-cycle day + local clock from the reset stamp (stable day-19 fallback)."""
     if usage_reset_at is None:
         return SUBSCRIPTION_RENEWAL_DAY, time_of_day(0, 0)
     dt = datetime.fromtimestamp(usage_reset_at).astimezone()
     day = max(1, min(28, dt.day))
     return day, time_of_day(dt.hour, dt.minute, dt.second)
+
+
+def usage_reset_stamp_from_day_time(
+    day: int,
+    hour: int,
+    minute: int,
+    *,
+    second: int = 0,
+) -> float:
+    """Build a local timestamp whose day/clock become the billing boundary."""
+    now = datetime.now().astimezone()
+    day = max(1, min(28, int(day)))
+    return datetime(
+        now.year,
+        now.month,
+        day,
+        max(0, min(23, int(hour))),
+        max(0, min(59, int(minute))),
+        max(0, min(59, int(second))),
+        tzinfo=now.tzinfo,
+    ).timestamp()
 
 
 def _day_ordinal(day: int) -> str:
@@ -236,9 +257,12 @@ def resolve_usage_reset_at(
     prev_cursor_pct: int | None,
     new_cursor_pct: int | None,
     prev_reset_at: float | None,
+    auto_discover: bool = True,
     now: float | None = None,
 ) -> float | None:
-    """Record reset time only the first time AUTO usage drops from >0 to 0%."""
+    """Update reset stamp only when auto-discover is on and AUTO drops >0 → 0%."""
+    if not auto_discover:
+        return prev_reset_at
     if (
         prev_cursor_pct is not None
         and prev_cursor_pct > 0
@@ -246,9 +270,7 @@ def resolve_usage_reset_at(
         and new_cursor_pct == 0
     ):
         return time.time() if now is None else now
-    if prev_reset_at is not None:
-        return prev_reset_at
-    return default_usage_reset_at()
+    return prev_reset_at
 
 
 class UsageSnapshot(BaseModel):
@@ -258,12 +280,28 @@ class UsageSnapshot(BaseModel):
     account_email: str | None = None
     subscription_level: str | None = None
     account_avatar_url: str | None = None
-    # Local clock when AUTO % first returned to 0 after being >0 (billing reset).
+    # Local clock for the billing-cycle boundary (auto-discovered or set manually).
     usage_reset_at: float | None = None
+    # When True, scrapes may rewrite usage_reset_at on AUTO >0→0%.
+    usage_reset_auto_discover: bool = True
     fetched_at: float | None = None
     source: str = "none"
     error: str | None = None
     raw_hint: str | None = None
+
+    def renewal_boundary(self) -> tuple[int, time_of_day]:
+        """Day + clock for period splits (falls back to the 19th at midnight)."""
+        return renewal_from_usage_reset(self.usage_reset_at)
+
+    def set_usage_reset_day_time(self, day: int, hour: int, minute: int) -> None:
+        """Persist a manual day/time boundary and disable auto-discover."""
+        self.usage_reset_at = usage_reset_stamp_from_day_time(day, hour, minute)
+        self.usage_reset_auto_discover = False
+        self.save()
+
+    def set_usage_reset_auto_discover(self, enabled: bool) -> None:
+        self.usage_reset_auto_discover = bool(enabled)
+        self.save()
 
     def save(self) -> None:
         state_path().write_text(self.model_dump_json(indent=2), encoding="utf-8")

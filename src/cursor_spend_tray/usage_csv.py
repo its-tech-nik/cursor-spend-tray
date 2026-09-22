@@ -19,18 +19,18 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .billing import (
+    history_start_for,
     period_end_for,
     period_label,
     period_ms_range,
     period_start_for,
+    renewal_instant,
     short_period_label,
 )
-from .config import SUBSCRIPTION_RENEWAL_DAY, data_dir
+from .config import data_dir
 
 log = logging.getLogger(__name__)
 
-# First billing period shown on the usage dashboard the user linked.
-USAGE_HISTORY_START = date(2025, 9, 19)
 EXPORT_URL = "https://cursor.com/api/dashboard/export-usage-events-csv"
 CACHE_VERSION = 2
 
@@ -83,6 +83,15 @@ def _totals_path() -> Path:
     return usage_csv_dir() / "period-totals.json"
 
 
+def invalidate_usage_totals_cache() -> None:
+    """Drop period-totals.json so the next preview rebuilds from CSVs."""
+    path = _totals_path()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.debug("Could not remove period totals cache: %s", exc)
+
+
 def _assoc_path() -> Path:
     return usage_csv_dir() / "period-spend-pct.json"
 
@@ -94,7 +103,7 @@ def _period_csv_path(start: date, end: date) -> Path:
 def _period_ms_range(
     start: date,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> tuple[int, int]:
     return period_ms_range(
@@ -104,9 +113,9 @@ def _period_ms_range(
 
 def _iter_period_starts(
     *,
-    history_start: date = USAGE_HISTORY_START,
+    history_start: date | None = None,
     until: datetime | date | None = None,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> list[date]:
     """Billing-period starts from history_start through the period containing `until`."""
@@ -114,8 +123,19 @@ def _iter_period_starts(
     last_start = period_start_for(
         end_at, renewal_day=renewal_day, renewal_time=renewal_time
     )
+    # history_start is a period-start calendar day; anchor at the renewal clock
+    # so a bare date is not treated as local midnight (which falls in the
+    # previous period when renewal_time is non-zero).
+    start_day = history_start or history_start_for(renewal_day=renewal_day)
     first = period_start_for(
-        history_start, renewal_day=renewal_day, renewal_time=renewal_time
+        renewal_instant(
+            start_day.year,
+            start_day.month,
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+        ),
+        renewal_day=renewal_day,
+        renewal_time=renewal_time,
     )
     out: list[date] = []
     cur = first
@@ -213,7 +233,7 @@ def _row_period(
 def sum_tokens_by_period(
     rows: list[dict[str, Any]],
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> dict[date, tuple[int, int]]:
     """Map period_start → (total_tokens, event_count)."""
@@ -256,7 +276,7 @@ def associate_spend_pct(
     other_models_pct: int | None,
     total_tokens: int | None = None,
     when: datetime | date | None = None,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> None:
     """Record scraped AUTO/API % against the current billing period (and tokens if known)."""
@@ -285,7 +305,7 @@ def associate_spend_pct(
 
 def _load_cached_totals(
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> dict[str, dict[str, Any]]:
     path = _totals_path()
@@ -310,7 +330,7 @@ def _load_cached_totals(
 def _save_cached_totals(
     periods: dict[str, dict[str, Any]],
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> None:
     payload = {
@@ -380,7 +400,7 @@ async def fetch_period_csv(
     handle: str,
     start: date,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> tuple[str, int]:
     """Download one billing period CSV via page-context fetch. Returns (text, http_status)."""
@@ -403,11 +423,11 @@ async def sync_usage_csvs(
     client: _EvalClient,
     handle: str,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
     force_current: bool = True,
 ) -> UsageCsvPreview:
-    """Ensure period CSVs exist from USAGE_HISTORY_START through now; refresh current period."""
+    """Ensure period CSVs exist for recent billing periods; refresh current period."""
     starts = _iter_period_starts(
         renewal_day=renewal_day, renewal_time=renewal_time
     )
@@ -532,7 +552,7 @@ async def sync_usage_csvs(
 
 def build_usage_preview(
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> UsageCsvPreview:
     """Build chart-ready period buckets from on-disk CSVs / totals cache + spend % assoc."""
@@ -628,7 +648,7 @@ def build_usage_preview(
 
 def load_usage_preview(
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> UsageCsvPreview:
     """Read-only preview from disk (no network)."""

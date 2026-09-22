@@ -7,7 +7,6 @@ from datetime import date, datetime, time, timezone
 
 from cursor_spend_tray.billing import period_start_for
 from cursor_spend_tray.config import (
-    SUBSCRIPTION_RENEWAL_DAY,
     format_usage_reset_label,
     renewal_from_usage_reset,
 )
@@ -15,7 +14,6 @@ from cursor_spend_tray.config import (
 
 class PeriodStartTimeAwareTests(unittest.TestCase):
     def test_before_renewal_clock_stays_previous_period(self) -> None:
-        # Sep 19 15:00 local with renewal at 20:12 → still Aug 19 period.
         local = datetime.now().astimezone().tzinfo or timezone.utc
         when = datetime(2026, 9, 19, 15, 0, tzinfo=local)
         got = period_start_for(
@@ -60,9 +58,9 @@ class RenewalFromUsageResetTests(unittest.TestCase):
         self.assertEqual(day, 19)
         self.assertEqual(tod, time(20, 12, 16))
 
-    def test_none_falls_back_to_default_day(self) -> None:
+    def test_none_falls_back_to_day_19_midnight(self) -> None:
         day, tod = renewal_from_usage_reset(None)
-        self.assertEqual(day, SUBSCRIPTION_RENEWAL_DAY)
+        self.assertEqual(day, 19)
         self.assertEqual(tod, time(0, 0))
 
     def test_label_matches_scraped_stamp(self) -> None:

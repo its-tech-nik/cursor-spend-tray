@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import time as time_of_day
 
 from PyQt6.QtCore import (
     QEvent,
@@ -11,6 +12,7 @@ from PyQt6.QtCore import (
     QRect,
     QRectF,
     QSize,
+    QThread,
     QTimer,
     Qt,
     pyqtSignal,
@@ -41,7 +43,6 @@ from .config import (
     UsageSnapshot,
     format_usage_reset_label,
     load_popup_panel_order,
-    renewal_from_usage_reset,
     save_popup_panel_order,
 )
 from .sdk_stats import SdkHabitsBatch, SdkHabitsPreview, collect_habits_preview
@@ -673,6 +674,72 @@ class ChartSeries:
     area: bool = False  # filled under the line; always painted behind other series
 
 
+class ChartValueCard(QWidget):
+    """Hover readout drawn in its own window so the chart cannot clip it."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._font = QFont()
+        self._font.setPointSize(8)
+        self._lines: list[tuple[str, QColor]] = []
+
+    def set_lines(self, lines: list[tuple[str, str]]) -> None:
+        self._lines = [(text, QColor(color)) for text, color in lines]
+        metrics = QFontMetrics(self._font)
+        text_w = max((metrics.horizontalAdvance(text) for text, _ in self._lines), default=40)
+        width = text_w + 16
+        height = metrics.height() * max(1, len(self._lines)) + 10
+        self.setFixedSize(width, height)
+        self.update()
+
+    def place(self, anchor: QPoint) -> None:
+        """Put the card beside a global point, kept on screen, not inside the chart."""
+        screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+        width, height = self.width(), self.height()
+        x = anchor.x() + 10
+        if x + width > geo.right() - 4:
+            x = anchor.x() - width - 10
+        x = max(geo.left() + 4, min(x, geo.right() - width - 4))
+        y = anchor.y() + 4
+        if y + height > geo.bottom() - 4:
+            y = geo.bottom() - 4 - height
+        y = max(geo.top() + 4, y)
+        self.move(x, y)
+        self.show()
+        self.raise_()
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(self._font)
+        card = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
+        painter.setBrush(QColor(20, 24, 32, 230))
+        painter.setPen(QPen(QColor("#3A465A"), 1))
+        painter.drawRoundedRect(card, 6, 6)
+        metrics = painter.fontMetrics()
+        ty = 5.0
+        for text, color in self._lines:
+            painter.setPen(color)
+            painter.drawText(
+                QRectF(8, ty, self.width() - 12, metrics.height()),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                text,
+            )
+            ty += metrics.height()
+        painter.end()
+
+
 def _format_chart_value(value: float | None, unit: str = "") -> str:
     if value is None:
         return "—"
@@ -689,7 +756,7 @@ class MultiSeriesHistoryChart(QWidget):
     """Single multi-line chart; series are min–max normalized; hover shows raw values."""
 
     # Desired plot body height; total widget height = legend + plot.
-    _PLOT_BODY = 200
+    _PLOT_BODY = 280
     _AXIS_RESERVE = 0  # period axis label hidden; keep constant for height math
     _LEGEND_TOP = 8
     _LEGEND_GAP = 10
@@ -706,10 +773,12 @@ class MultiSeriesHistoryChart(QWidget):
         self._hidden: set[str] = set()
         self._hover_index: int | None = None
         self._plot = QRectF()
+        self._value_card = ChartValueCard(self)
         self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Minimum, not Fixed: a fixed height set during resize paints past the
+        # layout slot, and the parent clips the floor (early months).
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self.setFixedHeight(self._height_for_rows(1))
 
     def _legend_font(self) -> QFont:
         font = QFont()
@@ -746,20 +815,22 @@ class MultiSeriesHistoryChart(QWidget):
             lx += entry_w + 8
         return rows
 
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._height_for_rows(self._estimate_legend_rows(max(1, width)))
+
+    def _hint_width(self) -> int:
+        return self.width() if self.width() > 1 else 360
+
     def sizeHint(self) -> QSize:  # noqa: N802
-        width = self.width() if self.width() > 1 else 360
-        return QSize(360, self._height_for_rows(self._estimate_legend_rows(width)))
+        return QSize(360, self.heightForWidth(self._hint_width()))
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(200, self._height_for_rows(1))
-
-    def resizeEvent(self, event) -> None:  # noqa: ANN001
-        # Legend wrap depends on width — refresh fixed height when it changes.
-        hint_h = self.sizeHint().height()
-        if self.height() != hint_h:
-            self.setFixedHeight(hint_h)
-            self.updateGeometry()
-        super().resizeEvent(event)
+        # Match sizeHint. A one-row minimum let the layout shrink the slot and
+        # clip the plot floor, which is where the early billing periods sit.
+        return QSize(200, self.heightForWidth(self._hint_width()))
 
     def set_data(
         self,
@@ -775,7 +846,7 @@ class MultiSeriesHistoryChart(QWidget):
         names = {s.name for s in self._series}
         self._hidden &= names
         self._hover_index = None
-        self.setFixedHeight(self.sizeHint().height())
+        self._value_card.hide()
         self.updateGeometry()
         self.update()
 
@@ -791,6 +862,7 @@ class MultiSeriesHistoryChart(QWidget):
             self._hidden.add(name)
             visible = False
         self.update()
+        self._sync_value_card()
         return visible
 
     def _visible_series(self) -> list[ChartSeries]:
@@ -812,8 +884,13 @@ class MultiSeriesHistoryChart(QWidget):
 
     def leaveEvent(self, event) -> None:  # noqa: ANN001
         self._hover_index = None
+        self._value_card.hide()
         self.update()
         super().leaveEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: ANN001
+        self._value_card.hide()
+        super().hideEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: ANN001
         if len(self._labels) < 2 or self._plot.width() <= 0:
@@ -826,7 +903,37 @@ class MultiSeriesHistoryChart(QWidget):
         if idx != self._hover_index:
             self._hover_index = idx
             self.update()
+        self._sync_value_card()
         super().mouseMoveEvent(event)
+
+    def _sync_value_card(self) -> None:
+        idx = self._hover_index
+        if (
+            idx is None
+            or not (0 <= idx < len(self._labels))
+            or self._plot.width() <= 0
+            or not self.isVisible()
+        ):
+            self._value_card.hide()
+            return
+        n = len(self._labels)
+        x = (
+            self._plot.left()
+            if n == 1
+            else self._plot.left() + (self._plot.width() * idx / (n - 1))
+        )
+        header = self._labels[idx]
+        if idx < len(self._weights):
+            header += f" · {self._weights[idx]}"
+        lines = [(header, "#D5DEEA")]
+        for series in self._visible_series():
+            raw = series.values[idx] if idx < len(series.values) else None
+            lines.append(
+                (f"{series.name}: {_format_chart_value(raw, series.unit)}", series.color)
+            )
+        self._value_card.set_lines(lines)
+        anchor = self.mapToGlobal(QPoint(int(round(x)), int(round(self._plot.top()))))
+        self._value_card.place(anchor)
 
     def _normalized_points(self, values: list[float | None]) -> list[QPointF | None]:
         numeric = [v for v in values if v is not None]
@@ -972,48 +1079,6 @@ class MultiSeriesHistoryChart(QWidget):
             painter.drawLine(
                 QPointF(x, self._plot.top()), QPointF(x, self._plot.bottom())
             )
-
-            lines = [self._labels[idx]]
-            if idx < len(self._weights):
-                lines[0] += f" · {self._weights[idx]}"
-            hover_series = visible_series
-            for series in hover_series:
-                raw = series.values[idx] if idx < len(series.values) else None
-                lines.append(
-                    f"{series.name}: {_format_chart_value(raw, series.unit)}"
-                )
-
-            card_font = QFont()
-            card_font.setPointSize(8)
-            painter.setFont(card_font)
-            metrics = painter.fontMetrics()
-            width = max(metrics.horizontalAdvance(line) for line in lines) + 16
-            height = metrics.height() * len(lines) + 10
-            card_x = x + 10
-            if card_x + width > self.width() - 8:
-                card_x = x - width - 10
-            card_x = max(8.0, card_x)
-            # Prefer near the plot top; clamp to the full widget so tall cards
-            # (many series) are not clipped by the plot strip or widget edge.
-            card_y = self._plot.top() + 4
-            if card_y + height > self.height() - 8:
-                card_y = max(8.0, self.height() - 8 - height)
-            card = QRectF(card_x, card_y, width, height)
-            painter.setBrush(QColor(20, 24, 32, 230))
-            painter.setPen(QPen(QColor("#3A465A"), 1))
-            painter.drawRoundedRect(card, 6, 6)
-            painter.setPen(QColor("#E4E7EC"))
-            ty = card.top() + 5
-            for i, line in enumerate(lines):
-                if i == 0:
-                    painter.setPen(QColor("#D5DEEA"))
-                elif i - 1 < len(hover_series):
-                    painter.setPen(QColor(hover_series[i - 1].color))
-                painter.drawText(
-                    QRectF(card.left() + 8, ty, card.width() - 12, metrics.height()),
-                    line,
-                )
-                ty += metrics.height()
 
         painter.end()
 
@@ -1524,6 +1589,44 @@ def _merge_composer_usage_series(
             pi_tool_err.append(None)
             pi_friction.append(None)
             pi_tokens.append(None)
+
+    # Drop leading / trailing all-empty periods so the x-axis isn't padded
+    # with blank slots (e.g. a phantom month from midnight-vs-renewal-time).
+    series_cols = (
+        composers,
+        tokens,
+        abort,
+        tool_err,
+        accept,
+        auto_pct,
+        api_pct,
+        pi_runs,
+        pi_abort,
+        pi_tool_err,
+        pi_friction,
+        pi_tokens,
+    )
+
+    def _row_has_data(i: int) -> bool:
+        return any(col[i] is not None for col in series_cols)
+
+    keep = [i for i in range(len(labels)) if _row_has_data(i)]
+    if keep:
+        lo, hi = keep[0], keep[-1] + 1
+        labels = labels[lo:hi]
+        composers = composers[lo:hi]
+        tokens = tokens[lo:hi]
+        abort = abort[lo:hi]
+        tool_err = tool_err[lo:hi]
+        accept = accept[lo:hi]
+        auto_pct = auto_pct[lo:hi]
+        api_pct = api_pct[lo:hi]
+        pi_runs = pi_runs[lo:hi]
+        pi_abort = pi_abort[lo:hi]
+        pi_tool_err = pi_tool_err[lo:hi]
+        pi_friction = pi_friction[lo:hi]
+        pi_tokens = pi_tokens[lo:hi]
+        weights = weights[lo:hi]
 
     return (
         labels,
@@ -2214,6 +2317,52 @@ class ReorderablePanelHost(QWidget):
         painter.end()
 
 
+class _HabitsLoadWorker(QThread):
+    """Load composer/usage/SDK billing-period stats off the UI thread."""
+
+    finished_ok = pyqtSignal(object, object, object)
+    finished_err = pyqtSignal(str)
+
+    def __init__(
+        self,
+        renewal_day: int,
+        renewal_time: time_of_day | None,
+        *,
+        use_cache: bool = True,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._renewal_day = renewal_day
+        self._renewal_time = renewal_time
+        self._use_cache = use_cache
+
+    def run(self) -> None:
+        try:
+            sdk = collect_habits_preview(
+                renewal_day=self._renewal_day,
+                renewal_time=self._renewal_time,
+            )
+            vscdb = collect_vscdb_habits_preview(
+                renewal_day=self._renewal_day,
+                renewal_time=self._renewal_time,
+                use_cache=self._use_cache,
+            )
+            usage = load_usage_preview(
+                renewal_day=self._renewal_day,
+                renewal_time=self._renewal_time,
+            )
+            self.finished_ok.emit(vscdb, usage, sdk)
+        except Exception as exc:  # noqa: BLE001 — surfaced to popup
+            self.finished_err.emit(str(exc))
+
+
+def _renewal_boundary_key(
+    renewal_day: int, renewal_time: time_of_day | None
+) -> tuple[int, str]:
+    tod = renewal_time or time_of_day(0, 0)
+    return renewal_day, tod.strftime("%H:%M:%S")
+
+
 class SpendPopup(QFrame):
     """Frameless tray panel. Closes when focus leaves or the user clicks outside.
 
@@ -2226,6 +2375,11 @@ class SpendPopup(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._refreshing = False
+        self._habits_worker: _HabitsLoadWorker | None = None
+        self._habits_gen = 0
+        self._habits_status_when_done: str | None = None
+        self._habits_running_key: tuple[int, str] | None = None
+        self._habits_pending: tuple[int, time_of_day | None, bool] | None = None
         self._dismiss_armed = False
         self._keep_open = False
         self._awaiting_login = False
@@ -2350,34 +2504,144 @@ class SpendPopup(QFrame):
         root.addWidget(self.status)
         self.refresh_habits()
 
-    def refresh_habits(self) -> None:
-        """Reload local SDK + state.vscdb + usage-CSV habit stats (soft-fails)."""
-        renewal_day, renewal_time = renewal_from_usage_reset(
-            UsageSnapshot.load().usage_reset_at
+    def refresh_habits(
+        self,
+        *,
+        status_when_done: str | None = None,
+        force: bool = False,
+    ) -> None:
+        """Reload local SDK + state.vscdb + usage-CSV habit stats off the UI thread.
+
+        Concurrent calls with the same renewal boundary coalesce onto the in-flight
+        worker (polls must not cancel a slow cache-miss scan). A different boundary
+        or ``force=True`` queues one follow-up load after the current worker finishes.
+        """
+        if status_when_done is not None:
+            self._habits_status_when_done = status_when_done
+        snap = UsageSnapshot.load()
+        renewal_day, renewal_time = snap.renewal_boundary()
+        key = _renewal_boundary_key(renewal_day, renewal_time)
+
+        worker = self._habits_worker
+        if worker is not None and worker.isRunning():
+            if not force and key == self._habits_running_key:
+                return
+            # Newest pending wins; keep force if any queued request asked for it.
+            prev = self._habits_pending
+            pending_force = force or (prev is not None and prev[2])
+            self._habits_pending = (renewal_day, renewal_time, pending_force)
+            return
+
+        self._start_habits_worker(
+            renewal_day, renewal_time, use_cache=not force
         )
-        try:
-            sdk = collect_habits_preview(
-                renewal_day=renewal_day, renewal_time=renewal_time
-            )
-        except Exception:  # noqa: BLE001 — popup must stay usable
-            sdk = SdkHabitsPreview.unavailable("Could not read local SDK stats")
+
+    def _start_habits_worker(
+        self,
+        renewal_day: int,
+        renewal_time: time_of_day | None,
+        *,
+        use_cache: bool,
+    ) -> None:
+        self._habits_gen += 1
+        gen = self._habits_gen
+        self._habits_running_key = _renewal_boundary_key(renewal_day, renewal_time)
+        self._habits_pending = None
+        # Drop the strong ref to any prior worker. Do not disconnect — the C++
+        # object may already be deleteLater'd after finished, which raises
+        # RuntimeError. Stale results are ignored via _habits_gen.
+        self._habits_worker = None
+
+        worker = _HabitsLoadWorker(
+            renewal_day,
+            renewal_time,
+            use_cache=use_cache,
+            parent=self,
+        )
+        worker.finished_ok.connect(
+            lambda vscdb, usage, sdk, g=gen: self._on_habits_loaded(g, vscdb, usage, sdk)
+        )
+        worker.finished_err.connect(
+            lambda message, g=gen: self._on_habits_load_failed(g, message)
+        )
+        worker.finished.connect(lambda w=worker: self._on_habits_worker_finished(w))
+        self._habits_worker = worker
+        worker.start()
+
+    def _on_habits_worker_finished(self, worker: _HabitsLoadWorker) -> None:
+        if self._habits_worker is worker:
+            self._habits_worker = None
+        worker.deleteLater()
+        pending = self._habits_pending
+        if pending is None:
+            return
+        renewal_day, renewal_time, force = pending
+        self._habits_pending = None
+        self._start_habits_worker(
+            renewal_day, renewal_time, use_cache=not force
+        )
+
+    def _on_habits_loaded(
+        self,
+        gen: int,
+        vscdb: object,
+        usage: object,
+        sdk: object,
+    ) -> None:
+        if gen != self._habits_gen:
+            return
+        assert isinstance(vscdb, VscdbHabitsPreview)
+        assert isinstance(usage, UsageCsvPreview)
+        assert isinstance(sdk, SdkHabitsPreview)
+        self._apply_habits_previews(vscdb, usage, sdk)
+
+    def _on_habits_load_failed(self, gen: int, message: str) -> None:
+        if gen != self._habits_gen:
+            return
+        self._apply_habits_previews(
+            VscdbHabitsPreview.unavailable(message),
+            UsageCsvPreview.unavailable(message),
+            SdkHabitsPreview.unavailable(message),
+        )
+
+    def adjustSize(self) -> None:  # noqa: N802
+        """Use the fixed popup width when choosing height.
+
+        QWidget.adjustSize() measures heightForWidth(sizeHint().width()).
+        That width is narrower than this 420px popup, so the height is short
+        and the layout crushes the history plot onto its bottom edge.
+        """
+        super().adjustSize()
+        width = 420
+        if not self.hasHeightForWidth():
+            return
+        height = self.heightForWidth(width)
+        if height > 0 and (self.width() != width or self.height() != height):
+            self.resize(width, height)
+            layout = self.layout()
+            if layout is not None:
+                layout.activate()
+
+    def _apply_habits_previews(
+        self,
+        vscdb: VscdbHabitsPreview,
+        usage: UsageCsvPreview,
+        sdk: SdkHabitsPreview,
+    ) -> None:
         if _SHOW_AGENT_HABITS_PANEL:
             self.habits.apply_preview(sdk)
         else:
             self._habits_panel.hide()
-        try:
-            vscdb = collect_vscdb_habits_preview(
-                renewal_day=renewal_day, renewal_time=renewal_time
-            )
-        except Exception:  # noqa: BLE001
-            vscdb = VscdbHabitsPreview.unavailable("Could not read state.vscdb")
-        try:
-            usage = load_usage_preview(
-                renewal_day=renewal_day, renewal_time=renewal_time
-            )
-        except Exception:  # noqa: BLE001
-            usage = UsageCsvPreview.unavailable("Could not read usage CSV totals")
         self.composer_history.apply_preview(vscdb, usage, sdk)
+        # A queued follow-up rebuild (boundary change / force) should keep the
+        # status line until that load finishes.
+        if self._habits_pending is not None:
+            self.adjustSize()
+            return
+        done_status = self._habits_status_when_done
+        self._habits_status_when_done = None
+        if done_status is not None:
+            self.set_status(done_status)
         self.adjustSize()
 
     def show_at(self, pos, *, keep_open: bool = False) -> None:  # noqa: ANN001
@@ -2472,7 +2736,13 @@ class SpendPopup(QFrame):
                 pass
         super().hideEvent(event)
 
-    def apply_snapshot(self, snap: UsageSnapshot) -> None:
+    def apply_snapshot(
+        self,
+        snap: UsageSnapshot,
+        *,
+        habits_status_when_done: str | None = None,
+        force_habits: bool = False,
+    ) -> None:
         self.cursor_ring.set_percent(snap.cursor_models_pct)
         self.other_ring.set_percent(snap.other_models_pct)
         if snap.usage_reset_at is not None:
@@ -2484,7 +2754,10 @@ class SpendPopup(QFrame):
             self._reset_label.clear()
             self._reset_label.hide()
         # Rescan local habits when Cursor usage updates (poll or Refresh).
-        self.refresh_habits()
+        self.refresh_habits(
+            status_when_done=habits_status_when_done,
+            force=force_habits,
+        )
 
     def set_browser_inaccessible(self, inaccessible: bool, launch_command: str = "") -> None:
         """Show or hide the Browser inaccessible banner with a copyable launch command."""

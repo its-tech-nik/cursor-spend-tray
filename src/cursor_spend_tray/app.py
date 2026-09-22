@@ -4,9 +4,10 @@ import logging
 import math
 import subprocess
 from collections.abc import Callable
+from datetime import datetime
 
 import httpx
-from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QTime, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -27,6 +28,8 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QSizePolicy,
+    QSpinBox,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +48,8 @@ from .config import (
 from .popup import SpendPopup
 from .login_network_watch import LoginNetworkWatcher, LogoutNetworkWatcher
 from .scheduler import RefreshScheduler
+from .usage_csv import invalidate_usage_totals_cache
+from .vscdb_stats import invalidate_vscdb_habits_cache
 from .session_cookie import profile_has_cursor_session_cookie
 from .sni import StatusNotifierItem
 
@@ -94,6 +99,24 @@ QFrame#ctxSep {
     border: none;
     max-height: 1px;
     margin: 6px 10px;
+}
+QSpinBox, QTimeEdit {
+    background: #1E1E1E;
+    color: #F2F2F2;
+    border: 1px solid #3A3A3A;
+    border-radius: 6px;
+    padding: 2px 6px;
+    min-height: 26px;
+}
+QSpinBox:disabled, QTimeEdit:disabled {
+    color: #777777;
+    background: #252525;
+}
+QSpinBox::up-button, QSpinBox::down-button,
+QTimeEdit::up-button, QTimeEdit::down-button {
+    width: 16px;
+    background: transparent;
+    border: none;
 }
 """
 
@@ -312,10 +335,11 @@ class TrayContextMenu(QFrame):
         self._layout.setContentsMargins(6, 6, 6, 6)
         self._layout.setSpacing(2)
 
-    def add_action(self, action: QAction) -> QWidget:
+    def add_action(self, action: QAction, *, dismiss: bool = True) -> QWidget:
         row = _CtxMenuRow(action, self)
         action.changed.connect(lambda r=row, a=action: self._sync_row(r, a))
-        action.triggered.connect(self.hide)
+        if dismiss:
+            action.triggered.connect(self.hide)
         self._sync_row(row, action)
         self._layout.addWidget(row)
         self._rows.append(row)
@@ -463,6 +487,8 @@ class TrayContextMenu(QFrame):
 class TrayContextSubmenu(QFrame):
     """Flyout panel for nested context-menu choices (one or more levels deep)."""
 
+    closed = pyqtSignal()
+
     def __init__(
         self,
         host: TrayContextMenu | TrayContextSubmenu,
@@ -491,14 +517,21 @@ class TrayContextSubmenu(QFrame):
         for action in actions or []:
             self.add_action(action)
 
-    def add_action(self, action: QAction) -> QWidget:
+    def add_action(self, action: QAction, *, dismiss: bool = True) -> QWidget:
         row = _CtxMenuRow(action, self)
         action.changed.connect(lambda r=row, a=action: TrayContextMenu._sync_row(r, a))
-        action.triggered.connect(self._root_menu.hide)
+        if dismiss:
+            action.triggered.connect(self._root_menu.hide)
         TrayContextMenu._sync_row(row, action)
         self._layout.addWidget(row)
         self._rows.append(row)
         return row
+
+    def add_widget(self, widget: QWidget) -> QWidget:
+        """Embed a custom non-action row (e.g. day/time pickers)."""
+        self._layout.addWidget(widget)
+        self._rows.append(widget)
+        return widget
 
     def add_submenu(
         self,
@@ -563,6 +596,7 @@ class TrayContextSubmenu(QFrame):
     def hideEvent(self, event) -> None:  # noqa: ANN001
         self.close_child_flyouts()
         super().hideEvent(event)
+        self.closed.emit()
 
 
 class _CtxAccountCard(QFrame):
@@ -787,6 +821,56 @@ class _CtxOutsideClickFilter(QObject):
         return False
 
 
+class _CtxResetPickerRow(QFrame):
+    """Day-of-month + time-of-day editors for the billing reset boundary."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ctxRow")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setStyleSheet(_CTX_ROW_STYLE)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        day_label = QLabel("Day")
+        day_label.setStyleSheet("color: #A0A0A0; padding-left: 10px;")
+        day_font = day_label.font()
+        day_font.setPointSize(9)
+        day_label.setFont(day_font)
+
+        self.day_spin = QSpinBox()
+        self.day_spin.setRange(1, 28)
+        self.day_spin.setFixedWidth(56)
+        self.day_spin.setToolTip("Day of month the subscription renews (1–28)")
+
+        time_label = QLabel("Time")
+        time_label.setStyleSheet("color: #A0A0A0;")
+        time_label.setFont(day_font)
+
+        self.time_edit = QTimeEdit()
+        self.time_edit.setDisplayFormat("HH:mm")
+        self.time_edit.setFixedWidth(78)
+        self.time_edit.setToolTip("Local time of day the subscription renews")
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 4, 8, 4)
+        row.setSpacing(6)
+        row.addWidget(day_label)
+        row.addWidget(self.day_spin)
+        row.addWidget(time_label)
+        row.addWidget(self.time_edit)
+        row.addStretch(1)
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        parent = self.parent()
+        if isinstance(parent, (TrayContextMenu, TrayContextSubmenu)):
+            parent.close_child_flyouts()
+        super().enterEvent(event)
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.day_spin.setEnabled(enabled)
+        self.time_edit.setEnabled(enabled)
+
+
 class TrayApp(QWidget):
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
@@ -881,6 +965,19 @@ class TrayApp(QWidget):
         between_menu = browser_menu.add_submenu("Between Scrapes")
         between_menu.add_action(self._between_keep_action)
         between_menu.add_action(self._between_quit_action)
+        resets_menu = self._ctx.add_submenu("Resets on")
+        self._resets_menu = resets_menu
+        self._reset_auto_action = QAction("Auto-discover", self)
+        self._reset_auto_action.setCheckable(True)
+        self._reset_auto_action.setToolTip(
+            "Record the billing reset when AUTO usage first returns to 0%."
+        )
+        self._reset_auto_action.toggled.connect(self._on_reset_auto_discover_toggled)
+        resets_menu.add_action(self._reset_auto_action, dismiss=False)
+        self._reset_picker = _CtxResetPickerRow()
+        resets_menu.add_widget(self._reset_picker)
+        resets_menu.closed.connect(self._commit_reset_day_time_if_changed)
+        self._sync_reset_menu()
         self._ctx.add_action(self._autostart_action)
         self._ctx.add_separator()
         self._ctx.add_action(quit_action)
@@ -1410,6 +1507,7 @@ class TrayApp(QWidget):
         self._sync_poll_actions()
         self._rebuild_browser_actions()
         self._sync_between_scrapes_actions()
+        self._sync_reset_menu()
         self._ctx.popup_at(pos)
 
     def _on_autostart_toggled(self, enabled: bool) -> None:
@@ -1473,6 +1571,61 @@ class TrayApp(QWidget):
         mode = self.config.between_scrapes
         self._set_action_checked(self._between_keep_action, mode == "keep_open")
         self._set_action_checked(self._between_quit_action, mode == "quit")
+
+    def _sync_reset_menu(self) -> None:
+        """Mirror state.json reset stamp + auto-discover into the Resets on submenu."""
+        snap = UsageSnapshot.load()
+        self.snapshot = snap
+        self._set_action_checked(
+            self._reset_auto_action, snap.usage_reset_auto_discover
+        )
+        day, tod = snap.renewal_boundary()
+        qtime = QTime(tod.hour, tod.minute)
+        self._reset_picker.day_spin.blockSignals(True)
+        self._reset_picker.time_edit.blockSignals(True)
+        self._reset_picker.day_spin.setValue(day)
+        self._reset_picker.time_edit.setTime(qtime)
+        self._reset_picker.day_spin.blockSignals(False)
+        self._reset_picker.time_edit.blockSignals(False)
+        self._reset_picker.set_enabled(not snap.usage_reset_auto_discover)
+
+    def _on_reset_auto_discover_toggled(self, enabled: bool) -> None:
+        """Persist the auto-discover knob only — do not rescrape or rebuild charts."""
+        snap = UsageSnapshot.load()
+        snap.set_usage_reset_auto_discover(enabled)
+        self.snapshot = snap
+        self._reset_picker.set_enabled(not enabled)
+        self._set_action_checked(self._reset_auto_action, enabled)
+        if enabled:
+            self.popup.set_status("Reset day: auto-discover on")
+        else:
+            self.popup.set_status("Reset day: manual — edit day and time")
+
+    def _commit_reset_day_time_if_changed(self) -> None:
+        """Apply day/time from the picker once the Resets on submenu closes."""
+        snap = UsageSnapshot.load()
+        if snap.usage_reset_auto_discover:
+            return
+        day = self._reset_picker.day_spin.value()
+        qtime = self._reset_picker.time_edit.time()
+        if snap.usage_reset_at is not None:
+            dt = datetime.fromtimestamp(snap.usage_reset_at).astimezone()
+            if (
+                day == max(1, min(28, dt.day))
+                and qtime.hour() == dt.hour
+                and qtime.minute() == dt.minute
+            ):
+                return
+        snap.set_usage_reset_day_time(day, qtime.hour(), qtime.minute())
+        self.snapshot = snap
+        # Drop renewal-keyed caches so the next load rebuckets under the new stamp.
+        invalidate_vscdb_habits_cache()
+        invalidate_usage_totals_cache()
+        done = f"Reset day set to the {day} at {qtime.toString('HH:mm')}"
+        self.popup.set_status("Updating billing periods…")
+        self.popup.apply_snapshot(
+            snap, habits_status_when_done=done, force_habits=True
+        )
 
     def _on_browser_chosen(self, key: str) -> None:
         if self.config.browser.key == key:

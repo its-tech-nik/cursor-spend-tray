@@ -1,14 +1,12 @@
 """Cursor subscription billing-period helpers.
 
 Period boundaries use the renewal day plus optional clock time from the
-AUTO usage-reset stamp (when AUTO % first returned to 0 after a cycle).
+persisted usage-reset stamp in state.json (auto-discovered or set manually).
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
-
-from .config import SUBSCRIPTION_RENEWAL_DAY
 
 
 def _clamp_day(renewal_day: int) -> int:
@@ -36,7 +34,7 @@ def renewal_instant(
     year: int,
     month: int,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time | None = None,
 ) -> datetime:
     """Local datetime of the renewal boundary in ``year``/``month``."""
@@ -69,7 +67,7 @@ def _next_month(year: int, month: int) -> tuple[int, int]:
 def period_start_for(
     when: datetime | date,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time | None = None,
 ) -> date:
     """Return the billing-period start date (renewal day) containing ``when``.
@@ -93,7 +91,7 @@ def period_start_for(
 def period_end_for(
     start: date,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time | None = None,
 ) -> date:
     """Inclusive end *date* of the billing period that starts on ``start``.
@@ -130,7 +128,7 @@ def period_start_instant(
 def period_end_instant(
     start: date,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time | None = None,
 ) -> datetime:
     """Exclusive local end instant of the period that starts on ``start``."""
@@ -142,7 +140,7 @@ def period_end_instant(
 def period_ms_range(
     start: date,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time | None = None,
 ) -> tuple[int, int]:
     """Inclusive start / inclusive end milliseconds for CSV export queries."""
@@ -156,7 +154,7 @@ def period_ms_range(
 def period_key(
     when: datetime | date,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time | None = None,
 ) -> str:
     """Stable period id, e.g. '2026-08-19'."""
@@ -168,7 +166,7 @@ def period_key(
 def period_label(
     start: date,
     *,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time | None = None,
 ) -> str:
     """Human label like 'Aug 19–Sep 18, 2026'."""
@@ -186,3 +184,14 @@ def period_label(
 def short_period_label(start: date) -> str:
     """Compact axis label, e.g. 'Aug 19'."""
     return f"{start.strftime('%b')} {start.day}"
+
+
+def history_start_for(*, renewal_day: int, periods_back: int = 13) -> date:
+    """First period start to sync (~``periods_back`` cycles before now)."""
+    now = datetime.now().astimezone()
+    day = _clamp_day(renewal_day)
+    y, m = now.year, now.month - periods_back
+    while m <= 0:
+        m += 12
+        y -= 1
+    return date(y, m, day)

@@ -86,7 +86,7 @@
                 {
                   "id": "see_usage_reset_time",
                   "title": "See when AUTO usage last reset",
-                  "description": "Beside “Included in Pro”, a muted label shows when AUTO usage last returned to 0% (for example “- resets on the 18th at 04:00”). The stamp is remembered across app restarts and updates only the first time usage drops from above zero to zero in a billing cycle—not on later polls that stay at 0%.",
+                  "description": "Beside “Included in Pro”, a muted label shows the billing reset day/time from state.json (for example “- resets on the 19th at 20:12”). With Auto-discover on, the stamp updates the first time AUTO usage drops from above zero to zero in a cycle. With Auto-discover off, the tray Resets on menu day/time pickers write the stamp instead.",
                   "available_when": "Spend rings are visible and a reset timestamp is known.",
                   "code": [
                     {
@@ -1791,26 +1791,32 @@
     },
     {
       "file": "src/cursor_spend_tray/config.py",
-      "name": "default_usage_reset_at",
+      "name": "renewal_from_usage_reset",
       "line": 195,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
+      "name": "usage_reset_stamp_from_day_time",
+      "line": 206,
+      "kind": "function"
+    },
+    {
+      "file": "src/cursor_spend_tray/config.py",
       "name": "_day_ordinal",
-      "line": 201,
+      "line": 225,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "format_usage_reset_label",
-      "line": 209,
+      "line": 235,
       "kind": "function"
     },
     {
       "file": "src/cursor_spend_tray/config.py",
       "name": "resolve_usage_reset_at",
-      "line": 215,
+      "line": 242,
       "kind": "function"
     },
     {

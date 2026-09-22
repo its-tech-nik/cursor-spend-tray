@@ -247,6 +247,7 @@ def _soft_skip_snapshot(prev: UsageSnapshot, *, source: str) -> UsageSnapshot:
         cursor_models_pct=prev.cursor_models_pct,
         other_models_pct=prev.other_models_pct,
         usage_reset_at=prev.usage_reset_at,
+        usage_reset_auto_discover=prev.usage_reset_auto_discover,
         fetched_at=prev.fetched_at,
         source=keep_source,
         error=None,
@@ -387,6 +388,7 @@ class SpendingScraper:
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
                     usage_reset_at=prev.usage_reset_at,
+                    usage_reset_auto_discover=prev.usage_reset_auto_discover,
                     error=err,
                     fetched_at=time.time(),
                     source="unavailable",
@@ -436,6 +438,7 @@ class SpendingScraper:
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
                     usage_reset_at=prev.usage_reset_at,
+                    usage_reset_auto_discover=prev.usage_reset_auto_discover,
                     error=(
                         f"Cursor sign-in required in {browser.display_name}. "
                         "A sign-in window will open — complete any security check, "
@@ -462,6 +465,7 @@ class SpendingScraper:
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
                     usage_reset_at=prev.usage_reset_at,
+                    usage_reset_auto_discover=prev.usage_reset_auto_discover,
                     error="Could not parse spending percentages (page structure may have changed).",
                     fetched_at=time.time(),
                     source=source,
@@ -487,12 +491,14 @@ class SpendingScraper:
                 prev_cursor_pct=prev.cursor_models_pct,
                 new_cursor_pct=cursor_pct,
                 prev_reset_at=prev.usage_reset_at,
+                auto_discover=prev.usage_reset_auto_discover,
                 now=fetched_at,
             )
             snap = UsageSnapshot(
                 cursor_models_pct=cursor_pct,
                 other_models_pct=other_pct,
                 usage_reset_at=usage_reset_at,
+                usage_reset_auto_discover=prev.usage_reset_auto_discover,
                 fetched_at=fetched_at,
                 source=source,
                 raw_hint=data.get("hint"),
@@ -502,7 +508,8 @@ class SpendingScraper:
             print(
                 f"[scrape] OK saved cursor={snap.cursor_models_pct}% "
                 f"other={snap.other_models_pct}% "
-                f"usage_reset_at={snap.usage_reset_at!r}",
+                f"usage_reset_at={snap.usage_reset_at!r} "
+                f"auto_discover={snap.usage_reset_auto_discover}",
                 flush=True,
             )
 
@@ -558,6 +565,7 @@ class SpendingScraper:
                     cursor_models_pct=prev.cursor_models_pct,
                     other_models_pct=prev.other_models_pct,
                     usage_reset_at=prev.usage_reset_at,
+                    usage_reset_auto_discover=prev.usage_reset_auto_discover,
                     fetched_at=time.time(),
                     source="unavailable",
                     error=(
@@ -572,6 +580,7 @@ class SpendingScraper:
                 cursor_models_pct=prev.cursor_models_pct,
                 other_models_pct=prev.other_models_pct,
                 usage_reset_at=prev.usage_reset_at,
+                usage_reset_auto_discover=prev.usage_reset_auto_discover,
                 fetched_at=time.time(),
                 source="error",
                 error=str(exc),

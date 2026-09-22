@@ -16,7 +16,6 @@ from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 from .billing import period_label, period_start_for, short_period_label
-from .config import SUBSCRIPTION_RENEWAL_DAY
 
 log = logging.getLogger(__name__)
 
@@ -402,7 +401,7 @@ def collect_habits_preview(
     *,
     projects_root: Path | None = None,
     recent_runs: int = DEFAULT_RECENT_RUNS,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time | None = None,
 ) -> SdkHabitsPreview:
     """Aggregate a scannable preview plus per-billing-period history."""

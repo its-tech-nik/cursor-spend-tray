@@ -17,7 +17,7 @@ from datetime import time as time_of_day
 from pathlib import Path
 
 from .billing import period_label, period_start_for
-from .config import SUBSCRIPTION_RENEWAL_DAY, data_dir
+from .config import data_dir
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,15 @@ class VscdbHabitsPreview:
 
 def _cache_path() -> Path:
     return data_dir() / "vscdb-habits-cache.json"
+
+
+def invalidate_vscdb_habits_cache() -> None:
+    """Drop the on-disk vscdb habits cache (e.g. after a manual reset-day change)."""
+    path = _cache_path()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.debug("Could not remove vscdb cache: %s", exc)
 
 
 def _connect_ro(path: Path) -> sqlite3.Connection | None:
@@ -263,7 +272,7 @@ def collect_vscdb_habits_preview(
     *,
     db_path: Path | None = None,
     use_cache: bool = True,
-    renewal_day: int = SUBSCRIPTION_RENEWAL_DAY,
+    renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> VscdbHabitsPreview:
     """Aggregate billing-period composer/tool signals from state.vscdb."""
