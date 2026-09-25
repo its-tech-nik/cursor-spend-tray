@@ -47,7 +47,7 @@ from .config import (
 )
 from .sdk_stats import SdkHabitsBatch, SdkHabitsPreview, collect_habits_preview
 from .usage_csv import UsageCsvPreview, load_usage_preview
-from .vscdb_stats import VscdbHabitsPreview, VscdbPeriodBucket, collect_vscdb_habits_preview
+from .vscdb_stats import VscdbHabitsPreview, collect_vscdb_habits_preview
 
 PANEL_MIME = "application/x-cursor-spend-tray-panel"
 
@@ -755,11 +755,13 @@ def _format_chart_value(value: float | None, unit: str = "") -> str:
 class MultiSeriesHistoryChart(QWidget):
     """Single multi-line chart; series are min–max normalized; hover shows raw values."""
 
-    # Desired plot body height; total widget height = legend + plot.
-    _PLOT_BODY = 280
+    # Fixed plot body + one legend row. Total height is constant so chip/series
+    # changes above the chart cannot stretch or shrink this widget.
+    _PLOT_BODY = 160
     _AXIS_RESERVE = 0  # period axis label hidden; keep constant for height math
     _LEGEND_TOP = 8
     _LEGEND_GAP = 10
+    _LEGEND_ROWS = 1
     # Pixel clearance inside the plot so peaks/floor dots aren't edge-clipped.
     _CEILING_CLEARANCE = 12.0
     # Keep 0% / min values clearly above the plot floor (dots + stroke + AA).
@@ -775,9 +777,8 @@ class MultiSeriesHistoryChart(QWidget):
         self._plot = QRectF()
         self._value_card = ChartValueCard(self)
         self.setMouseTracking(True)
-        # Minimum, not Fixed: a fixed height set during resize paints past the
-        # layout slot, and the parent clips the floor (early months).
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(self._fixed_height())
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     def _legend_font(self) -> QFont:
@@ -788,8 +789,8 @@ class MultiSeriesHistoryChart(QWidget):
     def _legend_row_height(self) -> float:
         return float(max(12, QFontMetrics(self._legend_font()).height()))
 
-    def _height_for_rows(self, rows: int) -> int:
-        rows = max(1, rows)
+    def _fixed_height(self) -> int:
+        rows = self._LEGEND_ROWS
         row_h = self._legend_row_height()
         legend = (
             self._LEGEND_TOP
@@ -799,38 +800,18 @@ class MultiSeriesHistoryChart(QWidget):
         )
         return int(legend + self._PLOT_BODY + self._AXIS_RESERVE)
 
-    def _estimate_legend_rows(self, width: int) -> int:
-        """How many legend rows are needed at the given width (matches paintEvent)."""
-        if not self._series:
-            return 1
-        metrics = QFontMetrics(self._legend_font())
-        lx = 10.0
-        rows = 1
-        for series in self._series:
-            name_w = max(72, metrics.horizontalAdvance(series.name) + 4)
-            entry_w = 14 + name_w
-            if lx > 10.0 and lx + entry_w > width - 10:
-                lx = 10.0
-                rows += 1
-            lx += entry_w + 8
-        return rows
-
     def hasHeightForWidth(self) -> bool:  # noqa: N802
         return True
 
     def heightForWidth(self, width: int) -> int:  # noqa: N802
-        return self._height_for_rows(self._estimate_legend_rows(max(1, width)))
-
-    def _hint_width(self) -> int:
-        return self.width() if self.width() > 1 else 360
+        del width
+        return self._fixed_height()
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(360, self.heightForWidth(self._hint_width()))
+        return QSize(360, self._fixed_height())
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        # Match sizeHint. A one-row minimum let the layout shrink the slot and
-        # clip the plot floor, which is where the early billing periods sit.
-        return QSize(200, self.heightForWidth(self._hint_width()))
+        return QSize(200, self._fixed_height())
 
     def set_data(
         self,
@@ -847,6 +828,7 @@ class MultiSeriesHistoryChart(QWidget):
         self._hidden &= names
         self._hover_index = None
         self._value_card.hide()
+        self.setFixedHeight(self._fixed_height())
         self.updateGeometry()
         self.update()
 
@@ -1470,142 +1452,34 @@ def _format_token_chip(n: int) -> str:
 
 
 def _merge_composer_usage_series(
-    preview: VscdbHabitsPreview,
     usage: UsageCsvPreview,
-    sdk: SdkHabitsPreview | None = None,
 ) -> tuple[
     list[str],
     list[float | None],
     list[float | None],
     list[float | None],
-    list[float | None],
-    list[float | None],
-    list[float | None],
-    list[float | None],
-    list[float | None],
-    list[float | None],
-    list[float | None],
-    list[float | None],
-    list[float | None],
-    list[int],
 ]:
-    """Union billing periods from vscdb + usage CSV + SDK/pi into aligned series."""
-    by_start: dict[str, VscdbPeriodBucket] = {}
-    if preview.available:
-        for p in preview.periods:
-            by_start[p.period_start] = p
-
-    usage_by: dict[str, object] = {}
-    if usage.available:
-        for u in usage.periods:
-            usage_by[u.period_start] = u
-
-    sdk_by: dict[str, SdkHabitsBatch] = {}
-    if sdk is not None and sdk.available:
-        for batch in sdk.history:
-            key = batch.period_start or ""
-            if key:
-                sdk_by[key] = batch
-
-    starts = sorted(set(by_start) | set(usage_by) | set(sdk_by))
+    """Align billing-period labels with tokens / AUTO% / API% from usage CSV."""
     labels: list[str] = []
-    composers: list[float | None] = []
     tokens: list[float | None] = []
-    abort: list[float | None] = []
-    tool_err: list[float | None] = []
-    accept: list[float | None] = []
     auto_pct: list[float | None] = []
     api_pct: list[float | None] = []
-    pi_runs: list[float | None] = []
-    pi_abort: list[float | None] = []
-    pi_tool_err: list[float | None] = []
-    pi_friction: list[float | None] = []
-    pi_tokens: list[float | None] = []
-    weights: list[int] = []
 
-    for key in starts:
-        v = by_start.get(key)
-        u = usage_by.get(key)
-        s = sdk_by.get(key)
-        label = (
-            (v.label if v else None)
-            or (getattr(u, "label", None) if u is not None else None)
-            or (s.label if s is not None else None)
-            or key
-        )
-        labels.append(str(label))
-        if v is not None:
-            composers.append(float(v.composers))
-            abort.append(
-                float(v.abort_rate_pct) if v.abort_rate_pct is not None else None
-            )
-            tool_err.append(
-                float(v.tool_error_rate_pct)
-                if v.tool_error_rate_pct is not None
-                else None
-            )
-            accept.append(
-                float(v.accept_rate_pct) if v.accept_rate_pct is not None else None
-            )
-            weights.append(v.composers)
-        else:
-            composers.append(None)
-            abort.append(None)
-            tool_err.append(None)
-            accept.append(None)
-            weights.append(0)
-        if u is not None:
-            tok = int(getattr(u, "total_tokens", 0) or 0)
-            tokens.append(float(tok) if tok or getattr(u, "event_count", 0) else None)
-            cp = getattr(u, "cursor_models_pct", None)
-            op = getattr(u, "other_models_pct", None)
-            auto_pct.append(float(cp) if cp is not None else None)
-            api_pct.append(float(op) if op is not None else None)
-        else:
-            tokens.append(None)
-            auto_pct.append(None)
-            api_pct.append(None)
-        if s is not None:
-            pi_runs.append(float(s.runs))
-            pi_abort.append(
-                float(s.abort_rate_pct) if s.abort_rate_pct is not None else None
-            )
-            pi_tool_err.append(
-                float(s.shell_fail_pct) if s.shell_fail_pct is not None else None
-            )
-            pi_friction.append(
-                float(s.friction_rate_pct) if s.friction_rate_pct is not None else None
-            )
-            pi_tokens.append(
-                float(s.median_total_tokens)
-                if s.median_total_tokens is not None
-                else None
-            )
-            if weights[-1] == 0:
-                weights[-1] = s.runs
-        else:
-            pi_runs.append(None)
-            pi_abort.append(None)
-            pi_tool_err.append(None)
-            pi_friction.append(None)
-            pi_tokens.append(None)
+    if not usage.available:
+        return labels, tokens, auto_pct, api_pct
+
+    for u in sorted(usage.periods, key=lambda p: p.period_start):
+        labels.append(str(getattr(u, "label", None) or u.period_start))
+        tok = int(getattr(u, "total_tokens", 0) or 0)
+        tokens.append(float(tok) if tok or getattr(u, "event_count", 0) else None)
+        cp = getattr(u, "cursor_models_pct", None)
+        op = getattr(u, "other_models_pct", None)
+        auto_pct.append(float(cp) if cp is not None else None)
+        api_pct.append(float(op) if op is not None else None)
 
     # Drop leading / trailing all-empty periods so the x-axis isn't padded
     # with blank slots (e.g. a phantom month from midnight-vs-renewal-time).
-    series_cols = (
-        composers,
-        tokens,
-        abort,
-        tool_err,
-        accept,
-        auto_pct,
-        api_pct,
-        pi_runs,
-        pi_abort,
-        pi_tool_err,
-        pi_friction,
-        pi_tokens,
-    )
+    series_cols = (tokens, auto_pct, api_pct)
 
     def _row_has_data(i: int) -> bool:
         return any(col[i] is not None for col in series_cols)
@@ -1614,40 +1488,15 @@ def _merge_composer_usage_series(
     if keep:
         lo, hi = keep[0], keep[-1] + 1
         labels = labels[lo:hi]
-        composers = composers[lo:hi]
         tokens = tokens[lo:hi]
-        abort = abort[lo:hi]
-        tool_err = tool_err[lo:hi]
-        accept = accept[lo:hi]
         auto_pct = auto_pct[lo:hi]
         api_pct = api_pct[lo:hi]
-        pi_runs = pi_runs[lo:hi]
-        pi_abort = pi_abort[lo:hi]
-        pi_tool_err = pi_tool_err[lo:hi]
-        pi_friction = pi_friction[lo:hi]
-        pi_tokens = pi_tokens[lo:hi]
-        weights = weights[lo:hi]
 
-    return (
-        labels,
-        composers,
-        tokens,
-        abort,
-        tool_err,
-        accept,
-        auto_pct,
-        api_pct,
-        pi_runs,
-        pi_abort,
-        pi_tool_err,
-        pi_friction,
-        pi_tokens,
-        weights,
-    )
+    return labels, tokens, auto_pct, api_pct
 
 
 class ComposerHistoryPreview(QFrame):
-    """Longer-range composer/tool trends from state.vscdb (+ usage CSV tokens)."""
+    """Billing-period tokens / AUTO / API trends from usage CSV."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1675,19 +1524,6 @@ class ComposerHistoryPreview(QFrame):
         header.addWidget(title, stretch=0)
         header.addStretch(1)
 
-        self._chip_composers = SeriesToggleChip(
-            "Composers",
-            fg="#A8C3A4",
-            bg="#1A2420",
-            border="#2F4638",
-            tooltip=(
-                "Cursor Composer / Agent chat threads\n"
-                "in this billing period (state.vscdb).\n"
-                "\n"
-                "One thread = one composer,\n"
-                "no matter how many follow-ups."
-            ),
-        )
         self._chip_tokens = SeriesToggleChip(
             "Tokens",
             fg="#E0C090",
@@ -1698,40 +1534,6 @@ class ComposerHistoryPreview(QFrame):
                 "usage-events CSV this period.\n"
                 "\n"
                 "Native Cursor usage — not pi."
-            ),
-        )
-        self._chip_abort = SeriesToggleChip(
-            "Abort %",
-            fg="#D0B56C",
-            bg="#242018",
-            border="#4A4028",
-            tooltip=(
-                "Share of Cursor Composer threads\n"
-                "marked aborted in state.vscdb\n"
-                "for this billing period."
-            ),
-        )
-        self._chip_tool = SeriesToggleChip(
-            "Tool error %",
-            fg="#D9897A",
-            bg="#261C1A",
-            border="#4A322E",
-            tooltip=(
-                "Share of Cursor Composer tool calls\n"
-                "that ended in error\n"
-                "(from state.vscdb bubbles)."
-            ),
-        )
-        self._chip_accept = SeriesToggleChip(
-            "Accept %",
-            fg="#8BA4C7",
-            bg="#1A2030",
-            border="#2F3B52",
-            tooltip=(
-                "Composer suggested lines accepted\n"
-                "÷ suggested (aiCodeTracking).\n"
-                "\n"
-                "Not available for pi edits."
             ),
         )
         self._chip_auto = SeriesToggleChip(
@@ -1756,82 +1558,13 @@ class ComposerHistoryPreview(QFrame):
                 "for this billing period."
             ),
         )
-        self._chip_pi_runs = SeriesToggleChip(
-            "pi/runs",
-            fg="#7BC9A6",
-            bg="#15241F",
-            border="#2A4A3C",
-            tooltip=(
-                "Cursor SDK / pi agent runs\n"
-                "in this billing period\n"
-                "(sdk-agent-store).\n"
-                "\n"
-                "One chat can contain many runs."
-            ),
-        )
-        self._chip_pi_abort = SeriesToggleChip(
-            "pi/abort %",
-            fg="#E0C070",
-            bg="#2A2414",
-            border="#4A4020",
-            tooltip=(
-                "CANCELLED ÷ (FINISHED + CANCELLED)\n"
-                "among pi / SDK runs.\n"
-                "\n"
-                "Excludes ERROR status."
-            ),
-        )
-        self._chip_pi_tool = SeriesToggleChip(
-            "pi/tool err %",
-            fg="#E09A8A",
-            bg="#2A1C1A",
-            border="#4A3530",
-            tooltip=(
-                "Shell calls with non-zero exit\n"
-                "÷ all shell calls\n"
-                "in pi / SDK runs."
-            ),
-        )
-        self._chip_pi_friction = SeriesToggleChip(
-            "pi/friction %",
-            fg="#9BB0D0",
-            bg="#1A2030",
-            border="#354460",
-            tooltip=(
-                "(CANCELLED + ERROR)\n"
-                "÷ terminal pi / SDK runs.\n"
-                "\n"
-                "Broad “didn’t finish OK” rate."
-            ),
-        )
-        self._chip_pi_tokens = SeriesToggleChip(
-            "pi/tokens",
-            fg="#D4B896",
-            bg="#242016",
-            border="#4A3C28",
-            tooltip=(
-                "Median totalTokens per\n"
-                "pi / SDK run this period.\n"
-                "\n"
-                "From usage_json on finished runs."
-            ),
-        )
         self._chip_auto.hide()
         self._chip_api.hide()
 
         self._series_chips: list[SeriesToggleChip] = [
             self._chip_tokens,
-            self._chip_composers,
-            self._chip_abort,
-            self._chip_tool,
-            self._chip_accept,
             self._chip_auto,
             self._chip_api,
-            self._chip_pi_runs,
-            self._chip_pi_abort,
-            self._chip_pi_tool,
-            self._chip_pi_friction,
-            self._chip_pi_tokens,
         ]
         for chip in self._series_chips:
             chip.toggled.connect(self._on_series_chip_toggled)
@@ -1886,26 +1619,11 @@ class ComposerHistoryPreview(QFrame):
     ) -> None:
         usage = usage or UsageCsvPreview.unavailable("")
         sdk = sdk or SdkHabitsPreview.unavailable("")
-        (
-            labels,
-            composers,
-            tokens,
-            abort,
-            tool_err,
-            accept,
-            auto_pct,
-            api_pct,
-            pi_runs,
-            pi_abort,
-            pi_tool_err,
-            pi_friction,
-            pi_tokens,
-            weights,
-        ) = _merge_composer_usage_series(preview, usage, sdk)
+        labels, tokens, auto_pct, api_pct = _merge_composer_usage_series(usage)
         if len(labels) < 2:
             message = (
-                preview.error_message
-                or usage.error_message
+                usage.error_message
+                or preview.error_message
                 or sdk.error_message
                 or "Not enough billing-period history yet"
             )
@@ -1918,46 +1636,19 @@ class ComposerHistoryPreview(QFrame):
         self._content.show()
 
         token_total = sum(int(v) for v in tokens if v is not None)
-        pi_run_total = sum(int(v) for v in pi_runs if v is not None)
-        caption_bits = [
-            f"Billing periods · {len(labels)} · {preview.composers} composers"
-        ]
+        caption_bits = [f"Billing periods · {len(labels)}"]
         if token_total:
             caption_bits.append(f"{token_total:,} tokens")
-        if pi_run_total:
-            caption_bits.append(f"{pi_run_total} pi runs")
         self._caption.setText(" · ".join(caption_bits))
 
         def _latest(values: list[float | None]) -> float | None:
             return next((v for v in reversed(values) if v is not None), None)
-
-        latest_composers = _latest(composers)
-        if latest_composers is None:
-            self._chip_composers.setText("— composers")
-        else:
-            self._chip_composers.setText(f"{int(latest_composers)} composers")
 
         latest_tokens = _latest(tokens)
         if latest_tokens is None:
             self._chip_tokens.setText("— tokens")
         else:
             self._chip_tokens.setText(_format_token_chip(int(latest_tokens)))
-
-        latest_abort = _latest(abort)
-        latest_tool = _latest(tool_err)
-        latest_accept = _latest(accept)
-        if latest_abort is None:
-            self._chip_abort.setText("— abort")
-        else:
-            self._chip_abort.setText(f"{latest_abort:.0f}% abort")
-        if latest_tool is None:
-            self._chip_tool.setText("— tool err")
-        else:
-            self._chip_tool.setText(f"{latest_tool:.0f}% tool err")
-        if latest_accept is None:
-            self._chip_accept.setText("— accept")
-        else:
-            self._chip_accept.setText(f"{latest_accept:.0f}% accept")
 
         latest_auto = _latest(auto_pct)
         latest_api = _latest(api_pct)
@@ -1980,58 +1671,19 @@ class ComposerHistoryPreview(QFrame):
         else:
             self._chip_api.hide()
 
-        has_pi = any(v is not None for v in pi_runs)
-        pi_chips = (
-            (self._chip_pi_runs, pi_runs, lambda v: f"{int(v)} pi/runs"),
-            (self._chip_pi_abort, pi_abort, lambda v: f"{v:.0f}% pi/abort"),
-            (self._chip_pi_tool, pi_tool_err, lambda v: f"{v:.0f}% pi/tool err"),
-            (
-                self._chip_pi_friction,
-                pi_friction,
-                lambda v: f"{v:.0f}% pi/friction",
-            ),
-            (
-                self._chip_pi_tokens,
-                pi_tokens,
-                lambda v: f"pi/{_format_token_chip(int(v))}",
-            ),
-        )
-        for chip, series, fmt in pi_chips:
-            if has_pi and any(v is not None for v in series):
-                latest = _latest(series)
-                chip.setText(fmt(latest) if latest is not None else f"— {chip.series_name}")
-                chip.show()
-            else:
-                chip.hide()
-
         self._chips_host.updateGeometry()
 
         series = [
             ChartSeries("Tokens", "#E0C090", tokens, area=True),
-            ChartSeries("Composers", "#A8C3A4", composers),
-            ChartSeries("Abort %", "#D0B56C", abort, unit="%"),
-            ChartSeries("Tool error %", "#D9897A", tool_err, unit="%"),
-            ChartSeries("Accept %", "#8BA4C7", accept, unit="%"),
         ]
         if has_auto:
             series.append(ChartSeries("AUTO %", "#6FA8DC", auto_pct, unit="%"))
         if has_api:
             series.append(ChartSeries("API %", "#B0B0B0", api_pct, unit="%"))
-        if has_pi:
-            for name, color, values, unit in (
-                ("pi/runs", "#7BC9A6", pi_runs, ""),
-                ("pi/abort %", "#E0C070", pi_abort, "%"),
-                ("pi/tool err %", "#E09A8A", pi_tool_err, "%"),
-                ("pi/friction %", "#9BB0D0", pi_friction, "%"),
-                ("pi/tokens", "#D4B896", pi_tokens, ""),
-            ):
-                if any(v is not None for v in values):
-                    series.append(ChartSeries(name, color, values, unit=unit))
 
         self._chart.set_data(
             labels,
             series,
-            weights=weights,
             caption="Hover a period for exact values · click chips to toggle series",
         )
         self._sync_series_chip_states()
@@ -2066,8 +1718,8 @@ class CountdownLabel(QLabel):
             """
             QLabel {
                 color: #A0A0A0;
-                padding: 3px 8px;
-                border-radius: 6px;
+                padding: 8px 12px;
+                border-radius: 8px;
             }
             QLabel:hover {
                 color: #E8E8E8;
