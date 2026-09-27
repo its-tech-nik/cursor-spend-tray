@@ -28,6 +28,7 @@ BetweenScrapesMode = Literal["keep_open", "quit"]
 APP_NAME = "cursor-spend-tray"
 SPENDING_URL = "https://cursor.com/dashboard/spending"
 SETTINGS_URL = "https://cursor.com/dashboard/settings"
+USAGE_URL = "https://cursor.com/dashboard/usage"
 # Spending URL redirects to sign-in when the dedicated profile has no session.
 LOGIN_URL = SPENDING_URL
 # Context-menu choices (minutes). Default is 8; older installs may still have 10.

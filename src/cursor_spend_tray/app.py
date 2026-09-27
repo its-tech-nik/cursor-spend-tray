@@ -7,12 +7,13 @@ from collections.abc import Callable
 from datetime import datetime
 
 import httpx
-from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QTime, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QTime, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
     QConicalGradient,
+    QDesktopServices,
     QGuiApplication,
     QIcon,
     QPainter,
@@ -39,6 +40,7 @@ from .auth_detect import snapshot_needs_login
 from .config import (
     APP_NAME,
     POLL_INTERVAL_MINUTES,
+    USAGE_URL,
     AppConfig,
     BetweenScrapesMode,
     UsageSnapshot,
@@ -82,6 +84,9 @@ QFrame#ctxAccount {
     background: transparent;
     border: none;
     border-radius: 8px;
+}
+QFrame#ctxAccount:hover {
+    background: #3A3A3A;
 }
 QLabel {
     background: transparent;
@@ -346,8 +351,9 @@ class TrayContextMenu(QFrame):
         return row
 
     def add_account_card(self) -> _CtxAccountCard:
-        """Non-interactive account summary (avatar + email + plan)."""
+        """Clickable account summary (avatar + email + plan)."""
         card = _CtxAccountCard(self)
+        card.clicked.connect(self.hide)
         self._layout.addWidget(card)
         self._rows.append(card)
         return card
@@ -600,7 +606,9 @@ class TrayContextSubmenu(QFrame):
 
 
 class _CtxAccountCard(QFrame):
-    """Single non-interactive field: circular avatar spanning email + subscription."""
+    """Clickable field: circular avatar spanning email + subscription."""
+
+    clicked = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -608,7 +616,8 @@ class _CtxAccountCard(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(56)
         self.setStyleSheet(_CTX_ACCOUNT_STYLE)
-        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Open Cursor usage dashboard in your default browser")
 
         self._avatar = QLabel()
         self._avatar.setFixedSize(_ACCOUNT_AVATAR_PX, _ACCOUNT_AVATAR_PX)
@@ -678,6 +687,13 @@ class _CtxAccountCard(QFrame):
         if isinstance(parent, (TrayContextMenu, TrayContextSubmenu)):
             parent.close_child_flyouts()
         super().enterEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class _CtxMenuRow(QFrame):
@@ -953,6 +969,7 @@ class TrayApp(QWidget):
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         self._account_card = self._ctx.add_account_card()
+        self._account_card.clicked.connect(self._open_usage_dashboard)
         self._ctx.add_separator()
         self._ctx.add_action(self._refresh_action)
         self._ctx.add_action(self._keep_open_action)
@@ -1335,6 +1352,12 @@ class TrayApp(QWidget):
         # Watch network once remote debugging is up; auto-refresh after dashboard API traffic.
         QTimer.singleShot(2_000, self._stop_spinner)
         QTimer.singleShot(2_500, self._start_login_network_watch)
+
+    def _open_usage_dashboard(self) -> None:
+        # System URL handler (xdg-open / portal), never the automation browser.
+        if not QDesktopServices.openUrl(QUrl(USAGE_URL)):
+            log.warning("Failed to open %s in the default browser", USAGE_URL)
+            self.popup.set_status("Could not open the usage dashboard in your default browser.")
 
     def _on_view_browser(self) -> None:
         """Open the selected automation browser headed on the Cursor spending page."""
