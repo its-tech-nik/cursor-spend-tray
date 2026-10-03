@@ -753,7 +753,7 @@ def _format_chart_value(value: float | None, unit: str = "") -> str:
 
 
 class MultiSeriesHistoryChart(QWidget):
-    """Single multi-line chart; series are min–max normalized; hover shows raw values."""
+    """Single multi-line chart; series are min–max normalized (``%`` series use 0–100); hover shows raw values."""
 
     # Fixed plot body + one legend row. Total height is constant so chip/series
     # changes above the chart cannot stretch or shrink this widget.
@@ -917,17 +917,22 @@ class MultiSeriesHistoryChart(QWidget):
         anchor = self.mapToGlobal(QPoint(int(round(x)), int(round(self._plot.top()))))
         self._value_card.place(anchor)
 
-    def _normalized_points(self, values: list[float | None]) -> list[QPointF | None]:
+    def _normalized_points(self, series: ChartSeries) -> list[QPointF | None]:
+        values = series.values
         numeric = [v for v in values if v is not None]
         if not numeric:
             return [None] * len(values)
-        lo = min(numeric)
-        hi = max(numeric)
-        if hi <= lo:
-            hi = lo + 1.0
-        span = hi - lo
-        # Peak headroom in value space; floor clearance is pixel-based via _draw_rect.
-        hi += span * 0.14
+        if series.unit == "%":
+            lo = 0.0
+            hi = max(100.0, max(numeric))
+        else:
+            lo = min(numeric)
+            hi = max(numeric)
+            if hi <= lo:
+                hi = lo + 1.0
+            span = hi - lo
+            # Peak headroom in value space; floor clearance is pixel-based via _draw_rect.
+            hi += span * 0.14
         draw = self._draw_rect()
         n = len(values)
         out: list[QPointF | None] = []
@@ -1066,7 +1071,7 @@ class MultiSeriesHistoryChart(QWidget):
 
     def _paint_area_series(self, painter: QPainter, series: ChartSeries) -> None:
         """Fill under the series curve down to the plot baseline (behind lines)."""
-        points = self._normalized_points(series.values)
+        points = self._normalized_points(series)
         usable = [p for p in points if p is not None]
         if len(usable) < 2:
             return
@@ -1116,7 +1121,7 @@ class MultiSeriesHistoryChart(QWidget):
         """Stroke + dots for a series (drawn after area fills)."""
         if series.area:
             # Area series: dots only on top of the fill; stroke already drawn softly.
-            points = self._normalized_points(series.values)
+            points = self._normalized_points(series)
             painter.setBrush(QColor(series.color))
             painter.setPen(Qt.PenStyle.NoPen)
             for pt in points:
@@ -1124,7 +1129,7 @@ class MultiSeriesHistoryChart(QWidget):
                     painter.drawEllipse(pt, 2.0, 2.0)
             return
 
-        points = self._normalized_points(series.values)
+        points = self._normalized_points(series)
         usable = [p for p in points if p is not None]
         if len(usable) < 2:
             return
