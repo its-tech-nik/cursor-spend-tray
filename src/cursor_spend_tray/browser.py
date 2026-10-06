@@ -348,6 +348,13 @@ def _iter_automation_main_procs(
     return found
 
 
+def automation_main_procs(
+    info: BrowserInfo, *, app_name: str = "cursor-spend-tray"
+) -> list[tuple[int, list[str]]]:
+    """Public (pid, argv) rows for the dedicated profile's main process(es)."""
+    return _iter_automation_main_procs(info, app_name=app_name)
+
+
 def browser_is_running(info: BrowserInfo, *, app_name: str = "cursor-spend-tray") -> bool:
     """True when the dedicated automation profile instance is up."""
     return bool(_iter_automation_main_procs(info, app_name=app_name))

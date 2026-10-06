@@ -385,7 +385,7 @@
                 {
                   "id": "choose_automation_browser",
                   "title": "Choose which browser scrapes spending",
-                  "description": "Under “Automation on”, pick an installed supported browser. Each option uses its own dedicated profile.",
+                  "description": "Under “Automation on”, pick an installed supported browser. Each option uses its own dedicated profile. Each browser shows the peak memory and average CPU measured during its last headless scrape (hover for details) to help pick the lightest one.",
                   "available_when": "Browser submenu is available and at least one supported browser is installed.",
                   "code": [
                     {
@@ -402,6 +402,11 @@
                       "file": "src/cursor_spend_tray/config.py",
                       "function": "AppConfig.set_browser_key",
                       "line": 125
+                    },
+                    {
+                      "file": "src/cursor_spend_tray/browser_stats.py",
+                      "function": "BrowserResourceMonitor.begin_scrape",
+                      "line": 201
                     }
                   ],
                   "children": []

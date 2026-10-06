@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
 
 from . import autostart
 from .auth_detect import snapshot_needs_login
+from .browser_stats import BrowserResourceMonitor, format_run_summary, format_run_tooltip
 from .config import (
     APP_NAME,
     POLL_INTERVAL_MINUTES,
@@ -717,6 +718,16 @@ class _CtxMenuRow(QFrame):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
 
+        # Optional dim secondary text, set via the action's "ctxDetail" property.
+        self._detail = QLabel("")
+        detail_font = self._detail.font()
+        detail_font.setPointSize(9)
+        self._detail.setFont(detail_font)
+        self._detail.setStyleSheet("color: #8A8A8A; padding-left: 12px;")
+        self._detail.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
         self._trailing = QLabel("")
         self._trailing.setFixedWidth(22)
         self._trailing.setAlignment(
@@ -728,6 +739,7 @@ class _CtxMenuRow(QFrame):
         row.setContentsMargins(2, 0, 2, 0)
         row.setSpacing(8)
         row.addWidget(self._label, stretch=1)
+        row.addWidget(self._detail)
         row.addWidget(self._trailing)
 
         action.changed.connect(self._sync_from_action)
@@ -735,6 +747,10 @@ class _CtxMenuRow(QFrame):
 
     def _sync_from_action(self) -> None:
         self._label.setText(self._action.text())
+        detail = self._action.property("ctxDetail")
+        self._detail.setText(detail or "")
+        self._detail.setVisible(bool(detail))
+        self.setToolTip(self._action.property("ctxDetailTip") or "")
         if self._action.isCheckable() and self._action.isChecked():
             self._trailing.setText("✓")
         else:
@@ -932,6 +948,7 @@ class TrayApp(QWidget):
             self._poll_actions.append(action)
         self._sync_poll_actions()
 
+        self._resource_monitor = BrowserResourceMonitor(config, self)
         self._browser_actions: list[QAction] = []
         self._browser_group = QActionGroup(self)
         self._browser_group.setExclusive(True)
@@ -1214,9 +1231,12 @@ class TrayApp(QWidget):
         self.popup.set_refreshing(refreshing)
         self.popup.set_remaining(self.scheduler.remaining_seconds())
         if refreshing:
+            self._resource_monitor.begin_scrape()
             self._stop_login_network_watch()
             self._stop_logout_network_watch()
-        elif self._viewing_browser:
+            return
+        self._resource_monitor.end_scrape()
+        if self._viewing_browser:
             # Resume logout watch after a scrape while View Browser stays headed.
             QTimer.singleShot(500, self._start_logout_network_watch)
 
@@ -1582,6 +1602,10 @@ class TrayApp(QWidget):
             action.setCheckable(True)
             action.setData(info.key)
             action.setToolTip(f"{info.family.value.title()}-family · {info.binary}")
+            run = self._resource_monitor.last_run(info.key)
+            if run is not None:
+                action.setProperty("ctxDetail", format_run_summary(run))
+                action.setProperty("ctxDetailTip", format_run_tooltip(run))
             action.triggered.connect(
                 lambda checked=False, key=info.key: self._on_browser_chosen(key)
             )
@@ -1889,6 +1913,7 @@ class TrayApp(QWidget):
         """Stop polling and tear down the dedicated automation browser on quit."""
         self._stop_login_network_watch()
         self._stop_logout_network_watch()
+        self._resource_monitor.stop()
         if hasattr(self, "scheduler"):
             self.scheduler.stop()
         if hasattr(self, "_launch_retry_timer"):
