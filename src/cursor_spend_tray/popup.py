@@ -1807,6 +1807,91 @@ class CountdownLabel(QLabel):
             self.setFixedHeight(hint_h)
 
 
+class PinButton(QWidget):
+    """Toggle that pins the popup open and above other windows."""
+
+    toggled = pyqtSignal(bool)
+
+    _SIZE = 26
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._checked = False
+        self._hover = False
+        self.setFixedSize(self._SIZE, self._SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sync_tooltip()
+
+    def is_checked(self) -> bool:
+        return self._checked
+
+    def set_checked(self, checked: bool) -> None:
+        if checked == self._checked:
+            return
+        self._checked = checked
+        self._sync_tooltip()
+        self.update()
+
+    def _sync_tooltip(self) -> None:
+        self.setToolTip(
+            "Unpin — close when clicking elsewhere"
+            if self._checked
+            else "Pin — keep open and on top of other windows"
+        )
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.set_checked(not self._checked)
+            self.toggled.emit(self._checked)
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._checked:
+            painter.setBrush(QColor("#22314A"))
+            painter.setPen(QPen(QColor("#3A5378"), 1))
+        elif self._hover:
+            painter.setBrush(QColor("#2C2C2C"))
+            painter.setPen(Qt.PenStyle.NoPen)
+        else:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0), 8, 8)
+
+        if self._checked:
+            color = QColor("#8BA4C7")
+        elif self._hover:
+            color = QColor("#E8E8E8")
+        else:
+            color = QColor("#A0A0A0")
+        painter.translate(self.width() / 2.0, self.height() / 2.0)
+        # Unpinned pins lean over; pinned ones stand upright.
+        painter.rotate(0 if self._checked else 45)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(QRectF(-3.5, -8.0, 7.0, 7.5), 1.5, 1.5)
+        painter.drawRoundedRect(QRectF(-6.0, -1.5, 12.0, 2.5), 1.2, 1.2)
+        pen = QPen(color, 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(0, 1.0), QPointF(0, 8.0))
+        painter.end()
+
+
 class DraggablePanel(QFrame):
     """Content card that can be reordered by dragging anywhere on the panel."""
 
@@ -2083,8 +2168,8 @@ def _renewal_boundary_key(
 class SpendPopup(QFrame):
     """Frameless tray panel. Closes when focus leaves or the user clicks outside.
 
-    When opened with keep_open=True (context menu), outside clicks and focus loss
-    do not dismiss it — tray click (or hide()) still closes it.
+    When pinned (pin button, or keep_open=True from the context menu), outside
+    clicks and focus loss do not dismiss it — tray click (or hide()) still closes it.
     """
 
     refresh_requested = pyqtSignal()
@@ -2203,6 +2288,10 @@ class SpendPopup(QFrame):
         self.countdown = CountdownLabel()
         self.countdown.clicked.connect(self.refresh_requested.emit)
 
+        # Floats over the top-right corner of the first card, outside the layout.
+        self.pin_button = PinButton(self)
+        self.pin_button.toggled.connect(self.set_keep_open)
+
         self.status = QLabel("")
         status_font = QFont()
         status_font.setPointSize(9)
@@ -2219,7 +2308,17 @@ class SpendPopup(QFrame):
         root.addWidget(self._panel_host)
         root.addWidget(self.countdown)
         root.addWidget(self.status)
+        self._place_pin_button()
         self.refresh_habits()
+
+    def _place_pin_button(self) -> None:
+        inset = 12 + 6
+        self.pin_button.move(self.width() - inset - self.pin_button.width(), inset)
+        self.pin_button.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        self._place_pin_button()
 
     def refresh_habits(
         self,
@@ -2372,6 +2471,7 @@ class SpendPopup(QFrame):
         """
         self._dismiss_armed = False
         self._keep_open = keep_open
+        self.pin_button.set_checked(keep_open)
         self._arm_timer.stop()
         self.adjustSize()
         target = pos if isinstance(pos, QPoint) else QPoint(pos.x(), pos.y())
@@ -2384,26 +2484,40 @@ class SpendPopup(QFrame):
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         QTimer.singleShot(0, lambda p=target: self.move(p) if self.isVisible() else None)
         QTimer.singleShot(50, lambda p=target: self.move(p) if self.isVisible() else None)
+        self._wire_dismiss(keep_open)
 
+    def set_keep_open(self, keep_open: bool) -> None:
+        """Pin (or unpin) the visible popup without reopening it."""
+        self.pin_button.set_checked(keep_open)
+        if keep_open == self._keep_open:
+            return
+        self._keep_open = keep_open
+        self._dismiss_armed = False
+        self._arm_timer.stop()
+        if not self.isVisible():
+            return
+        self.raise_()
+        if not keep_open:
+            self.activateWindow()
+        self._wire_dismiss(keep_open)
+
+    def _wire_dismiss(self, keep_open: bool) -> None:
         app = QApplication.instance()
-        if app is not None:
-            if keep_open:
-                # Pinned: no outside-click filter / focus-leave dismiss wiring.
-                app.removeEventFilter(self._outside_filter)
-                try:
-                    app.focusWindowChanged.disconnect(self._on_focus_window_changed)
-                except TypeError:
-                    pass
-            else:
-                app.installEventFilter(self._outside_filter)
-                # focusWindowChanged is the reliable leave signal on Plasma/XWayland.
-                try:
-                    app.focusWindowChanged.disconnect(self._on_focus_window_changed)
-                except TypeError:
-                    pass
-                app.focusWindowChanged.connect(self._on_focus_window_changed)
-                # Grace period: the tray Activate that opened us must not instantly dismiss.
-                self._arm_timer.start(300)
+        if app is None:
+            return
+        app.removeEventFilter(self._outside_filter)
+        try:
+            app.focusWindowChanged.disconnect(self._on_focus_window_changed)
+        except TypeError:
+            pass
+        if keep_open:
+            # Pinned: no outside-click filter / focus-leave dismiss wiring.
+            return
+        app.installEventFilter(self._outside_filter)
+        # focusWindowChanged is the reliable leave signal on Plasma/XWayland.
+        app.focusWindowChanged.connect(self._on_focus_window_changed)
+        # Grace period: the tray Activate that opened us must not instantly dismiss.
+        self._arm_timer.start(300)
 
     def _arm_dismiss(self) -> None:
         if self._keep_open:
@@ -2443,6 +2557,7 @@ class SpendPopup(QFrame):
         self._arm_timer.stop()
         self._dismiss_armed = False
         self._keep_open = False
+        self.pin_button.set_checked(False)
         self.composer_history.clear_period_selection()
         BubbleTip.hide_shared()
         app = QApplication.instance()
