@@ -767,6 +767,9 @@ class MultiSeriesHistoryChart(QWidget):
     # Keep 0% / min values clearly above the plot floor (dots + stroke + AA).
     _FLOOR_CLEARANCE = 28.0
 
+    # Selected period index, or None when the selection is cleared.
+    period_selected = pyqtSignal(object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._labels: list[str] = []
@@ -774,6 +777,7 @@ class MultiSeriesHistoryChart(QWidget):
         self._series: list[ChartSeries] = []
         self._hidden: set[str] = set()
         self._hover_index: int | None = None
+        self._selected_index: int | None = None
         self._plot = QRectF()
         self._value_card = ChartValueCard(self)
         self.setMouseTracking(True)
@@ -821,16 +825,40 @@ class MultiSeriesHistoryChart(QWidget):
         weights: list[int] | None = None,
         caption: str = "",
     ) -> None:
+        selected_label = self.selected_label()
         self._labels = list(labels)
         self._series = list(series)
         self._weights = list(weights or [])
         names = {s.name for s in self._series}
         self._hidden &= names
         self._hover_index = None
+        self._selected_index = (
+            self._labels.index(selected_label)
+            if selected_label in self._labels
+            else None
+        )
         self._value_card.hide()
         self.setFixedHeight(self._fixed_height())
         self.updateGeometry()
         self.update()
+
+    def selected_index(self) -> int | None:
+        return self._selected_index
+
+    def clear_selection(self) -> None:
+        self._selected_index = None
+        self.update()
+
+    def selected_label(self) -> str | None:
+        idx = self._selected_index
+        if idx is None or not (0 <= idx < len(self._labels)):
+            return None
+        return self._labels[idx]
+
+    def _index_at(self, x: float) -> int:
+        n = len(self._labels)
+        rel = (x - self._plot.left()) / max(1.0, self._plot.width())
+        return max(0, min(n - 1, int(round(rel * (n - 1)))))
 
     def is_series_visible(self, name: str) -> bool:
         return name not in self._hidden
@@ -878,15 +906,25 @@ class MultiSeriesHistoryChart(QWidget):
         if len(self._labels) < 2 or self._plot.width() <= 0:
             return
         x = event.position().x() if hasattr(event, "position") else event.x()
-        n = len(self._labels)
-        rel = (x - self._plot.left()) / max(1.0, self._plot.width())
-        idx = int(round(rel * (n - 1)))
-        idx = max(0, min(n - 1, idx))
+        idx = self._index_at(x)
         if idx != self._hover_index:
             self._hover_index = idx
             self.update()
         self._sync_value_card()
         super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and len(self._labels) >= 2
+            and self._plot.width() > 0
+        ):
+            x = event.position().x() if hasattr(event, "position") else event.x()
+            idx = self._index_at(x)
+            self._selected_index = None if idx == self._selected_index else idx
+            self.update()
+            self.period_selected.emit(self._selected_index)
+        super().mousePressEvent(event)
 
     def _sync_value_card(self) -> None:
         idx = self._hover_index
@@ -1052,6 +1090,14 @@ class MultiSeriesHistoryChart(QWidget):
             self._paint_area_series(painter, series)
         for series in [*area_series, *line_series]:
             self._paint_line_series(painter, series)
+
+        n = len(self._labels)
+        if self._selected_index is not None and 0 <= self._selected_index < n:
+            x = self._plot.left() + (self._plot.width() * self._selected_index / (n - 1))
+            painter.setPen(QPen(QColor("#9FB3CC"), 1.4, Qt.PenStyle.SolidLine))
+            painter.drawLine(
+                QPointF(x, self._plot.top()), QPointF(x, self._plot.bottom())
+            )
 
         # Hover crosshair + value card
         if self._hover_index is not None and 0 <= self._hover_index < len(self._labels):
@@ -1590,6 +1636,10 @@ class ComposerHistoryPreview(QFrame):
         )
         self._caption = caption
         self._chart = MultiSeriesHistoryChart()
+        self._chart.period_selected.connect(self._on_period_selected)
+        self._tokens: list[float | None] = []
+        self._auto_pct: list[float | None] = []
+        self._api_pct: list[float | None] = []
 
         self._fallback = QLabel("")
         fallback_font = QFont()
@@ -1646,37 +1696,13 @@ class ComposerHistoryPreview(QFrame):
             caption_bits.append(f"{token_total:,} tokens")
         self._caption.setText(" · ".join(caption_bits))
 
-        def _latest(values: list[float | None]) -> float | None:
-            return next((v for v in reversed(values) if v is not None), None)
-
-        latest_tokens = _latest(tokens)
-        if latest_tokens is None:
-            self._chip_tokens.setText("— tokens")
-        else:
-            self._chip_tokens.setText(_format_token_chip(int(latest_tokens)))
-
-        latest_auto = _latest(auto_pct)
-        latest_api = _latest(api_pct)
+        self._tokens = tokens
+        self._auto_pct = auto_pct
+        self._api_pct = api_pct
         has_auto = any(v is not None for v in auto_pct)
         has_api = any(v is not None for v in api_pct)
-        if has_auto:
-            if latest_auto is None:
-                self._chip_auto.setText("— AUTO")
-            else:
-                self._chip_auto.setText(f"{latest_auto:.0f}% AUTO")
-            self._chip_auto.show()
-        else:
-            self._chip_auto.hide()
-        if has_api:
-            if latest_api is None:
-                self._chip_api.setText("— API")
-            else:
-                self._chip_api.setText(f"{latest_api:.0f}% API")
-            self._chip_api.show()
-        else:
-            self._chip_api.hide()
-
-        self._chips_host.updateGeometry()
+        self._chip_auto.setVisible(has_auto)
+        self._chip_api.setVisible(has_api)
 
         series = [
             ChartSeries("Tokens", "#E0C090", tokens, area=True),
@@ -1689,9 +1715,38 @@ class ComposerHistoryPreview(QFrame):
         self._chart.set_data(
             labels,
             series,
-            caption="Hover a period for exact values · click chips to toggle series",
+            caption=(
+                "Hover a period for exact values · click a period to show it "
+                "in the chips · click chips to toggle series"
+            ),
         )
+        self._update_chip_values(self._chart.selected_index())
         self._sync_series_chip_states()
+
+    def _on_period_selected(self, index: int | None) -> None:
+        self._update_chip_values(index)
+
+    def clear_period_selection(self) -> None:
+        self._chart.clear_selection()
+        self._update_chip_values(None)
+
+    def _update_chip_values(self, index: int | None) -> None:
+        """Show the clicked period's values in the chips, or the latest when none."""
+
+        def _pick(values: list[float | None]) -> float | None:
+            if index is not None:
+                return values[index] if 0 <= index < len(values) else None
+            return next((v for v in reversed(values) if v is not None), None)
+
+        tokens = _pick(self._tokens)
+        self._chip_tokens.setText(
+            "— tokens" if tokens is None else _format_token_chip(int(tokens))
+        )
+        auto = _pick(self._auto_pct)
+        self._chip_auto.setText("— AUTO" if auto is None else f"{auto:.0f}% AUTO")
+        api = _pick(self._api_pct)
+        self._chip_api.setText("— API" if api is None else f"{api:.0f}% API")
+        self._chips_host.updateGeometry()
 
     def _on_series_chip_toggled(self, series_name: str) -> None:
         visible = self._chart.toggle_series(series_name)
@@ -2388,6 +2443,7 @@ class SpendPopup(QFrame):
         self._arm_timer.stop()
         self._dismiss_armed = False
         self._keep_open = False
+        self.composer_history.clear_period_selection()
         BubbleTip.hide_shared()
         app = QApplication.instance()
         if app is not None:
