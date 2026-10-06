@@ -309,6 +309,62 @@ def _draw_slash_overlay(painter: QPainter, size: int) -> None:
     )
 
 
+_FLYOUT_SWITCH_DELAY_MS = 300
+
+
+class _FlyoutHoverIntent(QObject):
+    """Defer leaving an open flyout until the pointer rests on another row.
+
+    Moving toward a flyout often grazes sibling rows; reacting to every enter
+    would close the flyout before the pointer reaches it.
+    """
+
+    def __init__(
+        self,
+        host: QWidget,
+        flyouts: Callable[[], list[TrayContextSubmenu]],
+    ) -> None:
+        super().__init__(host)
+        self._flyouts = flyouts
+        self._pending: QWidget | None = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(_FLYOUT_SWITCH_DELAY_MS)
+        self._timer.timeout.connect(self._apply)
+
+    def row_entered(self, row: QWidget) -> None:
+        target = row.submenu if isinstance(row, _CtxSubmenuRow) else None
+        open_flyouts = [f for f in self._flyouts() if f.isVisible()]
+        if not open_flyouts:
+            self.cancel()
+            if target is not None:
+                target.popup_beside(row)
+            return
+        if target is not None and target in open_flyouts:
+            self.cancel()
+            return
+        self._pending = row
+        self._timer.start()
+
+    def pointer_moved(self) -> None:
+        if self._pending is not None:
+            self._timer.start()
+
+    def cancel(self) -> None:
+        self._timer.stop()
+        self._pending = None
+
+    def _apply(self) -> None:
+        row = self._pending
+        self._pending = None
+        if row is None or not row.isVisible():
+            return
+        for flyout in self._flyouts():
+            flyout.hide()
+        if isinstance(row, _CtxSubmenuRow):
+            row.submenu.popup_beside(row)
+
+
 class TrayContextMenu(QFrame):
     """Tray menu as a Tool window.
 
@@ -326,6 +382,7 @@ class TrayContextMenu(QFrame):
         self._outside_filter = _CtxOutsideClickFilter(self)
         self._rows: list[QWidget] = []
         self._submenus: list[TrayContextSubmenu] = []
+        self._hover = _FlyoutHoverIntent(self, lambda: self._submenus)
 
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -334,6 +391,7 @@ class TrayContextMenu(QFrame):
             | Qt.WindowType.NoDropShadowWindowHint
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
         self.setMinimumWidth(220)
         self.setStyleSheet(_CTX_MENU_STYLE)
 
@@ -381,11 +439,22 @@ class TrayContextMenu(QFrame):
         return sep
 
     def close_child_flyouts(self) -> None:
+        self._hover.cancel()
         for submenu in self._submenus:
             submenu.hide()
 
     def close_submenus(self) -> None:
         self.close_child_flyouts()
+
+    def row_entered(self, row: QWidget) -> None:
+        self._hover.row_entered(row)
+
+    def cancel_pending_hover(self) -> None:
+        self._hover.cancel()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001
+        self._hover.pointer_moved()
+        super().mouseMoveEvent(event)
 
     @staticmethod
     def _sync_row(row: QWidget, action: QAction) -> None:
@@ -507,6 +576,7 @@ class TrayContextSubmenu(QFrame):
         self._host = host
         self._root_menu = root_menu
         self._child_flyouts: list[TrayContextSubmenu] = []
+        self._hover = _FlyoutHoverIntent(self, lambda: self._child_flyouts)
         self._rows: list[QWidget] = []
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -515,6 +585,7 @@ class TrayContextSubmenu(QFrame):
             | Qt.WindowType.NoDropShadowWindowHint
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
         self.setMinimumWidth(160)
         self.setStyleSheet(_CTX_MENU_STYLE)
 
@@ -554,6 +625,7 @@ class TrayContextSubmenu(QFrame):
 
     def clear_actions(self) -> None:
         """Remove action rows (keeps nested submenu rows). Used to rebuild browser lists."""
+        self._hover.cancel()
         kept: list[QWidget] = []
         for row in self._rows:
             if isinstance(row, _CtxSubmenuRow):
@@ -564,8 +636,23 @@ class TrayContextSubmenu(QFrame):
         self._rows = kept
 
     def close_child_flyouts(self) -> None:
+        self._hover.cancel()
         for child in self._child_flyouts:
             child.hide()
+
+    def row_entered(self, row: QWidget) -> None:
+        self._hover.row_entered(row)
+
+    def cancel_pending_hover(self) -> None:
+        self._hover.cancel()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001
+        self._hover.pointer_moved()
+        super().mouseMoveEvent(event)
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        self._host.cancel_pending_hover()
+        super().enterEvent(event)
 
     def owns_window(self, window) -> bool:  # noqa: ANN001
         if not self.isVisible():
@@ -686,7 +773,7 @@ class _CtxAccountCard(QFrame):
     def enterEvent(self, event) -> None:  # noqa: ANN001
         parent = self.parent()
         if isinstance(parent, (TrayContextMenu, TrayContextSubmenu)):
-            parent.close_child_flyouts()
+            parent.row_entered(self)
         super().enterEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
@@ -761,7 +848,7 @@ class _CtxMenuRow(QFrame):
         # (QMenu-style). Nested hosts close only their children.
         parent = self.parent()
         if isinstance(parent, (TrayContextMenu, TrayContextSubmenu)):
-            parent.close_child_flyouts()
+            parent.row_entered(self)
         super().enterEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
@@ -813,9 +900,12 @@ class _CtxSubmenuRow(QFrame):
         row.addWidget(self._label, stretch=1)
         row.addWidget(trailing)
 
+    @property
+    def submenu(self) -> TrayContextSubmenu:
+        return self._submenu
+
     def enterEvent(self, event) -> None:  # noqa: ANN001
-        self._host.close_child_flyouts()
-        self._submenu.popup_beside(self)
+        self._host.row_entered(self)
         super().enterEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
@@ -895,7 +985,7 @@ class _CtxResetPickerRow(QFrame):
     def enterEvent(self, event) -> None:  # noqa: ANN001
         parent = self.parent()
         if isinstance(parent, (TrayContextMenu, TrayContextSubmenu)):
-            parent.close_child_flyouts()
+            parent.row_entered(self)
         super().enterEvent(event)
 
     def set_enabled(self, enabled: bool) -> None:
