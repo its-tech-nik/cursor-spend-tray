@@ -3,6 +3,14 @@
 Qt's QSystemTrayIcon D-Bus backend always returns empty geometry() and never
 surfaces the x/y Plasma passes on Activate. We register our own SNI so popup
 placement can follow the tray icon (top or bottom panel).
+
+Icon delivery notes (Plasma 6):
+- ``IconThemePath`` must end with ``/icons`` or Plasma's custom KIconLoader is
+  ignored (see plasma-workspace StatusNotifierItemSource).
+- ``IconName`` must NOT share a hyphen-prefix with the packaged hicolor id
+  ``cursor-spend-tray``. KIconLoader strips suffixes, so names like
+  ``cursor-spend-tray-3`` resolve to the static bars glyph in
+  ``/usr/share/icons/hicolor/.../cursor-spend-tray.png``.
 """
 
 from __future__ import annotations
@@ -23,6 +31,9 @@ _SNI_IFACE = "org.kde.StatusNotifierItem"
 _WATCHER_SERVICE = "org.kde.StatusNotifierWatcher"
 _WATCHER_PATH = "/StatusNotifierWatcher"
 _WATCHER_IFACE = "org.kde.StatusNotifierWatcher"
+
+# Must not share a hyphen-prefix with the packaged hicolor icon name.
+_ICON_BASE = "cst-auto-pct"
 
 
 @pyqtClassInfo("D-Bus Interface", _SNI_IFACE)
@@ -125,9 +136,12 @@ class StatusNotifierItem(QObject):
         self.item_id = item_id
         self.tooltip_title = title
         self.tooltip = title
-        self.icon_name = item_id
-        self._icon_dir = Path(tempfile.mkdtemp(prefix="cursor-spend-tray-icons-"))
+        # Temp theme root …/<tmp>/icons  (Plasma requires the leaf dir name "icons").
+        self._theme_root = Path(tempfile.mkdtemp(prefix="cursor-spend-tray-theme-"))
+        self._icon_dir = self._theme_root / "icons"
+        self._icon_dir.mkdir()
         self.icon_theme_path = str(self._icon_dir)
+        self.icon_name = _ICON_BASE
         self._icon_file = self._icon_dir / f"{self.icon_name}.png"
         self._icon_gen = 0
         self._registered = False
@@ -182,7 +196,7 @@ class StatusNotifierItem(QObject):
             pix.fill()
         # Rotate IconName + file so Plasma reloads instead of caching the old glyph.
         self._icon_gen = (self._icon_gen + 1) % 10000
-        self.icon_name = f"{self.item_id}-{self._icon_gen}"
+        self.icon_name = f"{_ICON_BASE}-{self._icon_gen}"
         new_file = self._icon_dir / f"{self.icon_name}.png"
         if not pix.save(str(new_file), "PNG"):
             log.warning("Failed to write tray icon to %s", new_file)
@@ -226,5 +240,6 @@ class StatusNotifierItem(QObject):
             if self._icon_file.exists():
                 self._icon_file.unlink()
             self._icon_dir.rmdir()
+            self._theme_root.rmdir()
         except OSError:
             pass

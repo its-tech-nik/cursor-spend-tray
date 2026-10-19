@@ -14,6 +14,7 @@ from PyQt6.QtGui import (
     QColor,
     QConicalGradient,
     QDesktopServices,
+    QFont,
     QGuiApplication,
     QIcon,
     QPainter,
@@ -187,12 +188,23 @@ def tray_tooltip(snap: UsageSnapshot) -> tuple[str, str]:
 def _usage_phrase(snap: UsageSnapshot) -> str:
     c, o = snap.cursor_models_pct, snap.other_models_pct
     if c is not None and o is not None:
-        return f"Cursor {c}% · Other {o}%"
+        return f"AUTO {c}% · API {o}%"
     if c is not None:
-        return f"Cursor {c}%"
+        return f"AUTO {c}%"
     if o is not None:
-        return f"Other {o}%"
+        return f"API {o}%"
     return ""
+
+
+def _tray_pct_ink(pct: int | None) -> QColor:
+    """AUTO% ink — matches popup ring warn thresholds."""
+    if pct is None:
+        return QColor("#ECECEC")
+    if pct >= 90:
+        return QColor("#D9897A")
+    if pct >= 70:
+        return QColor("#D0B56C")
+    return QColor("#E8E8E8")
 
 
 def make_tray_icon(
@@ -201,43 +213,35 @@ def make_tray_icon(
     *,
     disconnected: bool = False,
 ) -> QIcon:
-    """Stacked horizontal meters, similar to Computer Stats tray glyphs."""
+    """Plain AUTO percentage text (NN%) for the StatusNotifierItem glyph."""
+    del other_pct  # API stays in tooltip / popup; tray shows AUTO only.
     size = 64
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
     if disconnected:
         _draw_slash_overlay(painter, size)
     else:
-        margin_x = 6
-        margin_y = 12
-        gap = 8
-        bar_h = (size - 2 * margin_y - gap) // 2
-        track_w = size - 2 * margin_x
-
-        tracks = (
-            (cursor_pct, QColor("#8BA4C7"), QColor("#2A3340")),
-            (other_pct, QColor("#B0B0B0"), QColor("#333333")),
+        label = "—%" if cursor_pct is None else f"{max(0, min(100, cursor_pct))}%"
+        pct_font = QFont()
+        pct_font.setWeight(QFont.Weight.Bold)
+        # Fill the glyph: "100%" needs a smaller face than "9%".
+        if cursor_pct is not None and cursor_pct >= 100:
+            pct_font.setPixelSize(22)
+        elif cursor_pct is not None and cursor_pct >= 10:
+            pct_font.setPixelSize(28)
+        else:
+            pct_font.setPixelSize(32)
+        painter.setFont(pct_font)
+        painter.setPen(_tray_pct_ink(cursor_pct))
+        painter.drawText(
+            QRectF(0, 0, size, size),
+            int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
+            label,
         )
-        for i, (pct, fill, track) in enumerate(tracks):
-            y = margin_y + i * (bar_h + gap)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(track)
-            painter.drawRoundedRect(margin_x, y, track_w, bar_h, 4, 4)
-            if pct is None:
-                painter.setBrush(QColor(fill.red(), fill.green(), fill.blue(), 70))
-                painter.drawRoundedRect(margin_x, y, max(4, track_w // 12), bar_h, 4, 4)
-                continue
-            fill_w = max(4, int(track_w * max(0, min(100, pct)) / 100))
-            color = fill
-            if pct >= 90:
-                color = QColor("#D9897A")
-            elif pct >= 70 and i == 1:
-                color = QColor("#D0B56C")
-            painter.setBrush(color)
-            painter.drawRoundedRect(margin_x, y, fill_w, bar_h, 4, 4)
 
     painter.end()
     return QIcon(pix)
@@ -1156,7 +1160,7 @@ class TrayApp(QWidget):
         if launch_pending and bidi_unavailable(snap):
             return
 
-        self._stop_spinner()
+        self._stop_spinner(restore=False)
         disconnected = bidi_unavailable(snap)
         needs_login = session_logged_out(snap) and not disconnected
         self.popup.apply_snapshot(snap)
@@ -1166,15 +1170,7 @@ class TrayApp(QWidget):
         self.popup.set_awaiting_login(needs_login)
         self._refresh_action.setVisible(not disconnected)
         self._sync_account_actions(snap)
-        self.tray.set_icon(
-            make_tray_icon(
-                snap.cursor_models_pct,
-                snap.other_models_pct,
-                disconnected=disconnected,
-            )
-        )
-        title, body = tray_tooltip(snap)
-        self.tray.set_tooltip(body, title=title)
+        self._paint_tray_icon(snap)
 
     def _sync_account_actions(self, snap: UsageSnapshot) -> None:
         # Email is preferred; subscription alone still means a signed-in scrape.
@@ -1922,14 +1918,41 @@ class TrayApp(QWidget):
         return QPoint(x, y)
 
     def _start_spinner(self) -> None:
+        # Keep NN% visible whenever we already have an AUTO reading; only fall
+        # back to the refresh glyph when there is nothing to show yet.
+        if hasattr(self, "snapshot") and self.snapshot.cursor_models_pct is not None:
+            self._spin_timer.stop()
+            self._paint_tray_icon(self.snapshot)
+            return
         self._spin_angle = 0.0
         self.tray.set_icon(make_spinner_icon(self._spin_angle))
         self._spin_timer.start()
 
-    def _stop_spinner(self) -> None:
+    def _stop_spinner(self, *, restore: bool = True) -> None:
+        was_spinning = self._spin_timer.isActive()
         self._spin_timer.stop()
+        # Temporary wait spinners must not leave a frozen glyph over the AUTO %.
+        if restore and was_spinning and hasattr(self, "snapshot"):
+            self._paint_tray_icon(self.snapshot)
+
+    def _paint_tray_icon(self, snap: UsageSnapshot) -> None:
+        """Push AUTO percentage glyph + tooltip for the current snapshot."""
+        disconnected = bidi_unavailable(snap)
+        self.tray.set_icon(
+            make_tray_icon(
+                snap.cursor_models_pct,
+                snap.other_models_pct,
+                disconnected=disconnected,
+            )
+        )
+        title, body = tray_tooltip(snap)
+        self.tray.set_tooltip(body, title=title)
 
     def _on_spin_tick(self) -> None:
+        if hasattr(self, "snapshot") and self.snapshot.cursor_models_pct is not None:
+            self._spin_timer.stop()
+            self._paint_tray_icon(self.snapshot)
+            return
         self._spin_angle = (self._spin_angle + 18) % 360  # one full rotation per ~1.6s
         self.tray.set_icon(make_spinner_icon(self._spin_angle))
 
