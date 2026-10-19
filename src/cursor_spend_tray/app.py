@@ -15,6 +15,7 @@ from PyQt6.QtGui import (
     QConicalGradient,
     QDesktopServices,
     QFont,
+    QFontMetrics,
     QGuiApplication,
     QIcon,
     QPainter,
@@ -86,9 +87,6 @@ QFrame#ctxAccount {
     background: transparent;
     border: none;
     border-radius: 8px;
-}
-QFrame#ctxAccount:hover {
-    background: #3A3A3A;
 }
 QLabel {
     background: transparent;
@@ -213,7 +211,11 @@ def make_tray_icon(
     *,
     disconnected: bool = False,
 ) -> QIcon:
-    """Plain AUTO percentage text (NN%) for the StatusNotifierItem glyph."""
+    """AUTO usage digits for the StatusNotifierItem glyph (tooltip still has %).
+
+    Plasma scales tray icons into a fixed square cell, so we stay square and
+    omit "%" — that keeps ~2×-tall digits readable without font stretch.
+    """
     del other_pct  # API stays in tooltip / popup; tray shows AUTO only.
     size = 64
     pix = QPixmap(size, size)
@@ -223,18 +225,25 @@ def make_tray_icon(
     painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
     if disconnected:
-        _draw_slash_overlay(painter, size)
+        _draw_slash_overlay(painter, size, size)
     else:
-        label = "—%" if cursor_pct is None else f"{max(0, min(100, cursor_pct))}%"
+        label = "?" if cursor_pct is None else str(max(0, min(100, cursor_pct)))
         pct_font = QFont()
         pct_font.setWeight(QFont.Weight.Bold)
-        # Fill the glyph: "100%" needs a smaller face than "9%".
-        if cursor_pct is not None and cursor_pct >= 100:
-            pct_font.setPixelSize(22)
-        elif cursor_pct is not None and cursor_pct >= 10:
-            pct_font.setPixelSize(28)
+        if cursor_pct is None:
+            target_px = 56
+        elif cursor_pct >= 100:
+            target_px = 40
+        elif cursor_pct >= 10:
+            target_px = 56
         else:
-            pct_font.setPixelSize(32)
+            target_px = 64
+        px = target_px
+        while px >= 12:
+            pct_font.setPixelSize(px)
+            if QFontMetrics(pct_font).horizontalAdvance(label) <= size - 2:
+                break
+            px -= 1
         painter.setFont(pct_font)
         painter.setPen(_tray_pct_ink(cursor_pct))
         painter.drawText(
@@ -296,12 +305,17 @@ def make_spinner_icon(angle_deg: float) -> QIcon:
     return QIcon(pix)
 
 
-def _draw_slash_overlay(painter: QPainter, size: int) -> None:
+def _draw_slash_overlay(painter: QPainter, width: int, height: int) -> None:
     """Monochrome ⊘ (slash-circle) — remote debugging off; no usage bars."""
-    cx = cy = size / 2.0
-    r = size * 0.30
+    cx, cy = width / 2.0, height / 2.0
+    r = min(width, height) * 0.30
     ink = QColor("#E8E8E8")
-    pen = QPen(ink, max(3.0, size * 0.07), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+    pen = QPen(
+        ink,
+        max(3.0, min(width, height) * 0.07),
+        Qt.PenStyle.SolidLine,
+        Qt.PenCapStyle.RoundCap,
+    )
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
@@ -1918,7 +1932,7 @@ class TrayApp(QWidget):
         return QPoint(x, y)
 
     def _start_spinner(self) -> None:
-        # Keep NN% visible whenever we already have an AUTO reading; only fall
+        # Keep AUTO digits visible whenever we already have a reading; only fall
         # back to the refresh glyph when there is nothing to show yet.
         if hasattr(self, "snapshot") and self.snapshot.cursor_models_pct is not None:
             self._spin_timer.stop()

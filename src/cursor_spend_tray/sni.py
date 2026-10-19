@@ -189,10 +189,10 @@ class StatusNotifierItem(QObject):
         self._registered = False
 
     def set_icon(self, icon: QIcon) -> None:
-        size = 64
-        pix = icon.pixmap(size, size)
+        sizes = icon.availableSizes()
+        pix = icon.pixmap(sizes[0]) if sizes else icon.pixmap(64, 64)
         if pix.isNull():
-            pix = QPixmap(size, size)
+            pix = QPixmap(64, 64)
             pix.fill()
         # Rotate IconName + file so Plasma reloads instead of caching the old glyph.
         self._icon_gen = (self._icon_gen + 1) % 10000
