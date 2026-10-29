@@ -99,6 +99,33 @@ def profile_dir_for(info: BrowserInfo, app_name: str = "cursor-spend-tray") -> P
     return path
 
 
+def clear_dedicated_profile(
+    info: BrowserInfo,
+    *,
+    app_name: str = "cursor-spend-tray",
+    stop_timeout: float = 8.0,
+) -> Path:
+    """Stop the automation browser and wipe its dedicated profile directory.
+
+    Used after authenticator HTTP 429 / stuck Cloudflare state so the next
+    headed sign-in starts from a clean cookie jar.
+    """
+    stop_automation_browser(info, app_name=app_name, timeout=stop_timeout)
+    # Brief pause so Chromium can release SQLite / leveldb locks.
+    time.sleep(0.4)
+    path = profile_dir_for(info, app_name)
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+        if path.exists():
+            time.sleep(0.6)
+            shutil.rmtree(path, ignore_errors=True)
+        if path.exists():
+            raise OSError(f"Could not fully remove profile at {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    log.info("Cleared dedicated %s profile at %s", info.display_name, path)
+    return path
+
+
 def list_installed_browsers() -> list[BrowserInfo]:
     """Return automation-capable browsers whose binaries resolve on this machine.
 

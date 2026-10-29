@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import subprocess
+import time
 from collections.abc import Callable
 from datetime import datetime
 
@@ -67,6 +68,8 @@ _ICON_PAD = 12
 _LAUNCH_SETTLE_MS = 10_000
 _LAUNCH_RETRY_MS = 5_000      # retry interval while waiting for BiDi after launch
 _SPIN_INTERVAL_MS = 80        # icon animation frame interval (~12 fps)
+# After wiping the profile for auth 429, ignore further wipes for this long.
+_LOGIN_RATE_LIMIT_COOLDOWN_S = 15 * 60
 # Keep in sync with scheduler.BROWSER_WARMUP_SECONDS / quit-between pre-launch.
 _CTX_ROW_STYLE = """
 QFrame#ctxRow {
@@ -1136,6 +1139,8 @@ class TrayApp(QWidget):
         self._refresh_after_headless = False
         self._warmup_only = False
         self._pending_scrape_ready: Callable[[], None] | None = None
+        # Monotonic time of last dedicated-profile wipe after auth HTTP 429.
+        self._login_rate_limit_cleared_at = 0.0
 
         self._apply_snapshot(self.snapshot)
         self.show()
@@ -1153,6 +1158,7 @@ class TrayApp(QWidget):
         self.scheduler.browser_warmup_requested.connect(self._warmup_browser_for_scrape)
         self._login_watch = LoginNetworkWatcher(config, self)
         self._login_watch.detected.connect(self._on_login_network_detected)
+        self._login_watch.rate_limited.connect(self._on_login_rate_limited)
         self._login_watch.status.connect(self.popup.set_status)
         self._logout_watch = LogoutNetworkWatcher(config, self)
         self._logout_watch.detected.connect(self._on_logout_network_detected)
@@ -1265,8 +1271,58 @@ class TrayApp(QWidget):
         self._login_launch_pending = False
         self._viewing_browser = False
         self._refresh_after_headless = True
-        self.popup.set_status("Sign-in detected — switching to headless…")
+        self.popup.set_status("Session cookie detected — switching to headless…")
         QTimer.singleShot(0, self._switch_to_headless_after_login)
+
+    def _on_login_rate_limited(self, url: str) -> None:
+        """Auth HTTP 429: wipe dedicated profile once, then reopen sign-in.
+
+        Further 429s within the cooldown only update the status (no wipe loop).
+        """
+        log.warning("Authenticator rate limit (429) while signing in: %s", url)
+        self._stop_login_network_watch()
+        self._login_launch_pending = False
+        now = time.monotonic()
+        elapsed = now - self._login_rate_limit_cleared_at
+        if (
+            self._login_rate_limit_cleared_at > 0
+            and elapsed < _LOGIN_RATE_LIMIT_COOLDOWN_S
+        ):
+            remain_m = max(1, int((_LOGIN_RATE_LIMIT_COOLDOWN_S - elapsed + 59) // 60))
+            self.popup.set_awaiting_login(True)
+            self.popup.set_status(
+                f"Auth rate-limited (429) — wait ~{remain_m}m, then try GitHub again…"
+            )
+            # Keep a headed window available without clearing again.
+            self._ensure_login_browser()
+            return
+        self._login_rate_limit_cleared_at = now
+        self.scheduler.pause_for_login()
+        self.popup.set_awaiting_login(True)
+        self.popup.set_status(
+            "Auth rate-limited (429) — clearing browser session…"
+        )
+        QTimer.singleShot(0, self._clear_session_after_rate_limit)
+
+    def _clear_session_after_rate_limit(self) -> None:
+        """Stop Helium, wipe the dedicated profile, reopen a clean sign-in window."""
+        self._stop_login_network_watch()
+        self._stop_logout_network_watch()
+        self._viewing_browser = False
+        self._refresh_after_headless = False
+        name = self.config.browser.display_name
+        try:
+            self.config.clear_browser_profile()
+        except OSError as exc:
+            log.exception("Failed to clear %s profile after 429", name)
+            self.popup.set_status(f"Could not clear session after 429: {exc}")
+            self._ensure_login_browser()
+            return
+        self.popup.set_status(
+            f"Cleared {name} session after 429 — opening a fresh sign-in window…"
+        )
+        # Short delay so locks settle before relaunch.
+        QTimer.singleShot(1_500, self._ensure_login_browser)
 
     def _on_logout_network_detected(self, url: str) -> None:
         """After sign-out traffic in View Browser: signed-out UI + headed re-auth."""

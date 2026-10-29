@@ -14,6 +14,7 @@ from .browser import (
     BrowserInfo,
     browser_is_headless,
     browser_is_running,
+    clear_dedicated_profile,
     data_dir_for_app,
     launch_argv,
     list_installed_browsers,
@@ -148,6 +149,12 @@ class AppConfig(BaseModel):
 
     def stop_browser(self, timeout: float = 8.0) -> bool:
         return stop_automation_browser(self.browser, app_name=APP_NAME, timeout=timeout)
+
+    def clear_browser_profile(self, *, stop_timeout: float = 8.0) -> Path:
+        """Wipe the dedicated automation profile (stops the browser first)."""
+        return clear_dedicated_profile(
+            self.browser, app_name=APP_NAME, stop_timeout=stop_timeout
+        )
 
     def profile_dir(self) -> Path:
         return profile_dir_for(self.browser, APP_NAME)

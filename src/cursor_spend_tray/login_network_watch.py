@@ -1,8 +1,9 @@
 """Watch browser network traffic for session transitions (login / logout).
 
-Login watch: active during the headed sign-in wait. A successful usage-dashboard
-API response (or a return to the dashboard after an auth hop) means the session
-is likely ready: the tray switches to headless and scrapes without a manual refresh.
+Login watch: active during the headed sign-in wait. Only a real session cookie
+(``WorkosCursorSessionToken``) counts as success — not dashboard HTML loads or
+opportunistic ``/api/dashboard`` calls during Cloudflare / OAuth hops. When the
+cookie appears, the tray switches to headless and scrapes without a manual refresh.
 
 Logout watch: active only while View Browser keeps a headed window open. Auth /
 logout navigation (or a 401/403 on the dashboard API) flips the tray to signed-out
@@ -27,12 +28,13 @@ from .bidi_client import BidiClient, BidiError
 from .browser import BrowserFamily
 from .cdp_client import CdpClient, CdpError
 from .config import AppConfig
+from .session_cookie import CURSOR_SESSION_COOKIE, profile_has_cursor_session_cookie
 
 log = logging.getLogger(__name__)
 
 WatchMode = Literal["login", "logout"]
 
-# Authenticated dashboard fetches — not the bare spending HTML redirect.
+# Authenticated dashboard fetches — used for logout 401/403 detection.
 _USAGE_API_MARKERS: tuple[str, ...] = (
     "cursor.com/api/dashboard",
 )
@@ -55,6 +57,8 @@ _LOGOUT_URL_MARKERS: tuple[str, ...] = (
 # Wait for remote debugging after headed relaunch before giving up.
 _CONNECT_RETRY_SECONDS = 90.0
 _CONNECT_RETRY_SLEEP = 1.0
+# How often to re-check for WorkosCursorSessionToken while awaiting sign-in.
+_SESSION_COOKIE_POLL_SECONDS = 1.0
 
 
 def url_looks_like_auth(url: str) -> bool:
@@ -92,25 +96,100 @@ def _resource_is_document(resource_type: str | None) -> bool:
     return resource_type.strip().lower() in {"document", "main_frame", "mainframe"}
 
 
-def response_suggests_authenticated_session(
-    url: str,
-    status: int | None,
-    *,
-    saw_auth: bool,
-) -> bool:
-    """Heuristic: logged-in usage traffic after (or without needing) an auth hop.
+def _header_map(headers: Any) -> dict[str, str]:
+    """Normalize CDP/BiDi header objects to a lower-case name → value map."""
+    if not headers:
+        return {}
+    if isinstance(headers, dict):
+        return {str(k).lower(): str(v) for k, v in headers.items()}
+    if isinstance(headers, list):
+        out: dict[str, str] = {}
+        for item in headers:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            value = item.get("value")
+            if name is None or value is None:
+                continue
+            out[str(name).lower()] = str(value)
+        return out
+    return {}
 
-    - Any 2xx/3xx ``/api/dashboard`` response is a strong signed-in signal.
-    - A dashboard *page* load only counts after we already saw an auth URL in
-      this watch session (avoids firing on the initial spending redirect).
+
+def _cookie_header_names(cookie_header: str) -> set[str]:
+    """Parse ``Cookie`` header names (exact), ignoring values."""
+    names: set[str] = set()
+    for part in (cookie_header or "").split(";"):
+        name = part.split("=", 1)[0].strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _set_cookie_header_name(set_cookie_header: str) -> str:
+    """Return the cookie name from a single ``Set-Cookie`` header value."""
+    return (set_cookie_header or "").split("=", 1)[0].strip()
+
+
+def headers_carry_session_cookie(headers: Any) -> bool:
+    """True when Cookie / Set-Cookie set an exact WorkosCursorSessionToken name.
+
+    Substring matches are intentionally rejected — auth pages can embed that
+    token name inside other cookie *values* and previously false-triggered.
     """
-    if status is not None and not (200 <= int(status) < 400):
-        return False
-    if url_looks_like_usage_api(url):
+    mapped = _header_map(headers)
+    if CURSOR_SESSION_COOKIE in _cookie_header_names(mapped.get("cookie") or ""):
         return True
-    if saw_auth and url_looks_like_dashboard_page(url):
-        return True
+    # CDP may surface one Set-Cookie or a joined list; check each segment.
+    raw_set = mapped.get("set-cookie") or ""
+    for segment in raw_set.split("\n"):
+        if _set_cookie_header_name(segment) == CURSOR_SESSION_COOKIE:
+            return True
+    if isinstance(headers, list):
+        for item in headers:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or "").lower() != "set-cookie":
+                continue
+            if _set_cookie_header_name(str(item.get("value") or "")) == CURSOR_SESSION_COOKIE:
+                return True
     return False
+
+
+def cookies_include_session(cookies: Any) -> bool:
+    """True when cookies include WorkosCursorSessionToken for the cursor.com app.
+
+    Authenticator-only host cookies are ignored — they are not a finished login.
+    """
+    if not isinstance(cookies, list):
+        return False
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        if str(cookie.get("name") or "") != CURSOR_SESSION_COOKIE:
+            continue
+        domain = str(cookie.get("domain") or "").lower().lstrip(".")
+        if domain in {"cursor.com", "www.cursor.com"} or domain.endswith(".cursor.com"):
+            if "authenticator." in domain or "authenticate." in domain:
+                continue
+            return True
+    return False
+
+
+def response_suggests_authenticated_session(
+    url: str = "",
+    status: int | None = None,
+    *,
+    saw_auth: bool = False,
+    headers: Any = None,
+) -> bool:
+    """True when Set-Cookie/Cookie carries a finished Cursor session token.
+
+    Dashboard HTML and bare ``/api/dashboard`` calls are *not* enough on their
+    own. Prefer combining this with a dashboard page URL check in the watcher.
+    """
+    _ = (url, status, saw_auth)
+    return headers_carry_session_cookie(headers)
 
 
 def response_suggests_logout(
@@ -130,15 +209,34 @@ def response_suggests_logout(
         return True
     if url_looks_like_usage_api(url) and status in {401, 403}:
         return True
-    if _resource_is_document(resource_type) and url_looks_like_auth(url):
+    return bool(_resource_is_document(resource_type) and url_looks_like_auth(url))
+
+
+def response_suggests_auth_rate_limit(url: str, status: int | None) -> bool:
+    """True for HTTP 429 on Cursor authenticator / auth-callback hosts."""
+    if status != 429:
+        return False
+    lowered = (url or "").strip().lower()
+    if not lowered:
+        return False
+    if url_looks_like_auth(lowered):
         return True
-    return False
+    return any(
+        marker in lowered
+        for marker in (
+            "authenticator.cursor.sh",
+            "authenticate.cursor.sh",
+            "cursor.com/api/auth",
+            "cursor.sh/api/auth",
+        )
+    )
 
 
 class _SessionNetworkWatchThread(QThread):
     """Background CDP/BiDi listener; emits once when login or logout is seen."""
 
     detected = pyqtSignal(str)
+    rate_limited = pyqtSignal(str)
     status = pyqtSignal(str)
 
     def __init__(self, config: AppConfig, *, mode: WatchMode) -> None:
@@ -147,6 +245,7 @@ class _SessionNetworkWatchThread(QThread):
         self._mode: WatchMode = mode
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._rate_limited = False
 
     def request_stop(self) -> None:
         """Ask the async watcher to exit (thread-safe)."""
@@ -205,22 +304,102 @@ class _SessionNetworkWatchThread(QThread):
     def _status_message(self) -> str:
         if self._mode == "logout":
             return "Watching for sign-out…"
-        return "Watching for sign-in…"
+        return "Waiting for successful Cursor sign-in…"
 
     def _fallback_trigger(self) -> str:
-        return "logout" if self._mode == "logout" else "usage-dashboard"
+        return "logout" if self._mode == "logout" else CURSOR_SESSION_COOKIE
+
+    async def _watch_until_with_cookie_poll(
+        self,
+        fired: asyncio.Event,
+        *,
+        poll: Any,
+    ) -> str:
+        """Wait until ``fired`` or ``poll()`` reports the session cookie.
+
+        ``poll`` is an async callable returning a trigger string when the session
+        cookie is present, else ``\"\"``.
+        """
+        while not self._stop.is_set() and not fired.is_set():
+            try:
+                trigger = await poll()
+            except Exception:
+                log.debug("Session cookie poll failed", exc_info=True)
+                trigger = ""
+            if trigger:
+                return str(trigger)
+            await self._wait_stop_or_timeout(_SESSION_COOKIE_POLL_SECONDS)
+        return ""
+
+    async def _cdp_on_dashboard_page(self, client: CdpClient) -> bool:
+        """True when a page target is on the Cursor dashboard (not authenticator)."""
+        try:
+            targets = await client.list_page_targets()
+        except CdpError as exc:
+            log.debug("list_page_targets failed: %s", exc)
+            return False
+        return any(url_looks_like_dashboard_page(str(t.get("url") or "")) for t in targets)
+
+    async def _cdp_session_cookie_present(self, client: CdpClient) -> str:
+        """Return a trigger when session cookie exists *and* dashboard is open.
+
+        Cookie alone is not enough: partial OAuth / authenticator traffic can
+        look like a session. Closing only after the dashboard URL is visible
+        matches a finished human login.
+        """
+        try:
+            result = await client.call("Network.getAllCookies")
+        except CdpError as exc:
+            log.debug("Network.getAllCookies failed: %s", exc)
+            return ""
+        if not cookies_include_session(result.get("cookies")):
+            return ""
+        if not await self._cdp_on_dashboard_page(client):
+            return ""
+        return CURSOR_SESSION_COOKIE
+
+    def _profile_session_cookie_present(self) -> str:
+        """Return a trigger label when the dedicated profile DB has the cookie."""
+        try:
+            if profile_has_cursor_session_cookie(self._config.browser):
+                return CURSOR_SESSION_COOKIE
+        except Exception:
+            log.debug("Profile session cookie check failed", exc_info=True)
+        return ""
+
+    def _emit_watch_result(self, *, mode: WatchMode, trigger_url: str) -> None:
+        if self._stop.is_set():
+            return
+        if self._rate_limited:
+            log.warning(
+                "Login network watch (rate limit 429) detected: %s",
+                trigger_url or "429",
+            )
+            self.rate_limited.emit(trigger_url or "429")
+            return
+        log.info(
+            "%s network watch detected: %s",
+            mode.capitalize(),
+            trigger_url or self._fallback_trigger(),
+        )
+        self.detected.emit(trigger_url or self._fallback_trigger())
 
     async def _watch_cdp(self) -> None:
         client = CdpClient(self._config.bidi_host, self._config.bidi_port)
         if not await self._wait_available(client):
             return
-        saw_auth = False
         fired = asyncio.Event()
         trigger_url = ""
         mode = self._mode
 
+        def _mark_rate_limit(url: str) -> None:
+            nonlocal trigger_url
+            self._rate_limited = True
+            trigger_url = url or "429"
+            fired.set()
+
         def on_event(method: str, params: dict[str, Any], session_id: str | None) -> None:
-            nonlocal saw_auth, trigger_url
+            nonlocal trigger_url
             if fired.is_set() or self._stop.is_set():
                 return
             if method == "Target.attachedToTarget":
@@ -229,6 +408,9 @@ class _SessionNetworkWatchThread(QThread):
                 if sid and target.get("type") == "page":
                     asyncio.create_task(_enable_network(client, sid))
                 return
+            # Login success is polled (cookie + dashboard URL). Network events
+            # alone previously false-triggered mid-OAuth; logout still uses them.
+            # Auth HTTP 429 during login triggers a dedicated-profile wipe.
             if method == "Network.responseReceived":
                 response = params.get("response") or {}
                 url = str(response.get("url") or "")
@@ -236,14 +418,10 @@ class _SessionNetworkWatchThread(QThread):
                 status_i = int(status) if isinstance(status, (int, float)) else None
                 resource_type = str(params.get("type") or "") or None
                 if mode == "login":
-                    if url_looks_like_auth(url):
-                        saw_auth = True
-                    if response_suggests_authenticated_session(
-                        url, status_i, saw_auth=saw_auth
-                    ):
-                        trigger_url = url
-                        fired.set()
-                elif response_suggests_logout(
+                    if response_suggests_auth_rate_limit(url, status_i):
+                        _mark_rate_limit(url)
+                    return
+                if response_suggests_logout(
                     url, status_i, resource_type=resource_type
                 ):
                     trigger_url = url
@@ -253,10 +431,7 @@ class _SessionNetworkWatchThread(QThread):
                 req = params.get("request") or {}
                 url = str(req.get("url") or "")
                 resource_type = str(params.get("type") or "") or None
-                if mode == "login":
-                    if url_looks_like_auth(url):
-                        saw_auth = True
-                elif response_suggests_logout(
+                if mode == "logout" and response_suggests_logout(
                     url, None, resource_type=resource_type
                 ):
                     trigger_url = url
@@ -291,14 +466,25 @@ class _SessionNetworkWatchThread(QThread):
                 except CdpError as exc:
                     log.debug("Attach/Network.enable: %s", exc)
 
-            await self._watch_until(fired)
-            if fired.is_set() and not self._stop.is_set():
-                log.info(
-                    "%s network watch (CDP) detected: %s",
-                    mode.capitalize(),
-                    trigger_url,
+            if mode == "login":
+
+                async def _poll_cdp_or_profile() -> str:
+                    return (
+                        await self._cdp_session_cookie_present(client)
+                        or await asyncio.to_thread(self._profile_session_cookie_present)
+                    )
+
+                poll_trigger = await self._watch_until_with_cookie_poll(
+                    fired,
+                    poll=_poll_cdp_or_profile,
                 )
-                self.detected.emit(trigger_url or self._fallback_trigger())
+                if poll_trigger and not self._rate_limited:
+                    trigger_url = trigger_url or poll_trigger
+                    fired.set()
+            else:
+                await self._watch_until(fired)
+            if fired.is_set():
+                self._emit_watch_result(mode=mode, trigger_url=trigger_url)
         finally:
             client.remove_event_listener(on_event)
             try:
@@ -310,23 +496,25 @@ class _SessionNetworkWatchThread(QThread):
         client = BidiClient(self._config.bidi_host, self._config.bidi_port)
         if not await self._wait_available(client):
             return
-        saw_auth = False
         fired = asyncio.Event()
         trigger_url = ""
         mode = self._mode
 
+        def _mark_rate_limit(url: str) -> None:
+            nonlocal trigger_url
+            self._rate_limited = True
+            trigger_url = url or "429"
+            fired.set()
+
         def on_event(method: str, params: dict[str, Any], _session_id: str | None) -> None:
-            nonlocal saw_auth, trigger_url
+            nonlocal trigger_url
             if fired.is_set() or self._stop.is_set():
                 return
             if method == "network.beforeRequestSent":
                 req = params.get("request") or {}
                 url = str(req.get("url") or "")
                 destination = str(req.get("destination") or "") or None
-                if mode == "login":
-                    if url_looks_like_auth(url):
-                        saw_auth = True
-                elif response_suggests_logout(
+                if mode == "logout" and response_suggests_logout(
                     url, None, resource_type=destination
                 ):
                     trigger_url = url
@@ -340,14 +528,10 @@ class _SessionNetworkWatchThread(QThread):
                 status_i = int(status) if isinstance(status, (int, float)) else None
                 destination = str(req.get("destination") or "") or None
                 if mode == "login":
-                    if url_looks_like_auth(url):
-                        saw_auth = True
-                    if response_suggests_authenticated_session(
-                        url, status_i, saw_auth=saw_auth
-                    ):
-                        trigger_url = url
-                        fired.set()
-                elif response_suggests_logout(
+                    if response_suggests_auth_rate_limit(url, status_i):
+                        _mark_rate_limit(url)
+                    return
+                if response_suggests_logout(
                     url, status_i, resource_type=destination
                 ):
                     trigger_url = url
@@ -355,14 +539,10 @@ class _SessionNetworkWatchThread(QThread):
                 return
             if method.startswith("browsingContext."):
                 url = str(params.get("url") or "")
-                if mode == "login":
-                    if url_looks_like_auth(url):
-                        saw_auth = True
-                    elif saw_auth and url_looks_like_dashboard_page(url):
-                        trigger_url = url
-                        fired.set()
-                elif url_looks_like_auth(url) or url_looks_like_logout(url):
-                    # Navigation events are top-level; treat like document loads.
+                # Login success is polled (profile cookie); ignore navigations.
+                if mode == "logout" and (
+                    url_looks_like_auth(url) or url_looks_like_logout(url)
+                ):
                     trigger_url = url
                     fired.set()
 
@@ -394,14 +574,22 @@ class _SessionNetworkWatchThread(QThread):
                     },
                 )
 
-            await self._watch_until(fired)
-            if fired.is_set() and not self._stop.is_set():
-                log.info(
-                    "%s network watch (BiDi) detected: %s",
-                    mode.capitalize(),
-                    trigger_url,
+            if mode == "login":
+
+                async def _poll_profile() -> str:
+                    return await asyncio.to_thread(self._profile_session_cookie_present)
+
+                poll_trigger = await self._watch_until_with_cookie_poll(
+                    fired,
+                    poll=_poll_profile,
                 )
-                self.detected.emit(trigger_url or self._fallback_trigger())
+                if poll_trigger and not self._rate_limited:
+                    trigger_url = trigger_url or poll_trigger
+                    fired.set()
+            else:
+                await self._watch_until(fired)
+            if fired.is_set():
+                self._emit_watch_result(mode=mode, trigger_url=trigger_url)
         finally:
             client.remove_event_listener(on_event)
             try:
@@ -414,6 +602,7 @@ class _NetworkWatcherBase(QObject):
     """Owns at most one watch thread for a given mode."""
 
     detected = pyqtSignal(str)
+    rate_limited = pyqtSignal(str)
     status = pyqtSignal(str)
 
     _mode: WatchMode
@@ -433,6 +622,7 @@ class _NetworkWatcherBase(QObject):
             return
         thread = _SessionNetworkWatchThread(self._config, mode=self._mode)
         thread.detected.connect(self.detected.emit)
+        thread.rate_limited.connect(self.rate_limited.emit)
         thread.status.connect(self.status.emit)
         thread.finished.connect(self._on_thread_finished)
         self._thread = thread
