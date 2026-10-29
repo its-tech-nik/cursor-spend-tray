@@ -187,14 +187,15 @@ def tray_tooltip(snap: UsageSnapshot) -> tuple[str, str]:
 
 
 def _usage_phrase(snap: UsageSnapshot) -> str:
-    c, o = snap.cursor_models_pct, snap.other_models_pct
-    if c is not None and o is not None:
-        return f"AUTO {c}% · API {o}%"
+    c, o, g = snap.cursor_models_pct, snap.other_models_pct, snap.grok_bot_pct
+    parts: list[str] = []
     if c is not None:
-        return f"AUTO {c}%"
+        parts.append(f"AUTO {c}%")
     if o is not None:
-        return f"API {o}%"
-    return ""
+        parts.append(f"API {o}%")
+    if g is not None:
+        parts.append(f"Grok {g}%/wk")
+    return " · ".join(parts)
 
 
 def _tray_pct_ink(pct: int | None) -> QColor:
@@ -1338,6 +1339,8 @@ class TrayApp(QWidget):
         self.snapshot.account_avatar_url = None
         self.snapshot.cursor_models_pct = None
         self.snapshot.other_models_pct = None
+        self.snapshot.grok_bot_pct = None
+        self.snapshot.grok_bot_reset_hint = None
         self.snapshot.source = "logged_out"
         self.snapshot.error = (
             "Signed out — sign in to Cursor in the dedicated browser window."

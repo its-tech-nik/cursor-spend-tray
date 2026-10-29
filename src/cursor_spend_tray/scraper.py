@@ -27,6 +27,8 @@ EXTRACT_JS = r"""
       pageUrl,
       cursorModelsPct: null,
       otherModelsPct: null,
+      grokBotPct: null,
+      grokBotResetHint: null,
       subscription: null,
       loggedOut: false,
       hasIncludedInPro: false,
@@ -59,7 +61,12 @@ EXTRACT_JS = r"""
 
   // Prefer structured nodes when present
   const fromDom = () => {
-    const out = { cursorModelsPct: null, otherModelsPct: null };
+    const out = {
+      cursorModelsPct: null,
+      otherModelsPct: null,
+      grokBotPct: null,
+      grokBotResetHint: null,
+    };
     const nodes = Array.from(document.querySelectorAll("body *"));
     for (const el of nodes) {
       const t = (el.textContent || "").trim();
@@ -83,6 +90,23 @@ EXTRACT_JS = r"""
             out.otherModelsPct = Number(m[1]);
             break;
           }
+          scope = scope.parentElement;
+        }
+      }
+      // Grok Bot weekly allowance (distinct from "Includes Cursor Grok" on AUTO).
+      if (/^Grok Bot\b/i.test(t) && t.length < 40) {
+        let scope = el.closest("section,div,article,li") || el.parentElement;
+        for (let i = 0; i < 8 && scope; i++) {
+          const text = scope.innerText || "";
+          if (out.grokBotPct == null) {
+            const m = text.match(/(\d{1,3})%\s*used/i);
+            if (m) out.grokBotPct = Number(m[1]);
+          }
+          if (out.grokBotResetHint == null) {
+            const r = text.match(/Resets\s+([^\n]+)/i);
+            if (r) out.grokBotResetHint = r[1].trim();
+          }
+          if (out.grokBotPct != null && out.grokBotResetHint != null) break;
           scope = scope.parentElement;
         }
       }
@@ -114,6 +138,12 @@ EXTRACT_JS = r"""
   const dom = fromDom();
   const cursorModelsPct = dom.cursorModelsPct ?? pickPct("Cursor Models");
   const otherModelsPct = dom.otherModelsPct ?? pickPct("Other Models");
+  let grokBotPct = dom.grokBotPct ?? pickPct("Grok Bot");
+  let grokBotResetHint = dom.grokBotResetHint;
+  if (!grokBotResetHint) {
+    const r = bodyText.match(/Grok Bot[\s\S]{0,500}?Resets\s+([^\n]+)/i);
+    if (r) grokBotResetHint = r[1].trim();
+  }
   const hasDashboard = /Included in Pro/i.test(bodyText);
   const loggedOut = (
     /authenticator\.cursor\.sh/i.test(pageUrl)
@@ -130,6 +160,8 @@ EXTRACT_JS = r"""
     pageUrl,
     cursorModelsPct,
     otherModelsPct,
+    grokBotPct,
+    grokBotResetHint,
     subscription,
     loggedOut,
     hasIncludedInPro: hasDashboard,
@@ -244,12 +276,11 @@ def _soft_skip_snapshot(prev: UsageSnapshot, *, source: str) -> UsageSnapshot:
     """Keep last good gauges; clear error so the next timer can try cleanly."""
     keep_source = prev.source if prev.source in {"cdp", "bidi"} else source
     return UsageSnapshot(
-        cursor_models_pct=prev.cursor_models_pct,
-        other_models_pct=prev.other_models_pct,
         fetched_at=prev.fetched_at,
         source=keep_source,
         error=None,
         raw_hint=prev.raw_hint,
+        **_spend_pct_fields(prev),
         **prev.reset_stamp_fields(),
         **_account_fields(prev),
     )
@@ -264,6 +295,15 @@ class _ScrapeClient(Protocol):
     async def find_or_open_tab(self, url: str, reuse: bool = True) -> str: ...
     async def reload(self, handle: str) -> None: ...
     async def evaluate(self, handle: str, expression: str) -> Any: ...
+
+
+def _spend_pct_fields(prev: UsageSnapshot) -> dict[str, int | str | None]:
+    return {
+        "cursor_models_pct": prev.cursor_models_pct,
+        "other_models_pct": prev.other_models_pct,
+        "grok_bot_pct": prev.grok_bot_pct,
+        "grok_bot_reset_hint": prev.grok_bot_reset_hint,
+    }
 
 
 def _account_fields(prev: UsageSnapshot) -> dict[str, str | None]:
@@ -384,12 +424,11 @@ class SpendingScraper:
                 )
                 print(f"[scrape] abort: {err}", flush=True)
                 return UsageSnapshot(
-                    cursor_models_pct=prev.cursor_models_pct,
-                    other_models_pct=prev.other_models_pct,
                     error=err,
                     fetched_at=time.time(),
                     source="unavailable",
                     raw_hint=prev.raw_hint,
+                    **_spend_pct_fields(prev),
                     **prev.reset_stamp_fields(),
                     **_account_fields(prev),
                 )
@@ -419,6 +458,7 @@ class SpendingScraper:
             print(
                 f"[scrape] extract raw cursorModelsPct={data.get('cursorModelsPct')!r} "
                 f"otherModelsPct={data.get('otherModelsPct')!r} "
+                f"grokBotPct={data.get('grokBotPct')!r} "
                 f"loggedOut={data.get('loggedOut')!r} "
                 f"pageUrl={data.get('pageUrl')!r} "
                 f"hasIncludedInPro={data.get('hasIncludedInPro')!r}",
@@ -433,8 +473,6 @@ class SpendingScraper:
                     flush=True,
                 )
                 snap = UsageSnapshot(
-                    cursor_models_pct=prev.cursor_models_pct,
-                    other_models_pct=prev.other_models_pct,
                     error=(
                         f"Cursor sign-in required in {browser.display_name}. "
                         "A sign-in window will open — complete any security check, "
@@ -443,6 +481,7 @@ class SpendingScraper:
                     fetched_at=time.time(),
                     source="logged_out",
                     raw_hint=data.get("hint") or prev.raw_hint,
+                    **_spend_pct_fields(prev),
                     **prev.reset_stamp_fields(),
                     **_cleared_account_fields(),
                 )
@@ -452,19 +491,25 @@ class SpendingScraper:
 
             cursor_pct = _clamp_pct(data.get("cursorModelsPct"))
             other_pct = _clamp_pct(data.get("otherModelsPct"))
+            grok_pct = _clamp_pct(data.get("grokBotPct"))
+            grok_reset_hint = data.get("grokBotResetHint")
+            if isinstance(grok_reset_hint, str):
+                grok_reset_hint = grok_reset_hint.strip() or None
+            else:
+                grok_reset_hint = None
             print(
-                f"[scrape] clamped pct cursor={cursor_pct!r} other={other_pct!r}",
+                f"[scrape] clamped pct cursor={cursor_pct!r} other={other_pct!r} "
+                f"grok={grok_pct!r}",
                 flush=True,
             )
-            if cursor_pct is None and other_pct is None:
+            if cursor_pct is None and other_pct is None and grok_pct is None:
                 print("[scrape] parse failed; keeping previous snapshot", flush=True)
                 return UsageSnapshot(
-                    cursor_models_pct=prev.cursor_models_pct,
-                    other_models_pct=prev.other_models_pct,
                     error="Could not parse spending percentages (page structure may have changed).",
                     fetched_at=time.time(),
                     source=source,
                     raw_hint=data.get("hint") or prev.raw_hint,
+                    **_spend_pct_fields(prev),
                     **prev.reset_stamp_fields(),
                     **_account_fields(prev),
                 )
@@ -493,6 +538,8 @@ class SpendingScraper:
             snap = UsageSnapshot(
                 cursor_models_pct=cursor_pct,
                 other_models_pct=other_pct,
+                grok_bot_pct=grok_pct,
+                grok_bot_reset_hint=grok_reset_hint,
                 usage_reset_at_auto=usage_reset_at_auto,
                 usage_reset_at_manual=prev.usage_reset_at_manual,
                 usage_reset_auto_discover=prev.usage_reset_auto_discover,
@@ -505,6 +552,7 @@ class SpendingScraper:
             print(
                 f"[scrape] OK saved cursor={snap.cursor_models_pct}% "
                 f"other={snap.other_models_pct}% "
+                f"grok={snap.grok_bot_pct}% "
                 f"usage_reset_at={snap.effective_usage_reset_at()!r} "
                 f"auto={snap.usage_reset_at_auto!r} "
                 f"manual={snap.usage_reset_at_manual!r} "
@@ -563,8 +611,6 @@ class SpendingScraper:
             if is_session_stuck:
                 log.warning("BiDi session stuck; will retry: %s", exc)
                 return UsageSnapshot(
-                    cursor_models_pct=prev.cursor_models_pct,
-                    other_models_pct=prev.other_models_pct,
                     fetched_at=time.time(),
                     source="unavailable",
                     error=(
@@ -572,17 +618,17 @@ class SpendingScraper:
                         "with remote debugging to clear it."
                     ),
                     raw_hint=prev.raw_hint,
+                    **_spend_pct_fields(prev),
                     **prev.reset_stamp_fields(),
                     **_account_fields(prev),
                 )
             log.exception("Scrape failed")
             return UsageSnapshot(
-                cursor_models_pct=prev.cursor_models_pct,
-                other_models_pct=prev.other_models_pct,
                 fetched_at=time.time(),
                 source="error",
                 error=str(exc),
                 raw_hint=prev.raw_hint,
+                **_spend_pct_fields(prev),
                 **prev.reset_stamp_fields(),
                 **_account_fields(prev),
             )
@@ -612,6 +658,7 @@ class SpendingScraper:
                 f"[scrape] attempt {i + 1}/{attempts}: "
                 f"cursor={last.get('cursorModelsPct')!r} "
                 f"other={last.get('otherModelsPct')!r} "
+                f"grok={last.get('grokBotPct')!r} "
                 f"loggedOut={last.get('loggedOut')!r} "
                 f"pageUrl={last.get('pageUrl')!r} "
                 f"hasIncludedInPro={last.get('hasIncludedInPro')!r} "
@@ -621,7 +668,11 @@ class SpendingScraper:
             # Body missing — do not burn retries; next scheduled poll will try again.
             if last.get("pageReady") is False:
                 return last
-            if last.get("cursorModelsPct") is not None or last.get("otherModelsPct") is not None:
+            if (
+                last.get("cursorModelsPct") is not None
+                or last.get("otherModelsPct") is not None
+                or last.get("grokBotPct") is not None
+            ):
                 return last
             if page_requires_login_from_extract(last):
                 return last

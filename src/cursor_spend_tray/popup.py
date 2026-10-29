@@ -240,6 +240,7 @@ class UsageRing(QWidget):
         title: str,
         fill: str,
         *,
+        subtitle: str = "",
         warn_at_70: bool = False,
         tooltip: str = "",
         parent: QWidget | None = None,
@@ -249,30 +250,53 @@ class UsageRing(QWidget):
         self._title = QLabel(title)
 
         title_font = QFont()
-        title_font.setPointSize(11)
+        title_font.setPointSize(10)
         title_font.setWeight(QFont.Weight.DemiBold)
-        title_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
+        title_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
         self._title.setFont(title_font)
         self._title.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        self._title.setFixedHeight(22)
+        self._title.setFixedHeight(20)
         self._title.setStyleSheet("color: #ECECEC; background: transparent; border: none;")
+
+        self._subtitle = QLabel(subtitle)
+        sub_font = QFont()
+        sub_font.setPointSize(8)
+        self._subtitle.setFont(sub_font)
+        self._subtitle.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
+        self._subtitle.setFixedHeight(16)
+        self._subtitle.setStyleSheet(
+            "color: #888888; background: transparent; border: none;"
+        )
+        self._subtitle.setVisible(bool(subtitle.strip()))
 
         if tooltip:
             self.setToolTip(tooltip)
             self._ring.setToolTip(tooltip)
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumWidth(160)
+        self.setMinimumWidth(108)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 0, 8, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setSpacing(4)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._ring, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(self._title)
+        layout.addWidget(self._subtitle)
 
     def set_percent(self, value: int | None) -> None:
         self._ring.set_percent(value)
+
+    def set_subtitle(self, text: str) -> None:
+        clean = (text or "").strip()
+        self._subtitle.setText(clean)
+        self._subtitle.setVisible(bool(clean))
+
+    def set_tooltip(self, text: str) -> None:
+        self.setToolTip(text)
+        self._ring.setToolTip(text)
 
 
 class _RingGlyph(QWidget):
@@ -289,7 +313,7 @@ class _RingGlyph(QWidget):
         self._fill = QColor(fill)
         self._warn_at_70 = warn_at_70
         self._pct: int | None = None
-        self.setFixedSize(136, 136)
+        self.setFixedSize(104, 104)
 
     def set_percent(self, value: int | None) -> None:
         self._pct = value
@@ -341,7 +365,7 @@ class _RingGlyph(QWidget):
 
         painter.setPen(QColor("#ECECEC"))
         pct_font = QFont()
-        pct_font.setPointSize(18)
+        pct_font.setPointSize(15)
         pct_font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(pct_font)
         label = "—" if self._pct is None else f"{max(0, min(100, self._pct))}%"
@@ -2255,13 +2279,23 @@ class SpendPopup(QFrame):
             "#B0B0B0",
             warn_at_70=True,
         )
+        self.grok_ring = UsageRing(
+            "GROK",
+            "#9BB8D4",
+            subtitle="weekly",
+            tooltip=(
+                "Grok Bot weekly allowance from the Cursor spending page.\n"
+                "Resets every week; pauses at the limit until then."
+            ),
+        )
 
         rings = QHBoxLayout()
         rings.setContentsMargins(0, 8, 0, 4)
-        rings.setSpacing(16)
+        rings.setSpacing(6)
         rings.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         rings.addWidget(self.cursor_ring, stretch=1)
         rings.addWidget(self.other_ring, stretch=1)
+        rings.addWidget(self.grok_ring, stretch=1)
 
         card_layout = QVBoxLayout(self._card)
         card_layout.setContentsMargins(16, 16, 16, 16)
@@ -2578,6 +2612,20 @@ class SpendPopup(QFrame):
     ) -> None:
         self.cursor_ring.set_percent(snap.cursor_models_pct)
         self.other_ring.set_percent(snap.other_models_pct)
+        self.grok_ring.set_percent(snap.grok_bot_pct)
+        self.grok_ring.set_subtitle("weekly")
+        grok_hint = (snap.grok_bot_reset_hint or "").strip()
+        if grok_hint:
+            self.grok_ring.set_tooltip(
+                "Grok Bot weekly allowance (renews weekly).\n"
+                f"Resets {grok_hint}.\n"
+                "Pauses at the limit until the weekly reset."
+            )
+        else:
+            self.grok_ring.set_tooltip(
+                "Grok Bot weekly allowance (renews weekly).\n"
+                "Pauses at the limit until the weekly reset."
+            )
         reset_at = snap.effective_usage_reset_at()
         if reset_at is not None:
             self._reset_label.setText(

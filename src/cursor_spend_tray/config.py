@@ -284,6 +284,10 @@ def resolve_usage_reset_at(
 class UsageSnapshot(BaseModel):
     cursor_models_pct: int | None = None
     other_models_pct: int | None = None
+    # Grok Bot weekly allowance from the spending page (separate from monthly AUTO/API).
+    grok_bot_pct: int | None = None
+    # e.g. "Nov 1 (3 days left)" scraped under Weekly usage.
+    grok_bot_reset_hint: str | None = None
     # From dashboard settings / sidebar (refreshed with each successful scrape).
     account_email: str | None = None
     subscription_level: str | None = None

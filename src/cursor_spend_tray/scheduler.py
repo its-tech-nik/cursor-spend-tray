@@ -233,7 +233,12 @@ class RefreshScheduler(QObject):
         else:
             self.refreshing_changed.emit(False)
             self._arm_next()
-            if snap.error and snap.cursor_models_pct is None and snap.other_models_pct is None:
+            if (
+                snap.error
+                and snap.cursor_models_pct is None
+                and snap.other_models_pct is None
+                and snap.grok_bot_pct is None
+            ):
                 self.status_changed.emit(snap.error)
             elif snap.error:
                 self.status_changed.emit(f"Partial/cached data — {snap.error}")
