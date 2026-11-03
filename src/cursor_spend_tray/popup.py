@@ -4,17 +4,20 @@ from dataclasses import dataclass
 from datetime import time as time_of_day
 
 from PyQt6.QtCore import (
+    QEasingCurve,
     QEvent,
     QMimeData,
     QObject,
     QPoint,
     QPointF,
+    QPropertyAnimation,
     QRect,
     QRectF,
     QSize,
     QThread,
     QTimer,
     Qt,
+    pyqtProperty,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -46,7 +49,11 @@ from .config import (
     save_popup_panel_order,
 )
 from .sdk_stats import SdkHabitsBatch, SdkHabitsPreview, collect_habits_preview
-from .usage_csv import UsageCsvPreview, load_usage_preview
+from .usage_csv import (
+    UsageCsvPreview,
+    load_period_daily_series,
+    load_usage_preview,
+)
 from .vscdb_stats import VscdbHabitsPreview, collect_vscdb_habits_preview
 
 PANEL_MIME = "application/x-cursor-spend-tray-panel"
@@ -873,6 +880,13 @@ class MultiSeriesHistoryChart(QWidget):
         self._selected_index = None
         self.update()
 
+    def select_index(self, index: int | None) -> None:
+        if index is None or not (0 <= index < len(self._labels)):
+            self._selected_index = None
+        else:
+            self._selected_index = index
+        self.update()
+
     def selected_label(self) -> str | None:
         idx = self._selected_index
         if idx is None or not (0 <= idx < len(self._labels)):
@@ -1074,7 +1088,7 @@ class MultiSeriesHistoryChart(QWidget):
             painter.drawText(
                 self._plot,
                 int(Qt.AlignmentFlag.AlignCenter),
-                "Need 2+ billing periods",
+                "Need 2+ data points",
             )
             painter.end()
             return
@@ -1530,21 +1544,24 @@ def _merge_composer_usage_series(
     usage: UsageCsvPreview,
 ) -> tuple[
     list[str],
+    list[str],
     list[float | None],
     list[float | None],
     list[float | None],
 ]:
     """Align billing-period labels with tokens / AUTO% / API% from usage CSV."""
     labels: list[str] = []
+    period_starts: list[str] = []
     tokens: list[float | None] = []
     auto_pct: list[float | None] = []
     api_pct: list[float | None] = []
 
     if not usage.available:
-        return labels, tokens, auto_pct, api_pct
+        return labels, period_starts, tokens, auto_pct, api_pct
 
     for u in sorted(usage.periods, key=lambda p: p.period_start):
         labels.append(str(getattr(u, "label", None) or u.period_start))
+        period_starts.append(u.period_start)
         tok = int(getattr(u, "total_tokens", 0) or 0)
         tokens.append(float(tok) if tok or getattr(u, "event_count", 0) else None)
         cp = getattr(u, "cursor_models_pct", None)
@@ -1563,15 +1580,138 @@ def _merge_composer_usage_series(
     if keep:
         lo, hi = keep[0], keep[-1] + 1
         labels = labels[lo:hi]
+        period_starts = period_starts[lo:hi]
         tokens = tokens[lo:hi]
         auto_pct = auto_pct[lo:hi]
         api_pct = api_pct[lo:hi]
 
-    return labels, tokens, auto_pct, api_pct
+    return labels, period_starts, tokens, auto_pct, api_pct
+
+
+class SegmentedToggle(QWidget):
+    """Pill track with a sliding selection thumb (Year / Month)."""
+
+    changed = pyqtSignal(str)
+
+    _PAD = 2
+    _H = 26
+
+    def __init__(
+        self,
+        options: list[tuple[str, str]],
+        *,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        if len(options) < 2:
+            raise ValueError("SegmentedToggle needs at least 2 options")
+        self._options = list(options)  # (mode_id, label)
+        self._index = 0
+        self._thumb_x = float(self._PAD)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(self._H)
+
+        font = QFont()
+        font.setPointSize(8)
+        font.setWeight(QFont.Weight.DemiBold)
+        self._font = font
+        metrics = QFontMetrics(font)
+        seg_w = max(metrics.horizontalAdvance(label) for _, label in options) + 20
+        self._seg_w = max(48, seg_w)
+        self.setFixedWidth(self._PAD * 2 + self._seg_w * len(options))
+
+        self._anim = QPropertyAnimation(self, b"thumbX", self)
+        self._anim.setDuration(180)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def mode(self) -> str:
+        return self._options[self._index][0]
+
+    def set_mode(self, mode: str, *, animate: bool = True) -> None:
+        idx = next((i for i, (mid, _) in enumerate(self._options) if mid == mode), None)
+        if idx is None or idx == self._index:
+            return
+        self._index = idx
+        self._snap_thumb(animate=animate)
+
+    def _thumb_target_x(self) -> float:
+        return float(self._PAD + self._index * self._seg_w)
+
+    def _snap_thumb(self, *, animate: bool) -> None:
+        target = self._thumb_target_x()
+        self._anim.stop()
+        if not animate:
+            self._thumb_x = target
+            self.update()
+            return
+        self._anim.setStartValue(self._thumb_x)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _get_thumb_x(self) -> float:
+        return self._thumb_x
+
+    def _set_thumb_x(self, value: float) -> None:
+        self._thumb_x = float(value)
+        self.update()
+
+    thumbX = pyqtProperty(float, _get_thumb_x, _set_thumb_x)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self.width(), self._H)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        x = event.position().x()
+        idx = int((x - self._PAD) // self._seg_w)
+        idx = max(0, min(len(self._options) - 1, idx))
+        mode = self._options[idx][0]
+        if idx != self._index:
+            self._index = idx
+            self._snap_thumb(animate=True)
+            self.changed.emit(mode)
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, ARG002
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        track = QRectF(0, 0, self.width(), self.height())
+        radius = track.height() / 2
+        painter.setPen(QPen(QColor("#3A3348"), 1))
+        painter.setBrush(QColor("#1A1620"))
+        painter.drawRoundedRect(track.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+
+        thumb_h = self.height() - self._PAD * 2
+        thumb = QRectF(self._thumb_x, self._PAD, self._seg_w, thumb_h)
+        thumb_r = thumb_h / 2
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#0C0C0E"))
+        painter.drawRoundedRect(thumb, thumb_r, thumb_r)
+        # Subtle raised edge so the thumb reads as a sliding plate.
+        painter.setPen(QPen(QColor("#2E2A38"), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), thumb_r, thumb_r)
+
+        painter.setFont(self._font)
+        for i, (_, label) in enumerate(self._options):
+            seg = QRectF(
+                self._PAD + i * self._seg_w,
+                0,
+                self._seg_w,
+                self.height(),
+            )
+            active = i == self._index
+            painter.setPen(QColor("#F2F2F4" if active else "#8B8496"))
+            painter.drawText(seg, int(Qt.AlignmentFlag.AlignCenter), label)
+
+        painter.end()
 
 
 class ComposerHistoryPreview(QFrame):
-    """Billing-period tokens / AUTO / API trends from usage CSV."""
+    """Composer usage trends — Year (billing periods) or Month (days in period)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1593,11 +1733,18 @@ class ComposerHistoryPreview(QFrame):
         title.setFont(title_font)
         title.setStyleSheet("color: #E8ECF2; background: transparent; border: none;")
 
+        self._mode = "year"
+        self._view_toggle = SegmentedToggle(
+            [("year", "Year"), ("month", "Month")]
+        )
+        self._view_toggle.changed.connect(self._on_view_mode)
+
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(0)
+        header.setSpacing(8)
         header.addWidget(title, stretch=0)
         header.addStretch(1)
+        header.addWidget(self._view_toggle, stretch=0)
 
         self._chip_tokens = SeriesToggleChip(
             "Tokens",
@@ -1633,14 +1780,43 @@ class ComposerHistoryPreview(QFrame):
                 "for this billing period."
             ),
         )
+        self._chip_daily = SeriesToggleChip(
+            "Daily",
+            fg="#E0C090",
+            bg="#242016",
+            border="#4A3C28",
+            tooltip=(
+                "Tokens used on this calendar day\n"
+                "inside the selected billing period."
+            ),
+        )
+        self._chip_cumulative = SeriesToggleChip(
+            "Cumulative",
+            fg="#6FA8DC",
+            bg="#1A2030",
+            border="#2F3B52",
+            tooltip=(
+                "Running token total from the\n"
+                "period reset through this day."
+            ),
+        )
         self._chip_auto.hide()
         self._chip_api.hide()
+        self._chip_daily.hide()
+        self._chip_cumulative.hide()
 
-        self._series_chips: list[SeriesToggleChip] = [
+        self._year_chips: list[SeriesToggleChip] = [
             self._chip_tokens,
             self._chip_auto,
             self._chip_api,
         ]
+        self._month_chips: list[SeriesToggleChip] = [
+            self._chip_daily,
+            self._chip_cumulative,
+        ]
+        self._series_chips: list[SeriesToggleChip] = (
+            self._year_chips + self._month_chips
+        )
         for chip in self._series_chips:
             chip.toggled.connect(self._on_series_chip_toggled)
 
@@ -1660,10 +1836,19 @@ class ComposerHistoryPreview(QFrame):
         )
         self._caption = caption
         self._chart = MultiSeriesHistoryChart()
-        self._chart.period_selected.connect(self._on_period_selected)
+        self._chart.period_selected.connect(self._on_point_selected)
+
+        self._renewal_day = 19
+        self._renewal_time: time_of_day | None = None
+        self._year_labels: list[str] = []
+        self._period_starts: list[str] = []
         self._tokens: list[float | None] = []
         self._auto_pct: list[float | None] = []
         self._api_pct: list[float | None] = []
+        self._month_period_start: str = ""
+        self._daily: list[float | None] = []
+        self._cumulative: list[float | None] = []
+        self._selected_year_index: int | None = None
 
         self._fallback = QLabel("")
         fallback_font = QFont()
@@ -1695,10 +1880,19 @@ class ComposerHistoryPreview(QFrame):
         preview: VscdbHabitsPreview,
         usage: UsageCsvPreview | None = None,
         sdk: SdkHabitsPreview | None = None,
+        *,
+        renewal_day: int = 19,
+        renewal_time: time_of_day | None = None,
     ) -> None:
         usage = usage or UsageCsvPreview.unavailable("")
         sdk = sdk or SdkHabitsPreview.unavailable("")
-        labels, tokens, auto_pct, api_pct = _merge_composer_usage_series(usage)
+        self._renewal_day = renewal_day
+        self._renewal_time = renewal_time
+
+        labels, period_starts, tokens, auto_pct, api_pct = (
+            _merge_composer_usage_series(usage)
+        )
+
         if len(labels) < 2:
             message = (
                 usage.error_message
@@ -1714,17 +1908,58 @@ class ComposerHistoryPreview(QFrame):
         self._fallback.hide()
         self._content.show()
 
+        self._year_labels = labels
+        self._period_starts = period_starts
+        self._tokens = tokens
+        self._auto_pct = auto_pct
+        self._api_pct = api_pct
+        if self._selected_year_index is not None and not (
+            0 <= self._selected_year_index < len(labels)
+        ):
+            self._selected_year_index = None
+
+        self._render_active_view()
+
+    def _on_view_mode(self, mode: str) -> None:
+        if mode == self._mode:
+            return
+        if mode == "month" and self._mode == "year":
+            self._selected_year_index = self._chart.selected_index()
+        self._mode = mode
+        self._view_toggle.set_mode(mode, animate=True)
+        self._render_active_view()
+
+    def _render_active_view(self) -> None:
+        if self._mode == "month":
+            self._render_month_view()
+        else:
+            self._render_year_view()
+
+    def _year_period_index(self) -> int:
+        if (
+            self._selected_year_index is not None
+            and 0 <= self._selected_year_index < len(self._period_starts)
+        ):
+            return self._selected_year_index
+        return max(0, len(self._period_starts) - 1)
+
+    def _render_year_view(self) -> None:
+        labels = self._year_labels
+        tokens = self._tokens
+        auto_pct = self._auto_pct
+        api_pct = self._api_pct
+
         token_total = sum(int(v) for v in tokens if v is not None)
         caption_bits = [f"Billing periods · {len(labels)}"]
         if token_total:
             caption_bits.append(f"{token_total:,} tokens")
         self._caption.setText(" · ".join(caption_bits))
 
-        self._tokens = tokens
-        self._auto_pct = auto_pct
-        self._api_pct = api_pct
         has_auto = any(v is not None for v in auto_pct)
         has_api = any(v is not None for v in api_pct)
+        for chip in self._month_chips:
+            chip.hide()
+        self._chip_tokens.show()
         self._chip_auto.setVisible(has_auto)
         self._chip_api.setVisible(has_api)
 
@@ -1741,20 +1976,93 @@ class ComposerHistoryPreview(QFrame):
             series,
             caption=(
                 "Hover a period for exact values · click a period to show it "
+                "in the chips · Year/Month switches the same chart"
+            ),
+        )
+        if self._selected_year_index is not None:
+            self._chart.select_index(self._selected_year_index)
+        self._update_year_chip_values(self._chart.selected_index())
+        self._sync_series_chip_states()
+
+    def _render_month_view(self) -> None:
+        if not self._period_starts:
+            self._content.hide()
+            self._fallback.setText("No billing period selected")
+            self._fallback.show()
+            return
+
+        idx = self._year_period_index()
+        period_start = self._period_starts[idx]
+        daily = load_period_daily_series(
+            period_start,
+            renewal_day=self._renewal_day,
+            renewal_time=self._renewal_time,
+        )
+        if not daily.available:
+            for chip in self._year_chips:
+                chip.hide()
+            for chip in self._month_chips:
+                chip.hide()
+            self._chart.set_data([], [])
+            self._caption.setText(daily.error_message or "No daily data")
+            self._daily = []
+            self._cumulative = []
+            self._month_period_start = period_start
+            return
+
+        self._fallback.hide()
+        self._content.show()
+        self._month_period_start = daily.period_start
+        self._daily = list(daily.daily_tokens)
+        self._cumulative = list(daily.cumulative_tokens)
+
+        for chip in self._year_chips:
+            chip.hide()
+        self._chip_daily.show()
+        self._chip_cumulative.show()
+
+        caption_bits = [
+            daily.label,
+            f"{len(daily.days)} days",
+        ]
+        if daily.total_tokens:
+            caption_bits.append(f"{daily.total_tokens:,} tokens")
+        self._caption.setText(" · ".join(caption_bits))
+
+        self._chart.set_data(
+            list(daily.days),
+            [
+                ChartSeries(
+                    "Daily", "#E0C090", list(daily.daily_tokens), area=True
+                ),
+                ChartSeries(
+                    "Cumulative", "#6FA8DC", list(daily.cumulative_tokens)
+                ),
+            ],
+            caption=(
+                "Hover a day for exact values · click a day to show it "
                 "in the chips · click chips to toggle series"
             ),
         )
-        self._update_chip_values(self._chart.selected_index())
+        self._update_month_chip_values(self._chart.selected_index())
         self._sync_series_chip_states()
 
-    def _on_period_selected(self, index: int | None) -> None:
-        self._update_chip_values(index)
+    def _on_point_selected(self, index: int | None) -> None:
+        if self._mode == "month":
+            self._update_month_chip_values(index)
+            return
+        self._selected_year_index = index
+        self._update_year_chip_values(index)
 
     def clear_period_selection(self) -> None:
         self._chart.clear_selection()
-        self._update_chip_values(None)
+        if self._mode == "month":
+            self._update_month_chip_values(None)
+        else:
+            self._selected_year_index = None
+            self._update_year_chip_values(None)
 
-    def _update_chip_values(self, index: int | None) -> None:
+    def _update_year_chip_values(self, index: int | None) -> None:
         """Show the clicked period's values in the chips, or the latest when none."""
 
         def _pick(values: list[float | None]) -> float | None:
@@ -1772,6 +2080,26 @@ class ComposerHistoryPreview(QFrame):
         self._chip_api.setText("— API" if api is None else f"{api:.0f}% API")
         self._chips_host.updateGeometry()
 
+    def _update_month_chip_values(self, index: int | None) -> None:
+        def _pick(values: list[float | None]) -> float | None:
+            if index is not None:
+                return values[index] if 0 <= index < len(values) else None
+            return next((v for v in reversed(values) if v is not None), None)
+
+        daily = _pick(self._daily)
+        self._chip_daily.setText(
+            "— day" if daily is None else _format_token_chip(int(daily)).replace(
+                " tokens", " day"
+            )
+        )
+        cum = _pick(self._cumulative)
+        self._chip_cumulative.setText(
+            "— total"
+            if cum is None
+            else _format_token_chip(int(cum)).replace(" tokens", " total")
+        )
+        self._chips_host.updateGeometry()
+
     def _on_series_chip_toggled(self, series_name: str) -> None:
         visible = self._chart.toggle_series(series_name)
         for chip in self._series_chips:
@@ -1781,6 +2109,8 @@ class ComposerHistoryPreview(QFrame):
 
     def _sync_series_chip_states(self) -> None:
         for chip in self._series_chips:
+            if chip.isHidden():
+                continue
             chip.set_series_on(self._chart.is_series_visible(chip.series_name))
 
 
@@ -1945,7 +2275,10 @@ class DraggablePanel(QFrame):
         """Clicks on these controls should not start a panel reorder."""
         current = widget
         while isinstance(current, QObject):
-            if isinstance(current, (CopyableCommand, CountdownLabel, SeriesToggleChip)):
+            if isinstance(
+                current,
+                (CopyableCommand, CountdownLabel, SeriesToggleChip, SegmentedToggle),
+            ):
                 return True
             current = current.parent()
         return False
@@ -2206,6 +2539,8 @@ class SpendPopup(QFrame):
         self._habits_status_when_done: str | None = None
         self._habits_running_key: tuple[int, str] | None = None
         self._habits_pending: tuple[int, time_of_day | None, bool] | None = None
+        self._habits_renewal_day = 19
+        self._habits_renewal_time: time_of_day | None = None
         self._dismiss_armed = False
         self._keep_open = False
         self._awaiting_login = False
@@ -2396,6 +2731,8 @@ class SpendPopup(QFrame):
         self._habits_gen += 1
         gen = self._habits_gen
         self._habits_running_key = _renewal_boundary_key(renewal_day, renewal_time)
+        self._habits_renewal_day = renewal_day
+        self._habits_renewal_time = renewal_time
         self._habits_pending = None
         # Drop the strong ref to any prior worker. Do not disconnect — the C++
         # object may already be deleteLater'd after finished, which raises
@@ -2482,7 +2819,13 @@ class SpendPopup(QFrame):
             self.habits.apply_preview(sdk)
         else:
             self._habits_panel.hide()
-        self.composer_history.apply_preview(vscdb, usage, sdk)
+        self.composer_history.apply_preview(
+            vscdb,
+            usage,
+            sdk,
+            renewal_day=self._habits_renewal_day,
+            renewal_time=self._habits_renewal_time,
+        )
         # A queued follow-up rebuild (boundary change / force) should keep the
         # status line until that load finishes.
         if self._habits_pending is not None:

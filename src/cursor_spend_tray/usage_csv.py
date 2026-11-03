@@ -13,7 +13,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from datetime import time as time_of_day
 from pathlib import Path
 from typing import Any, Protocol
@@ -203,28 +203,39 @@ def parse_usage_csv(text: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _local_tz():
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _parse_row_datetime(date_raw: str) -> datetime | None:
+    """Parse a usage-CSV Date cell to a timezone-aware local datetime."""
+    text = date_raw.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            d = date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+        return datetime(d.year, d.month, d.day, tzinfo=_local_tz())
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_local_tz())
+
+
 def _row_period(
     date_raw: str,
     *,
     renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> date | None:
-    text = date_raw.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        # Fallback: date-only
-        try:
-            d = date.fromisoformat(text[:10])
-        except ValueError:
-            return None
-        return period_start_for(
-            d, renewal_day=renewal_day, renewal_time=renewal_time
-        )
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    dt = _parse_row_datetime(date_raw)
+    if dt is None:
+        return None
     return period_start_for(
         dt, renewal_day=renewal_day, renewal_time=renewal_time
     )
@@ -251,6 +262,163 @@ def sum_tokens_by_period(
         bucket[1] += 1
     return {k: (v[0], v[1]) for k, v in totals.items()}
 
+
+def sum_tokens_by_day(
+    rows: list[dict[str, Any]],
+    *,
+    period_start: date,
+    renewal_day: int,
+    renewal_time: time_of_day | None = None,
+) -> dict[date, tuple[int, int]]:
+    """Map local calendar day → (total_tokens, event_count) inside one period."""
+    totals: dict[date, list[int]] = {}
+    for row in rows:
+        dt = _parse_row_datetime(str(row.get("date") or ""))
+        if dt is None:
+            continue
+        start = period_start_for(
+            dt, renewal_day=renewal_day, renewal_time=renewal_time
+        )
+        if start != period_start:
+            continue
+        day = dt.date()
+        bucket = totals.setdefault(day, [0, 0])
+        bucket[0] += int(row.get("total_tokens") or 0)
+        bucket[1] += 1
+    return {k: (v[0], v[1]) for k, v in totals.items()}
+
+
+@dataclass(frozen=True)
+class UsageDailySeries:
+    """Day-by-day tokens for one billing period (reset → reset)."""
+
+    period_start: str
+    label: str
+    days: tuple[str, ...] = ()  # axis labels, e.g. 'Oct 19'
+    daily_tokens: tuple[float, ...] = ()
+    cumulative_tokens: tuple[float, ...] = ()
+    total_tokens: int = 0
+    event_count: int = 0
+    error_message: str = ""
+
+    @property
+    def available(self) -> bool:
+        return len(self.days) >= 2 and not self.error_message
+
+    @staticmethod
+    def unavailable(
+        message: str, *, period_start: str = "", label: str = ""
+    ) -> UsageDailySeries:
+        return UsageDailySeries(
+            period_start=period_start,
+            label=label,
+            error_message=message,
+        )
+
+
+def _row_dedupe_key(row: dict[str, Any]) -> str:
+    return (
+        f"{row.get('date')}|{row.get('total_tokens')}|{row.get('model')}|"
+        f"{row.get('kind')}"
+    )
+
+
+def _iter_usage_rows_deduped() -> list[dict[str, Any]]:
+    """All on-disk CSV rows, de-duplicated across overlapping period files."""
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for path in sorted(usage_csv_dir().glob("*_to_*.csv")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for row in parse_usage_csv(text):
+            key = _row_dedupe_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
+def load_period_daily_series(
+    period_start: date | str,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None = None,
+    as_of: datetime | date | None = None,
+) -> UsageDailySeries:
+    """Build contiguous daily + cumulative token series for one billing period."""
+    if isinstance(period_start, str):
+        try:
+            start = date.fromisoformat(period_start)
+        except ValueError:
+            return UsageDailySeries.unavailable(
+                f"Invalid period start: {period_start}"
+            )
+    else:
+        start = period_start
+
+    label = period_label(
+        start, renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    end = period_end_for(
+        start, renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    if isinstance(as_of, datetime):
+        now = as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+        now = now.astimezone(_local_tz())
+    elif isinstance(as_of, date):
+        now = datetime(as_of.year, as_of.month, as_of.day, tzinfo=_local_tz())
+    else:
+        now = datetime.now(timezone.utc).astimezone()
+    current_start = period_start_for(
+        now, renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    axis_end = min(end, now.date()) if start == current_start else end
+    if axis_end < start:
+        return UsageDailySeries.unavailable(
+            "Period has not started yet", period_start=start.isoformat(), label=label
+        )
+
+    by_day = sum_tokens_by_day(
+        _iter_usage_rows_deduped(),
+        period_start=start,
+        renewal_day=renewal_day,
+        renewal_time=renewal_time,
+    )
+
+    days: list[str] = []
+    daily: list[float] = []
+    cumulative: list[float] = []
+    running = 0
+    events = 0
+    cursor = start
+    while cursor <= axis_end:
+        tok, cnt = by_day.get(cursor, (0, 0))
+        running += tok
+        events += cnt
+        days.append(short_period_label(cursor))
+        daily.append(float(tok))
+        cumulative.append(float(running))
+        cursor += timedelta(days=1)
+
+    if len(days) < 2:
+        return UsageDailySeries.unavailable(
+            "Not enough days in this period yet",
+            period_start=start.isoformat(),
+            label=label,
+        )
+
+    return UsageDailySeries(
+        period_start=start.isoformat(),
+        label=label,
+        days=tuple(days),
+        daily_tokens=tuple(daily),
+        cumulative_tokens=tuple(cumulative),
+        total_tokens=running,
+        event_count=events,
+    )
 
 def _load_assoc() -> dict[str, dict[str, Any]]:
     path = _assoc_path()
