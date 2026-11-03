@@ -1710,6 +1710,64 @@ class SegmentedToggle(QWidget):
         painter.end()
 
 
+class PeriodNavButton(QLabel):
+    """Compact ‹ / › control for stepping billing periods in month view."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, glyph: str, parent: QWidget | None = None) -> None:
+        super().__init__(glyph, parent)
+        self._enabled = True
+        font = QFont()
+        font.setPointSize(11)
+        font.setWeight(QFont.Weight.DemiBold)
+        self.setFont(font)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedSize(24, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._apply_style()
+
+    def set_nav_enabled(self, enabled: bool) -> None:
+        if enabled == self._enabled:
+            return
+        self._enabled = enabled
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if enabled
+            else Qt.CursorShape.ArrowCursor
+        )
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        if self._enabled:
+            fg, bg, border = "#D8DEE8", "#1E2430", "#3A465A"
+        else:
+            fg, bg, border = "#4A5564", "#171A20", "#2A313C"
+        self.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {fg};
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 7px;
+            }}
+            QLabel:hover {{
+                border-color: {"#5B7A9E" if self._enabled else border};
+                color: {"#F2F4F8" if self._enabled else fg};
+            }}
+            """
+        )
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._enabled
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class ComposerHistoryPreview(QFrame):
     """Composer usage trends — Year (billing periods) or Month (days in period)."""
 
@@ -1832,9 +1890,28 @@ class ComposerHistoryPreview(QFrame):
         caption.setFont(cap_font)
         caption.setWordWrap(True)
         caption.setStyleSheet(
-            "color: #6F7887; background: transparent; border: none; padding-top: 12px;"
+            "color: #6F7887; background: transparent; border: none;"
         )
         self._caption = caption
+
+        self._nav_prev = PeriodNavButton("‹")
+        self._nav_next = PeriodNavButton("›")
+        self._nav_prev.clicked.connect(lambda: self._step_month_period(-1))
+        self._nav_next.clicked.connect(lambda: self._step_month_period(1))
+        self._nav_prev.setToolTip("Previous billing period")
+        self._nav_next.setToolTip("Next billing period")
+
+        caption_row = QWidget()
+        caption_layout = QHBoxLayout(caption_row)
+        caption_layout.setContentsMargins(0, 8, 0, 0)
+        caption_layout.setSpacing(6)
+        caption_layout.addWidget(self._nav_prev, stretch=0)
+        caption_layout.addWidget(caption, stretch=1)
+        caption_layout.addWidget(self._nav_next, stretch=0)
+        self._caption_row = caption_row
+        self._nav_prev.hide()
+        self._nav_next.hide()
+
         self._chart = MultiSeriesHistoryChart()
         self._chart.period_selected.connect(self._on_point_selected)
 
@@ -1866,7 +1943,7 @@ class ComposerHistoryPreview(QFrame):
         content_layout.setSpacing(8)
         content_layout.addWidget(chips_host)
         content_layout.addWidget(self._chart)
-        content_layout.addWidget(self._caption)
+        content_layout.addWidget(caption_row)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -1943,6 +2020,27 @@ class ComposerHistoryPreview(QFrame):
             return self._selected_year_index
         return max(0, len(self._period_starts) - 1)
 
+    def _sync_month_nav(self) -> None:
+        n = len(self._period_starts)
+        if self._mode != "month" or n == 0:
+            self._nav_prev.hide()
+            self._nav_next.hide()
+            return
+        idx = self._year_period_index()
+        self._nav_prev.show()
+        self._nav_next.show()
+        self._nav_prev.set_nav_enabled(idx > 0)
+        self._nav_next.set_nav_enabled(idx < n - 1)
+
+    def _step_month_period(self, delta: int) -> None:
+        if self._mode != "month" or not self._period_starts:
+            return
+        idx = self._year_period_index() + delta
+        if not (0 <= idx < len(self._period_starts)):
+            return
+        self._selected_year_index = idx
+        self._render_month_view()
+
     def _render_year_view(self) -> None:
         labels = self._year_labels
         tokens = self._tokens
@@ -1954,6 +2052,8 @@ class ComposerHistoryPreview(QFrame):
         if token_total:
             caption_bits.append(f"{token_total:,} tokens")
         self._caption.setText(" · ".join(caption_bits))
+        self._nav_prev.hide()
+        self._nav_next.hide()
 
         has_auto = any(v is not None for v in auto_pct)
         has_api = any(v is not None for v in api_pct)
@@ -1989,7 +2089,12 @@ class ComposerHistoryPreview(QFrame):
             self._content.hide()
             self._fallback.setText("No billing period selected")
             self._fallback.show()
+            self._sync_month_nav()
             return
+
+        # Pin an explicit index so ‹ › have a stable position.
+        if self._selected_year_index is None:
+            self._selected_year_index = self._year_period_index()
 
         idx = self._year_period_index()
         period_start = self._period_starts[idx]
@@ -2004,10 +2109,14 @@ class ComposerHistoryPreview(QFrame):
             for chip in self._month_chips:
                 chip.hide()
             self._chart.set_data([], [])
-            self._caption.setText(daily.error_message or "No daily data")
+            label = self._year_labels[idx] if idx < len(self._year_labels) else period_start
+            self._caption.setText(
+                f"{label} · {daily.error_message or 'No daily data'}"
+            )
             self._daily = []
             self._cumulative = []
             self._month_period_start = period_start
+            self._sync_month_nav()
             return
 
         self._fallback.hide()
@@ -2028,6 +2137,7 @@ class ComposerHistoryPreview(QFrame):
         if daily.total_tokens:
             caption_bits.append(f"{daily.total_tokens:,} tokens")
         self._caption.setText(" · ".join(caption_bits))
+        self._sync_month_nav()
 
         self._chart.set_data(
             list(daily.days),
@@ -2040,8 +2150,8 @@ class ComposerHistoryPreview(QFrame):
                 ),
             ],
             caption=(
-                "Hover a day for exact values · click a day to show it "
-                "in the chips · click chips to toggle series"
+                "Hover a day for exact values · use ‹ › to change period · "
+                "click chips to toggle series"
             ),
         )
         self._update_month_chip_values(self._chart.selected_index())
@@ -2277,7 +2387,13 @@ class DraggablePanel(QFrame):
         while isinstance(current, QObject):
             if isinstance(
                 current,
-                (CopyableCommand, CountdownLabel, SeriesToggleChip, SegmentedToggle),
+                (
+                    CopyableCommand,
+                    CountdownLabel,
+                    SeriesToggleChip,
+                    SegmentedToggle,
+                    PeriodNavButton,
+                ),
             ):
                 return True
             current = current.parent()
