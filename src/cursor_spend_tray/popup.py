@@ -42,6 +42,8 @@ from PyQt6.QtWidgets import (
     QLayout,
     QLayoutItem,
     QMenu,
+    QScrollArea,
+    QScrollBar,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -2726,6 +2728,10 @@ class GithubProjectCard(QFrame):
         return False
 
 
+# How many project cards fit in the GitHub list viewport before scrolling.
+_GITHUB_CARDS_VIEWPORT = 3
+
+
 class GithubSummaryPreview(QFrame):
     """Authored commits + PRs by project for the active Cursor billing period."""
 
@@ -2734,12 +2740,12 @@ class GithubSummaryPreview(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("githubSummary")
+        # No outer chrome — repo cards own the visual edges.
         self.setStyleSheet(
             """
             QFrame#githubSummary {
-                background: #15181C;
-                border: 1px solid #2A313C;
-                border-radius: 10px;
+                background: transparent;
+                border: none;
             }
             """
         )
@@ -2791,9 +2797,60 @@ class GithubSummaryPreview(QFrame):
         chips.addStretch(1)
 
         self._cards_host = QWidget()
+        self._cards_host.setObjectName("githubCardsHost")
+        self._cards_host.setStyleSheet(
+            "QWidget#githubCardsHost { background: transparent; }"
+        )
         self._cards_layout = QVBoxLayout(self._cards_host)
         self._cards_layout.setContentsMargins(0, 0, 0, 0)
         self._cards_layout.setSpacing(8)
+
+        self._cards_scroll = QScrollArea()
+        self._cards_scroll.setObjectName("githubCardsScroll")
+        self._cards_scroll.setWidgetResizable(True)
+        self._cards_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._cards_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._cards_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._cards_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._cards_scroll.setWidget(self._cards_host)
+        self._cards_scroll.setStyleSheet(
+            """
+            QScrollArea#githubCardsScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#githubCardsScroll > QWidget > QWidget {
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #3A4454;
+                border-radius: 4px;
+                min-height: 24px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #4A5A72;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            """
+        )
 
         self._fallback = QLabel("Loading GitHub…")
         fb_font = QFont()
@@ -2810,10 +2867,10 @@ class GithubSummaryPreview(QFrame):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
         content_layout.addLayout(chips)
-        content_layout.addWidget(self._cards_host)
+        content_layout.addWidget(self._cards_scroll)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 11, 12, 11)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addLayout(header)
         layout.addWidget(self._content)
@@ -2825,6 +2882,42 @@ class GithubSummaryPreview(QFrame):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+
+    def _sync_cards_viewport(self, *, relayout_popup: bool = False) -> None:
+        """Fit the scroll viewport to up to three project cards; scroll the rest."""
+        spacing = self._cards_layout.spacing()
+        heights: list[int] = []
+        for i in range(self._cards_layout.count()):
+            item = self._cards_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if w is None:
+                continue
+            w.ensurePolished()
+            h = max(w.sizeHint().height(), w.minimumSizeHint().height())
+            if h > 0:
+                heights.append(h)
+        if not heights:
+            self._cards_scroll.setFixedHeight(0)
+        else:
+            card_h = max(heights)
+            visible = min(len(heights), _GITHUB_CARDS_VIEWPORT)
+            viewport_h = visible * card_h + max(0, visible - 1) * spacing
+            self._cards_scroll.setFixedHeight(viewport_h)
+            if len(heights) > _GITHUB_CARDS_VIEWPORT:
+                self._cards_scroll.setVerticalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAsNeeded
+                )
+            else:
+                self._cards_scroll.setVerticalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                )
+        if relayout_popup:
+            host = self.parentWidget()
+            while host is not None:
+                if host.__class__.__name__ == "SpendPopup":
+                    host.adjustSize()
+                    break
+                host = host.parentWidget()
 
     def apply_preview(self, preview: GithubHabitsPreview) -> None:
         self._clear_cards()
@@ -2859,12 +2952,21 @@ class GithubSummaryPreview(QFrame):
                 "color: #7E8694; background: transparent; border: none;"
             )
             self._cards_layout.addWidget(empty)
+            self._sync_cards_viewport()
+            QTimer.singleShot(
+                0, lambda: self._sync_cards_viewport(relayout_popup=True)
+            )
             return
 
         for project in preview.projects:
             card = GithubProjectCard(project)
             card.branch_changed.connect(self.branch_preference_changed.emit)
             self._cards_layout.addWidget(card)
+        self._sync_cards_viewport()
+        # Re-measure after Qt finishes polishing card layouts.
+        QTimer.singleShot(
+            0, lambda: self._sync_cards_viewport(relayout_popup=True)
+        )
 
 
 class DraggablePanel(QFrame):
@@ -2905,6 +3007,7 @@ class DraggablePanel(QFrame):
                     SegmentedToggle,
                     PeriodNavButton,
                     GithubBranchDropdown,
+                    QScrollBar,
                 ),
             ):
                 return True
