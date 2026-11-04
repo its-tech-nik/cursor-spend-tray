@@ -28,6 +28,9 @@ from .config import data_dir
 log = logging.getLogger(__name__)
 
 CACHE_VERSION = 6
+# Soft TTL for collect(..., use_cache=True). Peek hydrate ignores this so the
+# UI can paint instantly; the background worker re-queries gh once the entry ages.
+_CACHE_MAX_AGE_S = 5 * 60
 _GH_TIMEOUT_S = 90
 _COMMIT_PAGE_SIZE = 100
 _COMMIT_SOFT_CAP = 400
@@ -224,12 +227,22 @@ def _read_cache_payload() -> dict | None:
     return payload
 
 
+def _cache_age_s(payload: dict, *, now: float | None = None) -> float | None:
+    """Seconds since ``fetched_at``, or ``None`` when the stamp is missing/invalid."""
+    fetched_at = payload.get("fetched_at")
+    if not isinstance(fetched_at, (int, float)):
+        return None
+    return max(0.0, float(now if now is not None else time.time()) - float(fetched_at))
+
+
 def _load_cache(
     *,
     renewal_day: int,
     renewal_time: time_of_day | None,
     period_start: date,
     prefs_fingerprint: str,
+    max_age_s: float = _CACHE_MAX_AGE_S,
+    now: float | None = None,
 ) -> GithubHabitsPreview | None:
     payload = _read_cache_payload()
     if payload is None:
@@ -241,6 +254,10 @@ def _load_cache(
     if payload.get("period_start") != period_start.isoformat():
         return None
     if payload.get("prefs_fingerprint") != prefs_fingerprint:
+        return None
+    age = _cache_age_s(payload, now=now)
+    # Missing stamp (pre-TTL caches) or aged-out → miss so the worker revalidates.
+    if age is None or age > max_age_s:
         return None
     return _preview_from_cache_payload(payload)
 
@@ -259,6 +276,7 @@ def _save_cache(
     renewal_day: int,
     renewal_time: time_of_day | None,
     prefs_fingerprint: str,
+    fetched_at: float | None = None,
 ) -> None:
     try:
         data_dir().mkdir(parents=True, exist_ok=True)
@@ -267,6 +285,7 @@ def _save_cache(
             "renewal_day": renewal_day,
             "renewal_time": _renewal_time_key(renewal_time),
             "prefs_fingerprint": prefs_fingerprint,
+            "fetched_at": float(time.time() if fetched_at is None else fetched_at),
             "login": preview.login,
             "period_label": preview.period_label,
             "period_start": preview.period_start,

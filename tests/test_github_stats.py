@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from datetime import date, datetime, time, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 from cursor_spend_tray.github_stats import (
     BRANCH_PREF_DEV,
     BRANCH_PREF_MAIN,
+    CACHE_VERSION,
     GithubHabitsPreview,
     GithubProjectRow,
+    _CACHE_MAX_AGE_S,
+    _is_merge_commit,
+    _load_cache,
+    _prefs_fingerprint,
+    _save_cache,
     collect_github_habits_preview,
     default_branch_preference,
     normalize_branch_preference,
+    peek_cached_github_habits_preview,
     resolve_track_branch,
-    _is_merge_commit,
 )
 
 
@@ -121,6 +130,159 @@ class CollectGithubHabitsPreviewTests(unittest.TestCase):
         self.assertEqual(activity.call_args.kwargs["branch"], "dev")
         self.assertEqual(activity.call_args.kwargs["author"], "dev")
         self.assertIsInstance(preview, GithubHabitsPreview)
+
+
+class GithubHabitsCacheTtlTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+        self._data_dir = patch(
+            "cursor_spend_tray.github_stats.data_dir", return_value=self.root
+        )
+        self._data_dir.start()
+        self.preview = GithubHabitsPreview(
+            available=True,
+            login="dev",
+            period_label="Oct 19 – Nov 18",
+            period_start=date(2026, 10, 19).isoformat(),
+            period_end=date(2026, 11, 18).isoformat(),
+            projects=(
+                GithubProjectRow(
+                    name="cursor-spend-tray",
+                    full_name="its-tech-nik/cursor-spend-tray",
+                    commit_count=6,
+                    pr_count=1,
+                    additions=10,
+                    deletions=2,
+                ),
+            ),
+            total_commits=6,
+            total_prs=1,
+            total_additions=10,
+            total_deletions=2,
+        )
+        self.prefs_fp = _prefs_fingerprint({})
+        self.fetched_at = 1_700_000_000.0
+
+    def tearDown(self) -> None:
+        self._data_dir.stop()
+        self._tmpdir.cleanup()
+
+    def _write_cache(self, *, fetched_at: float | None) -> None:
+        _save_cache(
+            self.preview,
+            renewal_day=19,
+            renewal_time=time(20, 0),
+            prefs_fingerprint=self.prefs_fp,
+            fetched_at=fetched_at if fetched_at is not None else self.fetched_at,
+        )
+        if fetched_at is None:
+            # Simulate a pre-TTL cache file with no stamp.
+            path = self.root / "github-habits-cache.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.pop("fetched_at", None)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_fresh_cache_is_a_hit(self) -> None:
+        self._write_cache(fetched_at=self.fetched_at)
+        cached = _load_cache(
+            renewal_day=19,
+            renewal_time=time(20, 0),
+            period_start=date(2026, 10, 19),
+            prefs_fingerprint=self.prefs_fp,
+            now=self.fetched_at + 30,
+        )
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.total_commits, 6)
+        self.assertTrue(cached.cache_hit)
+
+    def test_aged_cache_misses_so_worker_revalidates(self) -> None:
+        self._write_cache(fetched_at=self.fetched_at)
+        cached = _load_cache(
+            renewal_day=19,
+            renewal_time=time(20, 0),
+            period_start=date(2026, 10, 19),
+            prefs_fingerprint=self.prefs_fp,
+            now=self.fetched_at + _CACHE_MAX_AGE_S + 1,
+        )
+        self.assertIsNone(cached)
+
+    def test_missing_fetched_at_misses(self) -> None:
+        self._write_cache(fetched_at=None)
+        cached = _load_cache(
+            renewal_day=19,
+            renewal_time=time(20, 0),
+            period_start=date(2026, 10, 19),
+            prefs_fingerprint=self.prefs_fp,
+            now=self.fetched_at,
+        )
+        self.assertIsNone(cached)
+
+    def test_peek_returns_stale_cache_for_hydrate(self) -> None:
+        self._write_cache(fetched_at=self.fetched_at)
+        # Age past TTL — collect would miss, but hydrate still paints.
+        peeked = peek_cached_github_habits_preview()
+        self.assertIsNotNone(peeked)
+        assert peeked is not None
+        self.assertEqual(peeked.total_commits, 6)
+        self.assertEqual(peeked.projects[0].commit_count, 6)
+        # Sanity: version stamped.
+        raw = json.loads(
+            (self.root / "github-habits-cache.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(raw["version"], CACHE_VERSION)
+
+    def test_collect_requeries_when_cache_aged(self) -> None:
+        self._write_cache(fetched_at=self.fetched_at)
+        discovered = [
+            {
+                "sha": "abc",
+                "parents": [{}],
+                "commit": {"message": "feat"},
+                "repository": {
+                    "full_name": "its-tech-nik/cursor-spend-tray",
+                    "name": "cursor-spend-tray",
+                },
+            }
+        ]
+        with (
+            patch(
+                "cursor_spend_tray.github_stats.time.time",
+                return_value=self.fetched_at + _CACHE_MAX_AGE_S + 5,
+            ),
+            patch(
+                "cursor_spend_tray.github_stats._viewer_login",
+                return_value="dev",
+            ),
+            patch(
+                "cursor_spend_tray.github_stats._search_authored_commits",
+                return_value=discovered,
+            ),
+            patch(
+                "cursor_spend_tray.github_stats._fetch_pr_counts",
+                return_value=("dev", {}),
+            ),
+            patch(
+                "cursor_spend_tray.github_stats._repo_default_branch",
+                return_value="main",
+            ),
+            patch(
+                "cursor_spend_tray.github_stats._branch_period_activity",
+                return_value=(11, 50, 10),
+            ) as activity,
+        ):
+            preview = collect_github_habits_preview(
+                renewal_day=19,
+                renewal_time=time(20, 0),
+                use_cache=True,
+                now=datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc),
+                branch_prefs={},
+            )
+        self.assertTrue(preview.available)
+        self.assertFalse(preview.cache_hit)
+        self.assertEqual(preview.total_commits, 11)
+        activity.assert_called_once()
 
 
 if __name__ == "__main__":
