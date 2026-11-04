@@ -61,11 +61,11 @@ def panel_order_path() -> Path:
     return data_dir() / "popup_panel_order.json"
 
 
-DEFAULT_POPUP_PANEL_ORDER: tuple[str, ...] = ("spend", "habits", "composer")
+DEFAULT_POPUP_PANEL_ORDER: tuple[str, ...] = ("spend", "habits", "composer", "github")
 
 
 def load_popup_panel_order() -> list[str]:
-    """Return saved vertical order for the three main popup cards."""
+    """Return saved vertical order for the main popup cards."""
     path = panel_order_path()
     known = set(DEFAULT_POPUP_PANEL_ORDER)
     if path.is_file():

@@ -55,6 +55,7 @@ from .popup import SpendPopup
 from .login_network_watch import LoginNetworkWatcher, LogoutNetworkWatcher
 from .scheduler import RefreshScheduler
 from .usage_csv import invalidate_usage_totals_cache
+from .github_stats import invalidate_github_habits_cache
 from .vscdb_stats import invalidate_vscdb_habits_cache
 from .session_cookie import profile_has_cursor_session_cookie
 from .sni import StatusNotifierItem
@@ -1825,6 +1826,7 @@ class TrayApp(QWidget):
         self.snapshot = snap
         # Drop renewal-keyed caches so the next load rebuckets under the new stamp.
         invalidate_vscdb_habits_cache()
+        invalidate_github_habits_cache()
         invalidate_usage_totals_cache()
         done = f"Reset day set to the {day} at {qtime.toString('HH:mm')}"
         self.popup.set_status("Updating billing periods…")
