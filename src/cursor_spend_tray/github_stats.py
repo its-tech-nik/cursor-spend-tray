@@ -190,30 +190,7 @@ def _renewal_time_key(renewal_time: time_of_day | None) -> str:
     return tod.strftime("%H:%M:%S")
 
 
-def _load_cache(
-    *,
-    renewal_day: int,
-    renewal_time: time_of_day | None,
-    period_start: date,
-    prefs_fingerprint: str,
-) -> GithubHabitsPreview | None:
-    path = _cache_path()
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if payload.get("version") != CACHE_VERSION:
-        return None
-    if payload.get("renewal_day") != renewal_day:
-        return None
-    if payload.get("renewal_time") != _renewal_time_key(renewal_time):
-        return None
-    if payload.get("period_start") != period_start.isoformat():
-        return None
-    if payload.get("prefs_fingerprint") != prefs_fingerprint:
-        return None
+def _preview_from_cache_payload(payload: dict) -> GithubHabitsPreview | None:
     try:
         projects = tuple(GithubProjectRow(**row) for row in payload.get("projects") or [])
         return GithubHabitsPreview(
@@ -232,6 +209,48 @@ def _load_cache(
         )
     except (TypeError, ValueError, KeyError):
         return None
+
+
+def _read_cache_payload() -> dict | None:
+    path = _cache_path()
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
+        return None
+    return payload
+
+
+def _load_cache(
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None,
+    period_start: date,
+    prefs_fingerprint: str,
+) -> GithubHabitsPreview | None:
+    payload = _read_cache_payload()
+    if payload is None:
+        return None
+    if payload.get("renewal_day") != renewal_day:
+        return None
+    if payload.get("renewal_time") != _renewal_time_key(renewal_time):
+        return None
+    if payload.get("period_start") != period_start.isoformat():
+        return None
+    if payload.get("prefs_fingerprint") != prefs_fingerprint:
+        return None
+    return _preview_from_cache_payload(payload)
+
+
+def peek_cached_github_habits_preview() -> GithubHabitsPreview | None:
+    """Last on-disk GitHub summary for instant UI hydrate (may be slightly stale)."""
+    payload = _read_cache_payload()
+    if payload is None:
+        return None
+    return _preview_from_cache_payload(payload)
 
 
 def _save_cache(

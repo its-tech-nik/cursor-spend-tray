@@ -200,12 +200,26 @@ def _renewal_time_key(renewal_time: time_of_day | None) -> str:
     return tod.strftime("%H:%M:%S")
 
 
-def _load_cache(
-    db_path: Path,
-    *,
-    renewal_day: int,
-    renewal_time: time_of_day | None,
-) -> VscdbHabitsPreview | None:
+def _preview_from_cache_payload(payload: dict) -> VscdbHabitsPreview | None:
+    try:
+        raw_periods = payload.get("periods") or payload.get("months") or []
+        periods = tuple(VscdbPeriodBucket(**m) for m in raw_periods)
+        return VscdbHabitsPreview(
+            available=True,
+            db_path=str(payload.get("db_path") or ""),
+            earliest=payload.get("earliest", ""),
+            latest=payload.get("latest", ""),
+            composers=int(payload.get("composers", 0)),
+            periods=periods,
+            insight=payload.get("insight", ""),
+            cache_hit=True,
+            elapsed_ms=0,
+        )
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _read_cache_payload() -> dict | None:
     path = _cache_path()
     if not path.is_file():
         return None
@@ -213,7 +227,19 @@ def _load_cache(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if payload.get("version") != CACHE_VERSION:
+    if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
+        return None
+    return payload
+
+
+def _load_cache(
+    db_path: Path,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None,
+) -> VscdbHabitsPreview | None:
+    payload = _read_cache_payload()
+    if payload is None:
         return None
     if payload.get("renewal_day") != renewal_day:
         return None
@@ -225,22 +251,15 @@ def _load_cache(
         return None
     if payload.get("db_mtime_ns") != mtime_ns:
         return None
-    try:
-        raw_periods = payload.get("periods") or payload.get("months") or []
-        periods = tuple(VscdbPeriodBucket(**m) for m in raw_periods)
-        return VscdbHabitsPreview(
-            available=True,
-            db_path=str(db_path),
-            earliest=payload.get("earliest", ""),
-            latest=payload.get("latest", ""),
-            composers=int(payload.get("composers", 0)),
-            periods=periods,
-            insight=payload.get("insight", ""),
-            cache_hit=True,
-            elapsed_ms=0,
-        )
-    except (TypeError, ValueError, KeyError):
+    return _preview_from_cache_payload(payload)
+
+
+def peek_cached_vscdb_habits_preview() -> VscdbHabitsPreview | None:
+    """Last on-disk vscdb summary for instant UI hydrate (may be slightly stale)."""
+    payload = _read_cache_payload()
+    if payload is None:
         return None
+    return _preview_from_cache_payload(payload)
 
 
 def _save_cache(

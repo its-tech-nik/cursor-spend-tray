@@ -61,6 +61,7 @@ from .github_stats import (
     GithubHabitsPreview,
     GithubProjectRow,
     collect_github_habits_preview,
+    peek_cached_github_habits_preview,
     save_github_branch_pref,
 )
 from .qt_threads import stop_qthread
@@ -70,7 +71,11 @@ from .usage_csv import (
     load_period_daily_series,
     load_usage_preview,
 )
-from .vscdb_stats import VscdbHabitsPreview, collect_vscdb_habits_preview
+from .vscdb_stats import (
+    VscdbHabitsPreview,
+    collect_vscdb_habits_preview,
+    peek_cached_vscdb_habits_preview,
+)
 
 PANEL_MIME = "application/x-cursor-spend-tray-panel"
 
@@ -1870,9 +1875,11 @@ class PeriodNavButton(QLabel):
             painter.setPen(QColor("#D8DEE8"))
         else:
             painter.setPen(QColor("#4A5564"))
-        # Draw into the full rect so the glyph is optically centered (QLabel
-        # text metrics leave ‹ › sitting high for this size).
-        painter.drawText(self.rect(), int(Qt.AlignmentFlag.AlignCenter), self._glyph)
+        # Center the glyph’s ink box (‹ › sit off-center with AlignCenter).
+        ink = QFontMetrics(font).tightBoundingRect(self._glyph)
+        x = (self.width() - ink.width()) * 0.5 - ink.x()
+        y = (self.height() - ink.height()) * 0.5 - ink.y()
+        painter.drawText(QPointF(x, y), self._glyph)
         painter.end()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
@@ -1901,7 +1908,7 @@ class ComposerHistoryPreview(QFrame):
             """
         )
 
-        self._title = QLabel("History")
+        self._title = QLabel("Habits")
         title_font = QFont()
         title_font.setPointSize(11)
         title_font.setWeight(QFont.Weight.DemiBold)
@@ -2873,6 +2880,8 @@ class GithubSummaryPreview(QFrame):
         self._cards_layout.setContentsMargins(0, 0, 0, 0)
         self._cards_layout.setSpacing(8)
 
+        self._cards_scroll_needed = False
+        self._pointer_inside = False
         self._cards_scroll = QScrollArea()
         self._cards_scroll.setObjectName("githubCardsScroll")
         self._cards_scroll.setWidgetResizable(True)
@@ -2881,44 +2890,13 @@ class GithubSummaryPreview(QFrame):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self._cards_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self._cards_scroll.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._cards_scroll.setWidget(self._cards_host)
-        self._cards_scroll.setStyleSheet(
-            """
-            QScrollArea#githubCardsScroll {
-                background: transparent;
-                border: none;
-            }
-            QScrollArea#githubCardsScroll > QWidget > QWidget {
-                background: transparent;
-            }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 8px;
-                margin: 0px;
-            }
-            QScrollBar::handle:vertical {
-                background: #3A4454;
-                border-radius: 4px;
-                min-height: 24px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #4A5A72;
-            }
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {
-                background: transparent;
-            }
-            """
-        )
+        self._apply_cards_scroll_chrome()
 
         self._fallback = QLabel("Loading GitHub…")
         fb_font = QFont()
@@ -2948,6 +2926,62 @@ class GithubSummaryPreview(QFrame):
         """Title label — sole drag affordance for reordering this panel."""
         return self._title
 
+    def _apply_cards_scroll_chrome(self) -> None:
+        """Reserve a scrollbar lane when needed; show the thumb only on hover."""
+        if self._cards_scroll_needed:
+            self._cards_scroll.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+            )
+        else:
+            self._cards_scroll.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+        show_thumb = self._cards_scroll_needed and self._pointer_inside
+        handle = "#3A4454" if show_thumb else "transparent"
+        handle_hover = "#4A5A72" if show_thumb else "transparent"
+        self._cards_scroll.setStyleSheet(
+            f"""
+            QScrollArea#githubCardsScroll {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#githubCardsScroll > QWidget > QWidget {{
+                background: transparent;
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 8px;
+                margin: 0px 0px 0px 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {handle};
+                border-radius: 4px;
+                min-height: 24px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {handle_hover};
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+            """
+        )
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        self._pointer_inside = True
+        self._apply_cards_scroll_chrome()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        self._pointer_inside = False
+        self._apply_cards_scroll_chrome()
+        super().leaveEvent(event)
+
     def _clear_cards(self) -> None:
         while self._cards_layout.count():
             item = self._cards_layout.takeAt(0)
@@ -2970,19 +3004,14 @@ class GithubSummaryPreview(QFrame):
                 heights.append(h)
         if not heights:
             self._cards_scroll.setFixedHeight(0)
+            self._cards_scroll_needed = False
         else:
             card_h = max(heights)
             visible = min(len(heights), _GITHUB_CARDS_VIEWPORT)
             viewport_h = visible * card_h + max(0, visible - 1) * spacing
             self._cards_scroll.setFixedHeight(viewport_h)
-            if len(heights) > _GITHUB_CARDS_VIEWPORT:
-                self._cards_scroll.setVerticalScrollBarPolicy(
-                    Qt.ScrollBarPolicy.ScrollBarAsNeeded
-                )
-            else:
-                self._cards_scroll.setVerticalScrollBarPolicy(
-                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-                )
+            self._cards_scroll_needed = len(heights) > _GITHUB_CARDS_VIEWPORT
+        self._apply_cards_scroll_chrome()
         if relayout_popup:
             host = self.parentWidget()
             while host is not None:
@@ -3332,7 +3361,8 @@ class _HabitsLoadWorker(QThread):
 
     def run(self) -> None:
         try:
-            sdk = collect_habits_preview(
+            # Disk / cache first (fast), then local SDK scan, then gh (slowest).
+            usage = load_usage_preview(
                 renewal_day=self._renewal_day,
                 renewal_time=self._renewal_time,
             )
@@ -3341,7 +3371,7 @@ class _HabitsLoadWorker(QThread):
                 renewal_time=self._renewal_time,
                 use_cache=self._use_cache,
             )
-            usage = load_usage_preview(
+            sdk = collect_habits_preview(
                 renewal_day=self._renewal_day,
                 renewal_time=self._renewal_time,
             )
@@ -3532,7 +3562,36 @@ class SpendPopup(QFrame):
         root.addWidget(self.countdown)
         root.addWidget(self.status)
         self._place_pin_button()
+        # Paint last-run History/GitHub immediately; worker refreshes in background.
+        self._hydrate_habits_from_cache()
         self.refresh_habits()
+
+    def _hydrate_habits_from_cache(self) -> None:
+        """Show the last cached History / GitHub panels before the worker finishes."""
+        snap = UsageSnapshot.load()
+        renewal_day, renewal_time = snap.renewal_boundary()
+        self._habits_renewal_day = renewal_day
+        self._habits_renewal_time = renewal_time
+        usage = load_usage_preview(
+            renewal_day=renewal_day, renewal_time=renewal_time
+        )
+        vscdb = peek_cached_vscdb_habits_preview()
+        github = peek_cached_github_habits_preview()
+        painted = False
+        if usage.available or vscdb is not None:
+            self.composer_history.apply_preview(
+                vscdb or VscdbHabitsPreview.unavailable(""),
+                usage,
+                SdkHabitsPreview.unavailable(""),
+                renewal_day=renewal_day,
+                renewal_time=renewal_time,
+            )
+            painted = True
+        if github is not None and github.available:
+            self.github_summary.apply_preview(github)
+            painted = True
+        if painted:
+            self.adjustSize()
 
     def _place_pin_button(self) -> None:
         inset = 12 + 6
