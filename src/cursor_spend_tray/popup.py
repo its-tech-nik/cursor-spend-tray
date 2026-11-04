@@ -724,6 +724,7 @@ class ChartSeries:
     values: list[float | None]
     unit: str = ""
     area: bool = False  # filled under the line; always painted behind other series
+    point_labels: bool = False  # draw raw values above non-zero points
 
 
 class ChartValueCard(QWidget):
@@ -994,6 +995,9 @@ class MultiSeriesHistoryChart(QWidget):
     def _draw_rect(self) -> QRectF:
         """Viewing area for series — fixed pixel insets so floor/ceiling stay visible."""
         top = self._CEILING_CLEARANCE
+        # Point-value labels sit above dots; keep extra headroom so they aren't clipped.
+        if any(s.point_labels for s in self._visible_series()):
+            top = max(top, 18.0)
         bottom = self._FLOOR_CLEARANCE
         r = self._plot
         if r.height() <= top + bottom + 4:
@@ -1083,7 +1087,8 @@ class MultiSeriesHistoryChart(QWidget):
                 hi = lo + 1.0
             span = hi - lo
             # Peak headroom in value space; floor clearance is pixel-based via _draw_rect.
-            hi += span * 0.14
+            headroom = 0.22 if series.point_labels else 0.14
+            hi += span * headroom
         draw = self._draw_rect()
         n = len(values)
         out: list[QPointF | None] = []
@@ -1311,6 +1316,33 @@ class MultiSeriesHistoryChart(QWidget):
             run.append(pt)
         flush()
 
+    def _paint_point_labels(
+        self, painter: QPainter, series: ChartSeries, points: list[QPointF | None]
+    ) -> None:
+        """Draw compact numeric labels above non-zero points (e.g. daily commits)."""
+        if not series.point_labels:
+            return
+        font = QFont()
+        font.setPointSize(7)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        for i, pt in enumerate(points):
+            if pt is None or i >= len(series.values):
+                continue
+            raw = series.values[i]
+            if raw is None or raw == 0:
+                continue
+            text = _format_chart_value(raw, series.unit)
+            tw = float(metrics.horizontalAdvance(text))
+            th = float(metrics.height())
+            painter.setPen(QColor(series.color))
+            painter.drawText(
+                QRectF(pt.x() - tw / 2.0, pt.y() - th - 2.0, tw, th),
+                int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
+                text,
+            )
+
     def _paint_line_series(self, painter: QPainter, series: ChartSeries) -> None:
         """Stroke + dots for a series (drawn after area fills)."""
         if series.area:
@@ -1321,6 +1353,7 @@ class MultiSeriesHistoryChart(QWidget):
             for pt in points:
                 if pt is not None:
                     painter.drawEllipse(pt, 2.0, 2.0)
+            self._paint_point_labels(painter, series, points)
             return
 
         points = self._normalized_points(series)
@@ -1349,6 +1382,7 @@ class MultiSeriesHistoryChart(QWidget):
         for pt in points:
             if pt is not None:
                 painter.drawEllipse(pt, 2.2, 2.2)
+        self._paint_point_labels(painter, series, points)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
 
@@ -1985,10 +2019,21 @@ class ComposerHistoryPreview(QFrame):
                 "period reset through this day."
             ),
         )
+        self._chip_commits = SeriesToggleChip(
+            "Commits",
+            fg="#A8C3A4",
+            bg="#1A2420",
+            border="#2F4638",
+            tooltip=(
+                "Authored GitHub commits on this\n"
+                "calendar day (tracked branches)."
+            ),
+        )
         self._chip_auto.hide()
         self._chip_api.hide()
         self._chip_daily.hide()
         self._chip_cumulative.hide()
+        self._chip_commits.hide()
 
         self._year_chips: list[SeriesToggleChip] = [
             self._chip_tokens,
@@ -1998,6 +2043,7 @@ class ComposerHistoryPreview(QFrame):
         self._month_chips: list[SeriesToggleChip] = [
             self._chip_daily,
             self._chip_cumulative,
+            self._chip_commits,
         ]
         self._series_chips: list[SeriesToggleChip] = (
             self._year_chips + self._month_chips
@@ -2026,6 +2072,10 @@ class ComposerHistoryPreview(QFrame):
         self._month_period_start: str = ""
         self._daily: list[float | None] = []
         self._cumulative: list[float | None] = []
+        self._commits: list[float | None] = []
+        self._github_period_start: str = ""
+        self._github_day_labels: list[str] = []
+        self._github_daily_commits: list[float] = []
         self._selected_year_index: int | None = None
 
         self._fallback = QLabel("")
@@ -2056,11 +2106,42 @@ class ComposerHistoryPreview(QFrame):
         """Title label — sole drag affordance for reordering this panel."""
         return self._title
 
+    def apply_github_commits(self, preview: GithubHabitsPreview | None) -> None:
+        """Attach authored daily commits for the current billing period (Month view)."""
+        if preview is None or not preview.available:
+            self._github_period_start = ""
+            self._github_day_labels = []
+            self._github_daily_commits = []
+        else:
+            self._github_period_start = preview.period_start
+            self._github_day_labels = list(preview.day_labels)
+            self._github_daily_commits = list(preview.daily_commits)
+        if self._mode == "month" and self._content.isVisible():
+            self._render_month_view()
+
+    def _commits_aligned_to_days(self, days: list[str]) -> list[float | None] | None:
+        """Map cached GitHub daily commits onto the token day axis, or None if N/A."""
+        if (
+            not self._github_period_start
+            or self._month_period_start != self._github_period_start
+            or not self._github_day_labels
+            or len(self._github_day_labels) != len(self._github_daily_commits)
+        ):
+            return None
+        by_label = {
+            label: float(count)
+            for label, count in zip(
+                self._github_day_labels, self._github_daily_commits, strict=True
+            )
+        }
+        return [by_label.get(day, 0.0) for day in days]
+
     def apply_preview(
         self,
         preview: VscdbHabitsPreview,
         usage: UsageCsvPreview | None = None,
         sdk: SdkHabitsPreview | None = None,
+        github: GithubHabitsPreview | None = None,
         *,
         renewal_day: int = 19,
         renewal_time: time_of_day | None = None,
@@ -2069,6 +2150,15 @@ class ComposerHistoryPreview(QFrame):
         sdk = sdk or SdkHabitsPreview.unavailable("")
         self._renewal_day = renewal_day
         self._renewal_time = renewal_time
+        if github is not None:
+            if github.available:
+                self._github_period_start = github.period_start
+                self._github_day_labels = list(github.day_labels)
+                self._github_daily_commits = list(github.daily_commits)
+            else:
+                self._github_period_start = ""
+                self._github_day_labels = []
+                self._github_daily_commits = []
 
         labels, period_starts, tokens, auto_pct, api_pct = (
             _merge_composer_usage_series(usage)
@@ -2206,6 +2296,7 @@ class ComposerHistoryPreview(QFrame):
             self._chart.set_data([], [], caption=footer)
             self._daily = []
             self._cumulative = []
+            self._commits = []
             self._month_period_start = period_start
             self._sync_month_nav()
             return
@@ -2215,11 +2306,15 @@ class ComposerHistoryPreview(QFrame):
         self._month_period_start = daily.period_start
         self._daily = list(daily.daily_tokens)
         self._cumulative = list(daily.cumulative_tokens)
+        day_labels = list(daily.days)
+        commits = self._commits_aligned_to_days(day_labels)
+        self._commits = list(commits) if commits is not None else []
 
         for chip in self._year_chips:
             chip.hide()
         self._chip_daily.show()
         self._chip_cumulative.show()
+        self._chip_commits.setVisible(commits is not None)
 
         caption_bits = [
             daily.label,
@@ -2227,21 +2322,32 @@ class ComposerHistoryPreview(QFrame):
         ]
         if daily.total_tokens:
             caption_bits.append(f"{daily.total_tokens:,} tokens")
+        if commits is not None:
+            commit_total = int(sum(v for v in commits if v is not None))
+            if commit_total:
+                caption_bits.append(f"{commit_total} commits")
         footer = " · ".join(caption_bits)
         self._sync_month_nav()
 
-        self._chart.set_data(
-            list(daily.days),
-            [
+        series = [
+            ChartSeries(
+                "Daily", "#E0C090", list(daily.daily_tokens), area=True
+            ),
+            ChartSeries(
+                "Cumulative", "#6FA8DC", list(daily.cumulative_tokens)
+            ),
+        ]
+        if commits is not None:
+            series.append(
                 ChartSeries(
-                    "Daily", "#E0C090", list(daily.daily_tokens), area=True
-                ),
-                ChartSeries(
-                    "Cumulative", "#6FA8DC", list(daily.cumulative_tokens)
-                ),
-            ],
-            caption=footer,
-        )
+                    "Commits",
+                    "#A8C3A4",
+                    list(commits),
+                    point_labels=True,
+                )
+            )
+
+        self._chart.set_data(day_labels, series, caption=footer)
         self._update_month_chip_values(self._chart.selected_index())
         self._sync_series_chip_states()
 
@@ -2296,6 +2402,14 @@ class ComposerHistoryPreview(QFrame):
             if cum is None
             else _format_token_chip(int(cum)).replace(" tokens", " total")
         )
+        commits = _pick(self._commits)
+        if commits is None:
+            self._chip_commits.setText("— commits")
+        else:
+            n = int(commits)
+            self._chip_commits.setText(
+                f"{n} commit" if n == 1 else f"{n} commits"
+            )
         self._chips_host.updateGeometry()
 
     def _on_series_chip_toggled(self, series_name: str) -> None:
@@ -3644,10 +3758,13 @@ class SpendPopup(QFrame):
                 vscdb or VscdbHabitsPreview.unavailable(""),
                 usage,
                 SdkHabitsPreview.unavailable(""),
+                github,
                 renewal_day=renewal_day,
                 renewal_time=renewal_time,
             )
             painted = True
+        elif github is not None and github.available:
+            self.composer_history.apply_github_commits(github)
         if github is not None and github.available:
             self.github_summary.apply_preview(github)
             painted = True
@@ -3845,6 +3962,7 @@ class SpendPopup(QFrame):
             vscdb,
             usage,
             sdk,
+            github,
             renewal_day=self._habits_renewal_day,
             renewal_time=self._habits_renewal_time,
         )

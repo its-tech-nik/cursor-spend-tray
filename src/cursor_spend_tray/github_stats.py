@@ -22,12 +22,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .billing import period_end_for, period_label, period_start_for
+from .billing import period_end_for, period_label, period_start_for, short_period_label
 from .config import data_dir
 
 log = logging.getLogger(__name__)
 
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 # Soft TTL for collect(..., use_cache=True). Peek hydrate ignores this so the
 # UI can paint instantly; the background worker re-queries gh once the entry ages.
 _CACHE_MAX_AGE_S = 5 * 60
@@ -95,6 +95,10 @@ class GithubHabitsPreview:
     total_prs: int = 0
     total_additions: int = 0
     total_deletions: int = 0
+    # Contiguous billing-period day axis (same shape as Habits Month tokens).
+    day_labels: tuple[str, ...] = field(default_factory=tuple)
+    daily_commits: tuple[float, ...] = field(default_factory=tuple)
+    cumulative_commits: tuple[float, ...] = field(default_factory=tuple)
     error_message: str = ""
     cache_hit: bool = False
     elapsed_ms: int = 0
@@ -193,6 +197,24 @@ def _renewal_time_key(renewal_time: time_of_day | None) -> str:
     return tod.strftime("%H:%M:%S")
 
 
+def _tuple_floats(raw: object) -> tuple[float, ...]:
+    if not isinstance(raw, list):
+        return ()
+    out: list[float] = []
+    for item in raw:
+        try:
+            out.append(float(item))
+        except (TypeError, ValueError):
+            return ()
+    return tuple(out)
+
+
+def _tuple_strs(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    return tuple(str(item) for item in raw)
+
+
 def _preview_from_cache_payload(payload: dict) -> GithubHabitsPreview | None:
     try:
         projects = tuple(GithubProjectRow(**row) for row in payload.get("projects") or [])
@@ -207,6 +229,9 @@ def _preview_from_cache_payload(payload: dict) -> GithubHabitsPreview | None:
             total_prs=int(payload.get("total_prs") or 0),
             total_additions=int(payload.get("total_additions") or 0),
             total_deletions=int(payload.get("total_deletions") or 0),
+            day_labels=_tuple_strs(payload.get("day_labels")),
+            daily_commits=_tuple_floats(payload.get("daily_commits")),
+            cumulative_commits=_tuple_floats(payload.get("cumulative_commits")),
             cache_hit=True,
             elapsed_ms=0,
         )
@@ -294,6 +319,9 @@ def _save_cache(
             "total_prs": preview.total_prs,
             "total_additions": preview.total_additions,
             "total_deletions": preview.total_deletions,
+            "day_labels": list(preview.day_labels),
+            "daily_commits": list(preview.daily_commits),
+            "cumulative_commits": list(preview.cumulative_commits),
             "projects": [asdict(p) for p in preview.projects],
         }
         _cache_path().write_text(json.dumps(payload), encoding="utf-8")
@@ -428,6 +456,52 @@ def _search_authored_commits(
             break
         page += 1
     return items[:_COMMIT_SOFT_CAP]
+
+
+def _commit_day(item: dict[str, Any]) -> date | None:
+    """Calendar day (UTC) of a commits-API item, preferring author date."""
+    commit = item.get("commit")
+    if not isinstance(commit, dict):
+        return None
+    for key in ("author", "committer"):
+        who = commit.get(key)
+        if not isinstance(who, dict):
+            continue
+        raw = who.get("date")
+        if not raw:
+            continue
+        text = str(raw).strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text).astimezone(timezone.utc).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _build_daily_commit_series(
+    by_day: dict[date, int],
+    *,
+    period_start: date,
+    period_end: date,
+    as_of: date,
+) -> tuple[tuple[str, ...], tuple[float, ...], tuple[float, ...]]:
+    """Contiguous day / daily / cumulative series for the visible billing window."""
+    axis_end = min(period_end, as_of)
+    if axis_end < period_start:
+        return (), (), ()
+    labels: list[str] = []
+    daily: list[float] = []
+    cumulative: list[float] = []
+    running = 0
+    cursor = period_start
+    while cursor <= axis_end:
+        count = int(by_day.get(cursor, 0))
+        running += count
+        labels.append(short_period_label(cursor))
+        daily.append(float(count))
+        cumulative.append(float(running))
+        cursor += timedelta(days=1)
+    return tuple(labels), tuple(daily), tuple(cumulative)
 
 
 def _is_merge_commit(item: dict[str, Any]) -> bool:
@@ -603,8 +677,8 @@ def _branch_period_activity(
     author: str,
     period_start: date,
     period_end: date,
-) -> tuple[int, int, int]:
-    """Return ``(commit_count, additions, deletions)`` for authored commits on branch.
+) -> tuple[int, int, int, dict[date, int]]:
+    """Return ``(commit_count, additions, deletions, commits_by_day)`` on branch.
 
     Sums each non-merge commit’s additions/deletions (no tree diff / compare).
     Missing branch → zeros.
@@ -616,11 +690,10 @@ def _branch_period_activity(
         period_start=period_start,
         period_end=period_end,
     )
-    non_merge = [
-        (full_name, str(c.get("sha") or ""))
-        for c in commits
-        if not _is_merge_commit(c) and c.get("sha")
+    non_merge_items = [
+        c for c in commits if not _is_merge_commit(c) and c.get("sha")
     ]
+    non_merge = [(full_name, str(c.get("sha") or "")) for c in non_merge_items]
     stats = _fetch_commit_stats(non_merge)
     additions = 0
     deletions = 0
@@ -628,7 +701,13 @@ def _branch_period_activity(
         add, dele = stats.get(f"{full_name}#{sha}", (0, 0))
         additions += add
         deletions += dele
-    return len(non_merge), additions, deletions
+    by_day: dict[date, int] = {}
+    for item in non_merge_items:
+        day = _commit_day(item)
+        if day is None or day < period_start or day > period_end:
+            continue
+        by_day[day] = by_day.get(day, 0) + 1
+    return len(non_merge), additions, deletions, by_day
 
 
 def _display_name(short: str, full: str, short_counts: dict[str, int]) -> str:
@@ -667,26 +746,29 @@ def _project_from_branch(
     pr_count: int,
     period_start: date,
     period_end: date,
-) -> GithubProjectRow:
+) -> tuple[GithubProjectRow, dict[date, int]]:
     pref = normalize_branch_preference(preference, default_branch=default_branch)
     track = resolve_track_branch(pref, default_branch)
-    commit_count, additions, deletions = _branch_period_activity(
+    commit_count, additions, deletions, by_day = _branch_period_activity(
         full_name,
         branch=track,
         author=login,
         period_start=period_start,
         period_end=period_end,
     )
-    return GithubProjectRow(
-        name=short_name,
-        full_name=full_name,
-        commit_count=commit_count,
-        pr_count=pr_count,
-        additions=additions,
-        deletions=deletions,
-        branch_preference=pref,
-        default_branch=default_branch,
-        track_branch=track,
+    return (
+        GithubProjectRow(
+            name=short_name,
+            full_name=full_name,
+            commit_count=commit_count,
+            pr_count=pr_count,
+            additions=additions,
+            deletions=deletions,
+            branch_preference=pref,
+            default_branch=default_branch,
+            track_branch=track,
+        ),
+        by_day,
     )
 
 
@@ -737,23 +819,25 @@ def collect_github_habits_preview(
             login = pr_login
         repos = _discover_repos(discovered_commits, pr_counts)
         rows: list[GithubProjectRow] = []
+        commits_by_day: dict[date, int] = {}
         for full_name, short in repos.items():
             default_branch = _repo_default_branch(full_name)
             preference = prefs.get(
                 full_name, default_branch_preference(default_branch)
             )
-            rows.append(
-                _project_from_branch(
-                    full_name=full_name,
-                    short_name=short,
-                    login=login,
-                    preference=preference,
-                    default_branch=default_branch,
-                    pr_count=int(pr_counts.get(full_name, 0)),
-                    period_start=start,
-                    period_end=end,
-                )
+            row, by_day = _project_from_branch(
+                full_name=full_name,
+                short_name=short,
+                login=login,
+                preference=preference,
+                default_branch=default_branch,
+                pr_count=int(pr_counts.get(full_name, 0)),
+                period_start=start,
+                period_end=end,
             )
+            rows.append(row)
+            for day, count in by_day.items():
+                commits_by_day[day] = commits_by_day.get(day, 0) + count
         short_counts: dict[str, int] = {}
         for row in rows:
             short_counts[row.name] = short_counts.get(row.name, 0) + 1
@@ -774,6 +858,12 @@ def collect_github_habits_preview(
         projects.sort(
             key=lambda r: (-r.commit_count, -r.pr_count, -r.additions, r.name.lower())
         )
+        day_labels, daily_commits, cumulative_commits = _build_daily_commit_series(
+            commits_by_day,
+            period_start=start,
+            period_end=end,
+            as_of=when.astimezone().date(),
+        )
     except RuntimeError as exc:
         return GithubHabitsPreview.unavailable(str(exc))
     except Exception as exc:  # noqa: BLE001 — surfaced in popup
@@ -791,6 +881,9 @@ def collect_github_habits_preview(
         total_prs=sum(p.pr_count for p in projects),
         total_additions=sum(p.additions for p in projects),
         total_deletions=sum(p.deletions for p in projects),
+        day_labels=day_labels,
+        daily_commits=daily_commits,
+        cumulative_commits=cumulative_commits,
         elapsed_ms=int((time.perf_counter() - t0) * 1000),
     )
     _save_cache(

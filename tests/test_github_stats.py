@@ -16,6 +16,8 @@ from cursor_spend_tray.github_stats import (
     GithubHabitsPreview,
     GithubProjectRow,
     _CACHE_MAX_AGE_S,
+    _build_daily_commit_series,
+    _commit_day,
     _is_merge_commit,
     _load_cache,
     _prefs_fingerprint,
@@ -54,6 +56,30 @@ class MergeCommitTests(unittest.TestCase):
         self.assertFalse(
             _is_merge_commit({"parents": [{}], "commit": {"message": "feat: x"}})
         )
+
+
+class CommitDaySeriesTests(unittest.TestCase):
+    def test_commit_day_prefers_author_utc(self) -> None:
+        day = _commit_day(
+            {
+                "commit": {
+                    "author": {"date": "2026-10-20T23:30:00Z"},
+                    "committer": {"date": "2026-10-21T01:00:00Z"},
+                }
+            }
+        )
+        self.assertEqual(day, date(2026, 10, 20))
+
+    def test_build_daily_series_fills_gaps_and_cumulative(self) -> None:
+        labels, daily, cumulative = _build_daily_commit_series(
+            {date(2026, 10, 19): 2, date(2026, 10, 21): 3},
+            period_start=date(2026, 10, 19),
+            period_end=date(2026, 11, 18),
+            as_of=date(2026, 10, 21),
+        )
+        self.assertEqual(labels, ("Oct 19", "Oct 20", "Oct 21"))
+        self.assertEqual(daily, (2.0, 0.0, 3.0))
+        self.assertEqual(cumulative, (2.0, 2.0, 5.0))
 
 
 class CollectGithubHabitsPreviewTests(unittest.TestCase):
@@ -100,7 +126,7 @@ class CollectGithubHabitsPreviewTests(unittest.TestCase):
             ),
             patch(
                 "cursor_spend_tray.github_stats._branch_period_activity",
-                return_value=(7, 1004, 261),
+                return_value=(7, 1004, 261, {date(2026, 10, 20): 7}),
             ) as activity,
             patch("cursor_spend_tray.github_stats._save_cache"),
             patch(
@@ -122,6 +148,10 @@ class CollectGithubHabitsPreviewTests(unittest.TestCase):
         self.assertEqual(preview.total_prs, 2)
         self.assertEqual(preview.total_additions, 1004)
         self.assertEqual(preview.total_deletions, 261)
+        self.assertGreaterEqual(len(preview.day_labels), 2)
+        self.assertEqual(len(preview.day_labels), len(preview.daily_commits))
+        self.assertEqual(sum(preview.daily_commits), 7.0)
+        self.assertEqual(preview.cumulative_commits[-1], 7.0)
         row = preview.projects[0]
         self.assertIsInstance(row, GithubProjectRow)
         self.assertEqual(row.branch_preference, BRANCH_PREF_DEV)
@@ -269,7 +299,7 @@ class GithubHabitsCacheTtlTests(unittest.TestCase):
             ),
             patch(
                 "cursor_spend_tray.github_stats._branch_period_activity",
-                return_value=(11, 50, 10),
+                return_value=(11, 50, 10, {date(2026, 11, 1): 11}),
             ) as activity,
         ):
             preview = collect_github_habits_preview(
@@ -282,6 +312,7 @@ class GithubHabitsCacheTtlTests(unittest.TestCase):
         self.assertTrue(preview.available)
         self.assertFalse(preview.cache_hit)
         self.assertEqual(preview.total_commits, 11)
+        self.assertEqual(sum(preview.daily_commits), 11.0)
         activity.assert_called_once()
 
 
