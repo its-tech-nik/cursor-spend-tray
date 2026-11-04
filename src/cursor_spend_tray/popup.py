@@ -825,8 +825,16 @@ class MultiSeriesHistoryChart(QWidget):
         self._hidden: set[str] = set()
         self._hover_index: int | None = None
         self._selected_index: int | None = None
+        self._footer_caption = ""
+        self._footer_nav_visible = False
         self._plot = QRectF()
         self._value_card = ChartValueCard(self)
+        self._nav_prev = PeriodNavButton("‹", self)
+        self._nav_next = PeriodNavButton("›", self)
+        self._nav_prev.setToolTip("Previous billing period")
+        self._nav_next.setToolTip("Next billing period")
+        self._nav_prev.hide()
+        self._nav_next.hide()
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(self._fixed_height())
@@ -876,6 +884,7 @@ class MultiSeriesHistoryChart(QWidget):
         self._labels = list(labels)
         self._series = list(series)
         self._weights = list(weights or [])
+        self._footer_caption = caption.strip()
         names = {s.name for s in self._series}
         self._hidden &= names
         self._hover_index = None
@@ -888,6 +897,51 @@ class MultiSeriesHistoryChart(QWidget):
         self.setFixedHeight(self._fixed_height())
         self.updateGeometry()
         self.update()
+
+    @property
+    def nav_prev(self) -> PeriodNavButton:
+        return self._nav_prev
+
+    @property
+    def nav_next(self) -> PeriodNavButton:
+        return self._nav_next
+
+    def set_footer_nav_visible(self, visible: bool) -> None:
+        self._footer_nav_visible = bool(visible)
+        self._nav_prev.setVisible(self._footer_nav_visible)
+        self._nav_next.setVisible(self._footer_nav_visible)
+        self._position_footer_nav()
+        self.update()
+
+    def set_footer_nav_enabled(self, *, prev: bool, next: bool) -> None:
+        self._nav_prev.set_nav_enabled(prev)
+        self._nav_next.set_nav_enabled(next)
+
+    def _footer_caption_text_width(self) -> int:
+        """Usable width for the footer caption between optional nav buttons."""
+        inset = 0
+        if self._footer_nav_visible:
+            inset = self._nav_prev.width() + self._nav_next.width() + 16
+        return max(0, int(self._plot.width()) - inset)
+
+    def _position_footer_nav(self) -> None:
+        if not self._footer_nav_visible or self._plot.height() <= 0:
+            return
+        floor_y = self._draw_rect().bottom()
+        footer_top = floor_y + 2.0
+        footer_h = max(0.0, self._plot.bottom() - footer_top)
+        btn_h = self._nav_prev.height()
+        y = int(round(footer_top + max(0.0, (footer_h - btn_h) / 2.0)))
+        left = int(round(self._plot.left()))
+        right = int(round(self._plot.right() - self._nav_next.width()))
+        self._nav_prev.move(left, y)
+        self._nav_next.move(right, y)
+        self._nav_prev.raise_()
+        self._nav_next.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        self._position_footer_nav()
 
     def selected_index(self) -> int | None:
         return self._selected_index
@@ -1101,12 +1155,14 @@ class MultiSeriesHistoryChart(QWidget):
             note = QFont()
             note.setPointSize(8)
             painter.setFont(note)
+            msg = self._footer_caption or "Need 2+ data points"
             painter.drawText(
                 self._plot,
                 int(Qt.AlignmentFlag.AlignCenter),
-                "Need 2+ data points",
+                msg,
             )
             painter.end()
+            self._position_footer_nav()
             return
 
         if not visible_series:
@@ -1119,7 +1175,9 @@ class MultiSeriesHistoryChart(QWidget):
                 int(Qt.AlignmentFlag.AlignCenter),
                 "All series hidden — click chips to show",
             )
+            self._paint_footer_caption(painter, self._draw_rect().bottom())
             painter.end()
+            self._position_footer_nav()
             return
 
         # Grid
@@ -1167,7 +1225,38 @@ class MultiSeriesHistoryChart(QWidget):
                 QPointF(x, self._plot.top()), QPointF(x, self._plot.bottom())
             )
 
+        self._paint_footer_caption(painter, floor_y)
         painter.end()
+        self._position_footer_nav()
+
+    def _paint_footer_caption(self, painter: QPainter, floor_y: float) -> None:
+        """Draw period summary in the thin strip below the graph floor line."""
+        if not self._footer_caption:
+            return
+        footer_top = floor_y + 3.0
+        footer_h = max(0.0, self._plot.bottom() - footer_top - 2.0)
+        if footer_h < 10.0:
+            return
+        side = 0.0
+        if self._footer_nav_visible:
+            side = float(self._nav_prev.width() + 8)
+        text_left = self._plot.left() + side
+        text_w = max(0.0, self._plot.width() - 2 * side)
+        cap_font = QFont()
+        cap_font.setPointSize(8)
+        painter.setFont(cap_font)
+        metrics = painter.fontMetrics()
+        elided = metrics.elidedText(
+            self._footer_caption,
+            Qt.TextElideMode.ElideRight,
+            int(text_w),
+        )
+        painter.setPen(QColor("#6F7887"))
+        painter.drawText(
+            QRectF(text_left, footer_top, text_w, footer_h),
+            int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
+            elided,
+        )
 
     def _paint_area_series(self, painter: QPainter, series: ChartSeries) -> None:
         """Fill under the series curve down to the plot baseline (behind lines)."""
@@ -1732,14 +1821,10 @@ class PeriodNavButton(QLabel):
     clicked = pyqtSignal()
 
     def __init__(self, glyph: str, parent: QWidget | None = None) -> None:
-        super().__init__(glyph, parent)
+        super().__init__(parent)
+        self._glyph = glyph
         self._enabled = True
-        font = QFont()
-        font.setPointSize(11)
-        font.setWeight(QFont.Weight.DemiBold)
-        self.setFont(font)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setFixedSize(24, 24)
+        self.setFixedSize(20, 18)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._apply_style()
 
@@ -1753,26 +1838,42 @@ class PeriodNavButton(QLabel):
             else Qt.CursorShape.ArrowCursor
         )
         self._apply_style()
+        self.update()
 
     def _apply_style(self) -> None:
         if self._enabled:
-            fg, bg, border = "#D8DEE8", "#1E2430", "#3A465A"
+            bg, border = "#1E2430", "#3A465A"
         else:
-            fg, bg, border = "#4A5564", "#171A20", "#2A313C"
+            bg, border = "#171A20", "#2A313C"
         self.setStyleSheet(
             f"""
             QLabel {{
-                color: {fg};
                 background: {bg};
                 border: 1px solid {border};
-                border-radius: 7px;
+                border-radius: 5px;
             }}
             QLabel:hover {{
                 border-color: {"#5B7A9E" if self._enabled else border};
-                color: {"#F2F4F8" if self._enabled else fg};
             }}
             """
         )
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        font = QFont()
+        font.setPointSize(9)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        if self._enabled:
+            painter.setPen(QColor("#D8DEE8"))
+        else:
+            painter.setPen(QColor("#4A5564"))
+        # Draw into the full rect so the glyph is optically centered (QLabel
+        # text metrics leave ‹ › sitting high for this size).
+        painter.drawText(self.rect(), int(Qt.AlignmentFlag.AlignCenter), self._glyph)
+        painter.end()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
         if (
@@ -1785,27 +1886,30 @@ class PeriodNavButton(QLabel):
 
 
 class ComposerHistoryPreview(QFrame):
-    """Composer usage trends — Year (billing periods) or Month (days in period)."""
+    """Usage trends — Year (billing periods) or Month (days in period)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("composerHistory")
+        # No outer chrome — chart + chips own the visual edges.
         self.setStyleSheet(
             """
             QFrame#composerHistory {
-                background: #15181C;
-                border: 1px solid #2A313C;
-                border-radius: 10px;
+                background: transparent;
+                border: none;
             }
             """
         )
 
-        title = QLabel("Composer history")
+        self._title = QLabel("History")
         title_font = QFont()
         title_font.setPointSize(11)
         title_font.setWeight(QFont.Weight.DemiBold)
-        title.setFont(title_font)
-        title.setStyleSheet("color: #E8ECF2; background: transparent; border: none;")
+        self._title.setFont(title_font)
+        self._title.setStyleSheet(
+            "color: #E8ECF2; background: transparent; border: none;"
+        )
+        self._title.setToolTip("Drag to reorder panels")
 
         self._mode = "year"
         self._view_toggle = SegmentedToggle(
@@ -1816,7 +1920,7 @@ class ComposerHistoryPreview(QFrame):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
-        header.addWidget(title, stretch=0)
+        header.addWidget(self._title, stretch=0)
         header.addStretch(1)
         header.addWidget(self._view_toggle, stretch=0)
 
@@ -1900,36 +2004,10 @@ class ComposerHistoryPreview(QFrame):
             chips.addWidget(chip)
         self._chips_host = chips_host
 
-        caption = QLabel("Billing periods")
-        cap_font = QFont()
-        cap_font.setPointSize(8)
-        caption.setFont(cap_font)
-        caption.setWordWrap(True)
-        caption.setStyleSheet(
-            "color: #6F7887; background: transparent; border: none;"
-        )
-        self._caption = caption
-
-        self._nav_prev = PeriodNavButton("‹")
-        self._nav_next = PeriodNavButton("›")
-        self._nav_prev.clicked.connect(lambda: self._step_month_period(-1))
-        self._nav_next.clicked.connect(lambda: self._step_month_period(1))
-        self._nav_prev.setToolTip("Previous billing period")
-        self._nav_next.setToolTip("Next billing period")
-
-        caption_row = QWidget()
-        caption_layout = QHBoxLayout(caption_row)
-        caption_layout.setContentsMargins(0, 8, 0, 0)
-        caption_layout.setSpacing(6)
-        caption_layout.addWidget(self._nav_prev, stretch=0)
-        caption_layout.addWidget(caption, stretch=1)
-        caption_layout.addWidget(self._nav_next, stretch=0)
-        self._caption_row = caption_row
-        self._nav_prev.hide()
-        self._nav_next.hide()
-
         self._chart = MultiSeriesHistoryChart()
         self._chart.period_selected.connect(self._on_point_selected)
+        self._chart.nav_prev.clicked.connect(lambda: self._step_month_period(-1))
+        self._chart.nav_next.clicked.connect(lambda: self._step_month_period(1))
 
         self._renewal_day = 19
         self._renewal_time: time_of_day | None = None
@@ -1959,14 +2037,17 @@ class ComposerHistoryPreview(QFrame):
         content_layout.setSpacing(8)
         content_layout.addWidget(chips_host)
         content_layout.addWidget(self._chart)
-        content_layout.addWidget(caption_row)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addLayout(header)
         layout.addWidget(self._content)
         layout.addWidget(self._fallback)
+
+    def drag_handle(self) -> QWidget:
+        """Title label — sole drag affordance for reordering this panel."""
+        return self._title
 
     def apply_preview(
         self,
@@ -2039,14 +2120,11 @@ class ComposerHistoryPreview(QFrame):
     def _sync_month_nav(self) -> None:
         n = len(self._period_starts)
         if self._mode != "month" or n == 0:
-            self._nav_prev.hide()
-            self._nav_next.hide()
+            self._chart.set_footer_nav_visible(False)
             return
         idx = self._year_period_index()
-        self._nav_prev.show()
-        self._nav_next.show()
-        self._nav_prev.set_nav_enabled(idx > 0)
-        self._nav_next.set_nav_enabled(idx < n - 1)
+        self._chart.set_footer_nav_visible(True)
+        self._chart.set_footer_nav_enabled(prev=idx > 0, next=idx < n - 1)
 
     def _step_month_period(self, delta: int) -> None:
         if self._mode != "month" or not self._period_starts:
@@ -2067,9 +2145,8 @@ class ComposerHistoryPreview(QFrame):
         caption_bits = [f"Billing periods · {len(labels)}"]
         if token_total:
             caption_bits.append(f"{token_total:,} tokens")
-        self._caption.setText(" · ".join(caption_bits))
-        self._nav_prev.hide()
-        self._nav_next.hide()
+        footer = " · ".join(caption_bits)
+        self._chart.set_footer_nav_visible(False)
 
         has_auto = any(v is not None for v in auto_pct)
         has_api = any(v is not None for v in api_pct)
@@ -2087,14 +2164,7 @@ class ComposerHistoryPreview(QFrame):
         if has_api:
             series.append(ChartSeries("API %", "#B0B0B0", api_pct, unit="%"))
 
-        self._chart.set_data(
-            labels,
-            series,
-            caption=(
-                "Hover a period for exact values · click a period to show it "
-                "in the chips · Year/Month switches the same chart"
-            ),
-        )
+        self._chart.set_data(labels, series, caption=footer)
         if self._selected_year_index is not None:
             self._chart.select_index(self._selected_year_index)
         self._update_year_chip_values(self._chart.selected_index())
@@ -2124,11 +2194,9 @@ class ComposerHistoryPreview(QFrame):
                 chip.hide()
             for chip in self._month_chips:
                 chip.hide()
-            self._chart.set_data([], [])
             label = self._year_labels[idx] if idx < len(self._year_labels) else period_start
-            self._caption.setText(
-                f"{label} · {daily.error_message or 'No daily data'}"
-            )
+            footer = f"{label} · {daily.error_message or 'No daily data'}"
+            self._chart.set_data([], [], caption=footer)
             self._daily = []
             self._cumulative = []
             self._month_period_start = period_start
@@ -2152,7 +2220,7 @@ class ComposerHistoryPreview(QFrame):
         ]
         if daily.total_tokens:
             caption_bits.append(f"{daily.total_tokens:,} tokens")
-        self._caption.setText(" · ".join(caption_bits))
+        footer = " · ".join(caption_bits)
         self._sync_month_nav()
 
         self._chart.set_data(
@@ -2165,10 +2233,7 @@ class ComposerHistoryPreview(QFrame):
                     "Cumulative", "#6FA8DC", list(daily.cumulative_tokens)
                 ),
             ],
-            caption=(
-                "Hover a day for exact values · use ‹ › to change period · "
-                "click chips to toggle series"
-            ),
+            caption=footer,
         )
         self._update_month_chip_values(self._chart.selected_index())
         self._sync_series_chip_states()
@@ -2750,12 +2815,15 @@ class GithubSummaryPreview(QFrame):
             """
         )
 
-        title = QLabel("GitHub activity")
+        self._title = QLabel("GitHub activity")
         title_font = QFont()
         title_font.setPointSize(11)
         title_font.setWeight(QFont.Weight.DemiBold)
-        title.setFont(title_font)
-        title.setStyleSheet("color: #E8ECF2; background: transparent; border: none;")
+        self._title.setFont(title_font)
+        self._title.setStyleSheet(
+            "color: #E8ECF2; background: transparent; border: none;"
+        )
+        self._title.setToolTip("Drag to reorder panels")
 
         self._window = QLabel("")
         win_font = QFont()
@@ -2771,7 +2839,7 @@ class GithubSummaryPreview(QFrame):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
-        header.addWidget(title, stretch=0)
+        header.addWidget(self._title, stretch=0)
         header.addStretch(1)
         header.addWidget(self._window, stretch=0)
 
@@ -2876,6 +2944,10 @@ class GithubSummaryPreview(QFrame):
         layout.addWidget(self._content)
         layout.addWidget(self._fallback)
 
+    def drag_handle(self) -> QWidget:
+        """Title label — sole drag affordance for reordering this panel."""
+        return self._title
+
     def _clear_cards(self) -> None:
         while self._cards_layout.count():
             item = self._cards_layout.takeAt(0)
@@ -2970,21 +3042,32 @@ class GithubSummaryPreview(QFrame):
 
 
 class DraggablePanel(QFrame):
-    """Content card that can be reordered by dragging anywhere on the panel."""
+    """Content card that can be reordered by dragging.
+
+    When ``drag_handle`` is set, only that widget (and its children) start a
+    reorder — the rest of the panel keeps normal cursors/clicks.
+    """
 
     def __init__(
         self,
         panel_id: str,
         body: QWidget,
         parent: QWidget | None = None,
+        *,
+        drag_handle: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.panel_id = panel_id
         self.body = body
+        self._drag_handle = drag_handle
         self._press_global: QPoint | None = None
         self.setObjectName("draggablePanel")
         self.setAcceptDrops(False)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        if drag_handle is not None:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            drag_handle.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -2994,8 +3077,21 @@ class DraggablePanel(QFrame):
         for child in body.findChildren(QWidget):
             child.installEventFilter(self)
 
+    def _is_on_drag_handle(self, widget: QObject | None) -> bool:
+        """True when drag may start from this widget (whole panel if no handle)."""
+        if self._drag_handle is None:
+            return True
+        current = widget
+        while isinstance(current, QObject):
+            if current is self._drag_handle:
+                return True
+            current = current.parent()
+        return False
+
     def _widget_blocks_drag(self, widget: QObject | None) -> bool:
         """Clicks on these controls should not start a panel reorder."""
+        if not self._is_on_drag_handle(widget):
+            return True
         current = widget
         while isinstance(current, QObject):
             if isinstance(
@@ -3014,6 +3110,13 @@ class DraggablePanel(QFrame):
             current = current.parent()
         return False
 
+    def _restore_cursors(self) -> None:
+        if self._drag_handle is not None:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._drag_handle.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+
     def _start_panel_drag(self) -> None:
         self._press_global = None
         drag = QDrag(self)
@@ -3027,9 +3130,10 @@ class DraggablePanel(QFrame):
             )
             drag.setPixmap(scaled)
             drag.setHotSpot(QPoint(16, 16))
-        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        handle = self._drag_handle or self
+        handle.setCursor(Qt.CursorShape.ClosedHandCursor)
         drag.exec(Qt.DropAction.MoveAction)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self._restore_cursors()
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: ANN001
         et = event.type()
@@ -3385,8 +3489,16 @@ class SpendPopup(QFrame):
         self._panel_host = ReorderablePanelHost()
         self._spend_panel = DraggablePanel("spend", self._card)
         self._habits_panel = DraggablePanel("habits", self.habits)
-        self._composer_panel = DraggablePanel("composer", self.composer_history)
-        self._github_panel = DraggablePanel("github", self.github_summary)
+        self._composer_panel = DraggablePanel(
+            "composer",
+            self.composer_history,
+            drag_handle=self.composer_history.drag_handle(),
+        )
+        self._github_panel = DraggablePanel(
+            "github",
+            self.github_summary,
+            drag_handle=self.github_summary.drag_handle(),
+        )
         self._panel_host.add_panel(self._spend_panel)
         self._panel_host.add_panel(self._habits_panel)
         self._panel_host.add_panel(self._composer_panel)
