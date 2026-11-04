@@ -16,12 +16,16 @@ from PyQt6.QtCore import (
     QSize,
     QThread,
     QTimer,
+    QUrl,
     Qt,
     pyqtProperty,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
     QColor,
+    QDesktopServices,
     QDrag,
     QFont,
     QFontMetrics,
@@ -37,6 +41,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLayout,
     QLayoutItem,
+    QMenu,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -56,6 +61,7 @@ from .github_stats import (
     collect_github_habits_preview,
     save_github_branch_pref,
 )
+from .qt_threads import stop_qthread
 from .sdk_stats import SdkHabitsBatch, SdkHabitsPreview, collect_habits_preview
 from .usage_csv import (
     UsageCsvPreview,
@@ -2423,13 +2429,11 @@ class _ElidedLabel(QLabel):
         )
 
 
-class GithubBranchToggle(QWidget):
-    """Compact main | dev switch — selected segment is clearly highlighted."""
+class GithubBranchDropdown(QLabel):
+    """Minimal branch picker — shows the active branch; click opens main/dev menu."""
 
     changed = pyqtSignal(str)
 
-    _PAD = 2
-    _H = 20
     _OPTIONS: tuple[tuple[str, str], ...] = (
         (BRANCH_PREF_MAIN, "main"),
         (BRANCH_PREF_DEV, "dev"),
@@ -2437,87 +2441,289 @@ class GithubBranchToggle(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._index = 0
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(self._H)
-        self.setToolTip(
-            "main / dev — your authored commits on that branch\n"
-            "in this billing period (sum of per-commit +/- lines)."
-        )
-
+        self._branch = BRANCH_PREF_MAIN
         font = QFont()
         font.setPointSize(8)
         font.setWeight(QFont.Weight.DemiBold)
-        self._font = font
-        metrics = QFontMetrics(font)
-        self._seg_w = max(
-            34, max(metrics.horizontalAdvance(label) for _, label in self._OPTIONS) + 12
+        self.setFont(font)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self.setFixedWidth(self._PAD * 2 + self._seg_w * len(self._OPTIONS))
+        self.setToolTip(
+            "Branch to count — your authored commits on this branch\n"
+            "in the billing period (sum of per-commit +/- lines)."
+        )
+        self.setStyleSheet(
+            """
+            QLabel {
+                color: #C5CEDA;
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }
+            QLabel:hover {
+                color: #F2F4F8;
+            }
+            """
+        )
+        self._apply()
 
     def branch(self) -> str:
-        return self._OPTIONS[self._index][0]
+        return self._branch
 
     def set_branch(self, branch: str) -> None:
-        idx = 0 if branch != BRANCH_PREF_DEV else 1
-        if idx == self._index:
-            self.update()
-            return
-        self._index = idx
-        self.update()
+        self._branch = BRANCH_PREF_DEV if branch == BRANCH_PREF_DEV else BRANCH_PREF_MAIN
+        self._apply()
 
-    def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(self.width(), self._H)
+    def _apply(self) -> None:
+        self.setText(f"{self._branch} ▾")
+        metrics = QFontMetrics(self.font())
+        self.setFixedWidth(metrics.horizontalAdvance(self.text()) + 2)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
-        if event.button() != Qt.MouseButton.LeftButton:
-            super().mouseReleaseEvent(event)
-            return
-        x = event.position().x()
-        idx = int((x - self._PAD) // self._seg_w)
-        idx = max(0, min(len(self._OPTIONS) - 1, idx))
-        if idx != self._index:
-            self._index = idx
-            self.update()
-            self.changed.emit(self._OPTIONS[idx][0])
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self._show_menu()
         super().mouseReleaseEvent(event)
 
-    def paintEvent(self, event) -> None:  # noqa: ANN001, ARG002
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        track = QRectF(0, 0, self.width(), self.height())
-        radius = track.height() / 2
-        painter.setPen(QPen(QColor("#3A465A"), 1))
-        painter.setBrush(QColor("#171A20"))
-        painter.drawRoundedRect(track.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-
-        thumb_h = self.height() - self._PAD * 2
-        thumb = QRectF(
-            self._PAD + self._index * self._seg_w,
-            self._PAD,
-            self._seg_w,
-            thumb_h,
+    def _show_menu(self) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background: #1A1E24;
+                border: 1px solid #3A465A;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                color: #C5CEDA;
+                padding: 4px 14px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background: #2A3548;
+                color: #F2F4F8;
+            }
+            """
         )
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#2A3548"))
-        painter.drawRoundedRect(thumb, thumb_h / 2, thumb_h / 2)
-        painter.setPen(QPen(QColor("#5B7A9E"), 1))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), thumb_h / 2, thumb_h / 2)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        for value, label in self._OPTIONS:
+            action = QAction(label, menu)
+            action.setCheckable(True)
+            action.setChecked(value == self._branch)
+            action.setData(value)
+            group.addAction(action)
+            menu.addAction(action)
 
-        painter.setFont(self._font)
-        for i, (_, label) in enumerate(self._OPTIONS):
-            seg = QRectF(
-                self._PAD + i * self._seg_w,
-                0,
-                self._seg_w,
-                self.height(),
+        chosen = menu.exec(self.mapToGlobal(self.rect().bottomRight()))
+        if chosen is None:
+            return
+        value = str(chosen.data() or "")
+        if value not in (BRANCH_PREF_MAIN, BRANCH_PREF_DEV) or value == self._branch:
+            return
+        self.set_branch(value)
+        self.changed.emit(value)
+
+
+def _github_owner_repo(full_name: str, fallback_name: str = "") -> tuple[str, str]:
+    """Split ``owner/repo``; fall back to a bare repo name when owner is missing."""
+    full = (full_name or "").strip()
+    if "/" in full:
+        owner, repo = full.split("/", 1)
+        owner, repo = owner.strip(), repo.strip()
+        if owner and repo:
+            return owner, repo
+    name = (fallback_name or full or "project").strip()
+    return "", name
+
+
+def _github_metric_label(text: str, *, color: str) -> QLabel:
+    """Plain colored metric text — no chip/bubble chrome."""
+    lbl = QLabel(text)
+    font = QFont()
+    font.setPointSize(8)
+    font.setWeight(QFont.Weight.DemiBold)
+    lbl.setFont(font)
+    lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    lbl.setStyleSheet(
+        f"color: {color}; background: transparent; border: none;"
+    )
+    return lbl
+
+
+class GithubProjectCard(QFrame):
+    """One repository’s billing-period GitHub activity."""
+
+    branch_changed = pyqtSignal(str, str)  # full_name, preference
+
+    def __init__(
+        self,
+        project: GithubProjectRow,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._full_name = (project.full_name or "").strip()
+        self._press_pos: QPoint | None = None
+        self.setObjectName("githubProjectCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            """
+            QFrame#githubProjectCard {
+                background: #1A1E24;
+                border: 1px solid #2F3642;
+                border-radius: 8px;
+            }
+            QFrame#githubProjectCard:hover {
+                border-color: #4A5A72;
+                background: #1C222A;
+            }
+            """
+        )
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        tip = (
+            f"Open {self._full_name} on GitHub"
+            if self._full_name
+            else "Open repository on GitHub"
+        )
+        self.setToolTip(tip)
+
+        owner, repo = _github_owner_repo(project.full_name, project.name)
+
+        org_lbl = QLabel(owner or "personal")
+        org_font = QFont()
+        org_font.setPointSize(8)
+        org_font.setWeight(QFont.Weight.DemiBold)
+        org_lbl.setFont(org_font)
+        org_lbl.setStyleSheet(
+            "color: #8B95A5; background: transparent; border: none;"
+        )
+        org_lbl.setToolTip(tip)
+
+        name_lbl = _ElidedLabel(repo)
+        name_font = QFont()
+        name_font.setPointSize(10)
+        name_font.setWeight(QFont.Weight.DemiBold)
+        name_lbl.setFont(name_font)
+        name_lbl.setFullText(repo)
+        name_lbl.setStyleSheet(
+            "color: #E8ECF2; background: transparent; border: none;"
+        )
+        name_lbl.setToolTip(tip)
+
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(1)
+        title_col.addWidget(org_lbl)
+        title_col.addWidget(name_lbl)
+
+        self._branch_toggle = GithubBranchDropdown()
+        self._branch_toggle.set_branch(project.branch_preference or BRANCH_PREF_MAIN)
+        full_name = project.full_name
+
+        def _on_branch(branch: str, full: str = full_name) -> None:
+            save_github_branch_pref(full, branch)
+            self.branch_changed.emit(full, branch)
+
+        self._branch_toggle.changed.connect(_on_branch)
+
+        metrics = QHBoxLayout()
+        metrics.setContentsMargins(0, 0, 0, 0)
+        metrics.setSpacing(8)
+        metrics.addWidget(
+            _github_metric_label(
+                f"{project.commit_count} commits", color="#E0C090"
             )
-            active = i == self._index
-            painter.setPen(QColor("#F2F4F8" if active else "#7E8694"))
-            painter.drawText(seg, int(Qt.AlignmentFlag.AlignCenter), label)
-        painter.end()
+        )
+        metrics.addWidget(
+            _github_metric_label(f"{project.pr_count} PRs", color="#9BB0C9")
+        )
+        metrics.addWidget(
+            _github_metric_label(
+                _format_signed_lines(project.additions, positive=True),
+                color="#A8C3A4",
+            )
+        )
+        metrics.addWidget(
+            _github_metric_label(
+                _format_signed_lines(project.deletions, positive=False),
+                color="#D9897A",
+            )
+        )
+
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(4)
+        right_col.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        right_col.addWidget(
+            self._branch_toggle,
+            stretch=0,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
+        right_col.addLayout(metrics)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        row.addLayout(title_col, stretch=1)
+        row.addLayout(right_col, stretch=0)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 9, 10, 9)
+        layout.setSpacing(0)
+        layout.addLayout(row)
+
+        self.installEventFilter(self)
+        for child in self.findChildren(QWidget):
+            if child is not self._branch_toggle:
+                child.installEventFilter(self)
+
+    def _is_branch_toggle(self, widget: QObject | None) -> bool:
+        current = widget
+        while isinstance(current, QObject):
+            if current is self._branch_toggle:
+                return True
+            current = current.parent()
+        return False
+
+    def _open_repo(self) -> None:
+        if not self._full_name or "/" not in self._full_name:
+            return
+        QDesktopServices.openUrl(QUrl(f"https://github.com/{self._full_name}"))
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: ANN001
+        if self._is_branch_toggle(obj):
+            return False
+        et = event.type()
+        if et == QEvent.Type.MouseButtonPress:
+            if getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
+                try:
+                    self._press_pos = event.globalPosition().toPoint()
+                except AttributeError:
+                    self._press_pos = event.globalPos()
+            return False
+        if et == QEvent.Type.MouseButtonRelease:
+            if (
+                getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton
+                and self._press_pos is not None
+            ):
+                try:
+                    release = event.globalPosition().toPoint()
+                except AttributeError:
+                    release = event.globalPos()
+                if (
+                    release - self._press_pos
+                ).manhattanLength() < QApplication.startDragDistance():
+                    self._open_repo()
+            self._press_pos = None
+            return False
+        return False
 
 
 class GithubSummaryPreview(QFrame):
@@ -2584,10 +2790,10 @@ class GithubSummaryPreview(QFrame):
         chips.addWidget(self._chip_removed, stretch=0)
         chips.addStretch(1)
 
-        self._rows_host = QWidget()
-        self._rows_layout = QVBoxLayout(self._rows_host)
-        self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(2)
+        self._cards_host = QWidget()
+        self._cards_layout = QVBoxLayout(self._cards_host)
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setSpacing(8)
 
         self._fallback = QLabel("Loading GitHub…")
         fb_font = QFont()
@@ -2604,7 +2810,7 @@ class GithubSummaryPreview(QFrame):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
         content_layout.addLayout(chips)
-        content_layout.addWidget(self._rows_host)
+        content_layout.addWidget(self._cards_host)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 11, 12, 11)
@@ -2613,134 +2819,15 @@ class GithubSummaryPreview(QFrame):
         layout.addWidget(self._content)
         layout.addWidget(self._fallback)
 
-    def _clear_rows(self) -> None:
-        while self._rows_layout.count():
-            item = self._rows_layout.takeAt(0)
+    def _clear_cards(self) -> None:
+        while self._cards_layout.count():
+            item = self._cards_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
 
-    def _make_header_row(self) -> QWidget:
-        return self._make_row(
-            GithubProjectRow(name="Project", full_name=""),
-            header=True,
-        )
-
-    def _make_row(
-        self,
-        project: GithubProjectRow,
-        *,
-        header: bool = False,
-    ) -> QWidget:
-        row = QWidget()
-        row.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        layout = QHBoxLayout(row)
-        # Vertical pad so descenders never collide with the next row.
-        layout.setContentsMargins(0, 3, 0, 3)
-        layout.setSpacing(6)
-        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-
-        name_font = QFont()
-        name_font.setPointSize(8 if header else 9)
-        name_font.setWeight(
-            QFont.Weight.DemiBold if header else QFont.Weight.Medium
-        )
-        metrics = QFontMetrics(name_font)
-        row.setFixedHeight(max(metrics.height() + 10, 26))
-
-        name_lbl = _ElidedLabel("Project" if header else project.name)
-        name_lbl.setFont(name_font)
-        name_lbl.setFullText("Project" if header else project.name)
-        name_lbl.setStyleSheet(
-            f"color: {'#6F7887' if header else '#E4E7EC'}; "
-            "background: transparent; border: none;"
-        )
-
-        def _col(text: str, *, color: str, width: int) -> QLabel:
-            lbl = QLabel(text)
-            font = QFont()
-            font.setPointSize(8 if header else 9)
-            font.setWeight(
-                QFont.Weight.DemiBold if header else QFont.Weight.Medium
-            )
-            lbl.setFont(font)
-            lbl.setAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            lbl.setFixedWidth(width)
-            lbl.setFixedHeight(metrics.height())
-            lbl.setStyleSheet(
-                f"color: {color}; background: transparent; border: none;"
-            )
-            return lbl
-
-        muted = "#6F7887"
-        layout.addWidget(name_lbl, stretch=1)
-
-        if header:
-            branch_hdr = QLabel("Branch")
-            branch_font = QFont()
-            branch_font.setPointSize(8)
-            branch_font.setWeight(QFont.Weight.DemiBold)
-            branch_hdr.setFont(branch_font)
-            branch_hdr.setFixedWidth(78)
-            branch_hdr.setAlignment(
-                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
-            )
-            branch_hdr.setStyleSheet(
-                "color: #6F7887; background: transparent; border: none;"
-            )
-            layout.addWidget(branch_hdr, stretch=0)
-        else:
-            branch_toggle = GithubBranchToggle()
-            branch_toggle.set_branch(project.branch_preference or BRANCH_PREF_MAIN)
-            full_name = project.full_name
-
-            def _on_branch(branch: str, full: str = full_name) -> None:
-                save_github_branch_pref(full, branch)
-                self.branch_preference_changed.emit(full, branch)
-
-            branch_toggle.changed.connect(_on_branch)
-            layout.addWidget(branch_toggle, stretch=0)
-
-        layout.addWidget(
-            _col(
-                "Commits" if header else str(project.commit_count),
-                color=muted if header else "#E0C090",
-                width=52,
-            )
-        )
-        layout.addWidget(
-            _col(
-                "PRs" if header else str(project.pr_count),
-                color=muted if header else "#9BB0C9",
-                width=32,
-            )
-        )
-        layout.addWidget(
-            _col(
-                "Added"
-                if header
-                else _format_signed_lines(project.additions, positive=True),
-                color=muted if header else "#A8C3A4",
-                width=48,
-            )
-        )
-        layout.addWidget(
-            _col(
-                "Removed"
-                if header
-                else _format_signed_lines(project.deletions, positive=False),
-                color=muted if header else "#D9897A",
-                width=54,
-            )
-        )
-        return row
-
     def apply_preview(self, preview: GithubHabitsPreview) -> None:
-        self._clear_rows()
+        self._clear_cards()
         if not preview.available:
             self._content.hide()
             self._window.setText("")
@@ -2771,12 +2858,13 @@ class GithubSummaryPreview(QFrame):
             empty.setStyleSheet(
                 "color: #7E8694; background: transparent; border: none;"
             )
-            self._rows_layout.addWidget(empty)
+            self._cards_layout.addWidget(empty)
             return
 
-        self._rows_layout.addWidget(self._make_header_row())
         for project in preview.projects:
-            self._rows_layout.addWidget(self._make_row(project))
+            card = GithubProjectCard(project)
+            card.branch_changed.connect(self.branch_preference_changed.emit)
+            self._cards_layout.addWidget(card)
 
 
 class DraggablePanel(QFrame):
@@ -2816,7 +2904,7 @@ class DraggablePanel(QFrame):
                     SeriesToggleChip,
                     SegmentedToggle,
                     PeriodNavButton,
-                    GithubBranchToggle,
+                    GithubBranchDropdown,
                 ),
             ):
                 return True
@@ -3247,6 +3335,40 @@ class SpendPopup(QFrame):
         short = full_name.split("/")[-1] if "/" in full_name else full_name
         self.set_status(f"Counting {short} on {preference}…")
         self.refresh_habits(force=True, status_when_done="")
+
+    def stop_habits_worker(self, *, timeout_ms: int = 8_000) -> None:
+        """Halt the background habits loader before Qt tears down this popup.
+
+        Destroying a still-running ``QThread`` (parented to this widget) aborts
+        the process on quit. Reparent away, wait briefly, then let process exit
+        reap a stuck scan rather than calling ``QThread.terminate``.
+        """
+        self._habits_pending = None
+        self._habits_gen += 1
+        worker = self._habits_worker
+        self._habits_worker = None
+        if worker is None:
+            return
+        stop_qthread(
+            worker,
+            wait_ms=timeout_ms,
+            label="habits worker",
+            signals=(worker.finished_ok, worker.finished_err, worker.finished),
+        )
+
+    def prepare_shutdown(self) -> None:
+        """Stop dismiss timers, hide, and join the habits thread for quit."""
+        self._arm_timer.stop()
+        self._dismiss_armed = False
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self._outside_filter)
+            try:
+                app.focusWindowChanged.disconnect(self._on_focus_window_changed)
+            except TypeError:
+                pass
+        self.hide()
+        self.stop_habits_worker()
 
     def refresh_habits(
         self,

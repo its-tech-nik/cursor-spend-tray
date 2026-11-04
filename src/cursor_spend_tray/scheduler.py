@@ -11,6 +11,7 @@ from .bidi_client import BidiClient
 from .browser import BrowserFamily
 from .cdp_client import CdpClient
 from .config import AppConfig, UsageSnapshot
+from .qt_threads import stop_qthread
 from .scraper import SpendingScraper
 
 log = logging.getLogger(__name__)
@@ -104,12 +105,30 @@ class RefreshScheduler(QObject):
             self.refresh()
 
     def stop(self) -> None:
+        """Halt timers and wait/detach scrape + probe threads for process quit."""
         self._tick.stop()
         self._stop_probe()
-        if self._worker and self._worker.isRunning():
-            self._worker.wait(3000)
-        if self._probe_worker and self._probe_worker.isRunning():
-            self._probe_worker.wait(3000)
+        self._awaiting_ready = False
+        self._probe_on_unavailable = None
+        self._probe_on_available = None
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            stop_qthread(
+                worker,
+                wait_ms=5_000,
+                label="scrape worker",
+                signals=(worker.finished_ok, worker.finished_err, worker.finished),
+            )
+        probe = self._probe_worker
+        self._probe_worker = None
+        if probe is not None:
+            stop_qthread(
+                probe,
+                wait_ms=3_000,
+                label="probe worker",
+                signals=(probe.finished_available, probe.finished),
+            )
 
     def remaining_seconds(self) -> int:
         if self._paused:

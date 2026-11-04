@@ -1358,6 +1358,8 @@ class TrayApp(QWidget):
 
     def _start_login_network_watch(self) -> None:
         """Watch headed-browser traffic only while awaiting Cursor sign-in."""
+        if getattr(self, "_shutting_down", False):
+            return
         if not getattr(self.popup, "_awaiting_login", False):
             return
         if self.scheduler.is_refreshing():
@@ -1371,6 +1373,8 @@ class TrayApp(QWidget):
 
     def _start_logout_network_watch(self) -> None:
         """Watch headed View Browser traffic for Cursor sign-out."""
+        if getattr(self, "_shutting_down", False):
+            return
         if not self._viewing_browser:
             return
         # Known headless means View Browser ended; None = still starting (thread retries).
@@ -1890,6 +1894,8 @@ class TrayApp(QWidget):
 
     def _ensure_browser_ready(self, on_ready: Callable[[], None]) -> None:
         """Launch the automation browser if needed, then invoke on_ready."""
+        if getattr(self, "_shutting_down", False):
+            return
         launch_pending = (
             hasattr(self, "_launch_retry_timer") and self._launch_retry_timer.isActive()
         )
@@ -1910,6 +1916,8 @@ class TrayApp(QWidget):
 
     def _warmup_browser_for_scrape(self) -> None:
         """Pre-launch headless browser ~10s before the poll deadline (quit-between)."""
+        if getattr(self, "_shutting_down", False):
+            return
         if self.config.between_scrapes != "quit":
             return
         if self.config.browser_is_running():
@@ -1993,6 +2001,8 @@ class TrayApp(QWidget):
         return QPoint(x, y)
 
     def _start_spinner(self) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         # Keep AUTO digits visible whenever we already have a reading; only fall
         # back to the refresh glyph when there is nothing to show yet.
         if hasattr(self, "snapshot") and self.snapshot.cursor_models_pct is not None:
@@ -2033,6 +2043,8 @@ class TrayApp(QWidget):
 
     def _launch_browser(self) -> None:
         """Start the dedicated automation browser (headless) and poll until reachable."""
+        if getattr(self, "_shutting_down", False):
+            return
         if self.config.browser_is_running():
             return
 
@@ -2063,6 +2075,8 @@ class TrayApp(QWidget):
         self._arm_launch_retry()
 
     def _arm_launch_retry(self) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         if not hasattr(self, "_launch_retry_timer"):
             self._launch_retry_timer = QTimer(self)
             self._launch_retry_timer.setSingleShot(True)
@@ -2071,6 +2085,8 @@ class TrayApp(QWidget):
 
     def _refresh_after_launch(self) -> None:
         """Probe remote debugging; if up scrape (or finish warmup), otherwise retry."""
+        if getattr(self, "_shutting_down", False):
+            return
 
         def on_available() -> None:
             pending = self._pending_scrape_ready
@@ -2095,22 +2111,72 @@ class TrayApp(QWidget):
         )
 
     def _reschedule_launch_retry(self) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         self._launch_retry_timer.start(_LAUNCH_RETRY_MS)
 
     def shutdown(self) -> None:
-        """Stop polling and tear down the dedicated automation browser on quit."""
-        self._stop_login_network_watch()
-        self._stop_logout_network_watch()
-        self._resource_monitor.stop()
-        if hasattr(self, "scheduler"):
-            self.scheduler.stop()
+        """Ordered quit path so live QThreads are not destroyed with the UI.
+
+        Sequence:
+          1. Gate new work (``_shutting_down``)
+          2. Stop UI timers / pending scrape callbacks
+          3. Stop cooperative network-watch threads
+          4. Stop scheduler timers + scrape/probe workers
+          5. Hide popup and join habits/GitHub worker
+          6. Stop resource sampling
+          7. Stop dedicated automation browser
+          8. Unregister StatusNotifierItem + temp icon files
+
+        Safe to call more than once; later calls are no-ops.
+        """
+        if getattr(self, "_shutting_down", False):
+            return
+        self._shutting_down = True
+        log.info("Shutting down Cursor Spend Tray")
+
+        # 2. Timers / deferred work — do this before waiting on threads so we
+        # do not schedule new launches or spinner ticks mid-teardown.
+        self._pending_scrape_ready = None
+        self._login_launch_pending = False
+        self._headless_switch_pending = False
+        self._refresh_after_headless = False
+        self._warmup_only = False
         if hasattr(self, "_launch_retry_timer"):
             self._launch_retry_timer.stop()
         self._stop_spinner()
-        if not self.config.browser_is_running():
-            return
-        name = self.config.browser.display_name
-        if self.config.stop_browser(timeout=8.0):
-            log.info("Stopped dedicated %s on quit", name)
-        else:
-            log.warning("Dedicated %s did not exit cleanly on quit", name)
+        app = QApplication.instance()
+        wake = getattr(app, "_posix_signal_wake_timer", None) if app is not None else None
+        if wake is not None:
+            wake.stop()
+
+        # 3. Network watchers (cooperative BiDi/CDP stop)
+        self._stop_login_network_watch()
+        self._stop_logout_network_watch()
+
+        # 4. Poll / scrape / probe
+        if hasattr(self, "scheduler"):
+            self.scheduler.stop()
+
+        # 5. Popup-owned habits QThread (must leave before widget destroy)
+        if hasattr(self, "popup"):
+            self.popup.prepare_shutdown()
+        if hasattr(self, "_ctx") and self._ctx.isVisible():
+            self._ctx.hide()
+
+        # 6. Browser resource sampler
+        if hasattr(self, "_resource_monitor"):
+            self._resource_monitor.stop()
+
+        # 7. Dedicated automation browser
+        if self.config.browser_is_running():
+            name = self.config.browser.display_name
+            if self.config.stop_browser(timeout=8.0):
+                log.info("Stopped dedicated %s on quit", name)
+            else:
+                log.warning("Dedicated %s did not exit cleanly on quit", name)
+
+        # 8. Tray icon / D-Bus SNI
+        if hasattr(self, "tray"):
+            self.tray.cleanup()
+        log.info("Shutdown complete")

@@ -28,6 +28,7 @@ from .bidi_client import BidiClient, BidiError
 from .browser import BrowserFamily
 from .cdp_client import CdpClient, CdpError
 from .config import AppConfig
+from .qt_threads import stop_qthread
 from .session_cookie import CURSOR_SESSION_COOKIE, profile_has_cursor_session_cookie
 
 log = logging.getLogger(__name__)
@@ -636,19 +637,21 @@ class _NetworkWatcherBase(QObject):
     def stop(self, *, wait_ms: int = 5_000) -> None:
         """Stop the watcher and release the BiDi/CDP session before scrapes."""
         thread = self._thread
+        self._thread = None
         if thread is None:
             return
-        if thread.isRunning():
-            thread.request_stop()
-            if not thread.wait(wait_ms):
-                log.warning(
-                    "%s network watch thread did not exit within %dms",
-                    self._log_label.capitalize(),
-                    wait_ms,
-                )
-                thread.request_stop()
-                thread.wait(1_000)
-        self._thread = None
+        stop_qthread(
+            thread,
+            wait_ms=wait_ms,
+            label=f"{self._log_label} network watch",
+            request_stop=thread.request_stop,
+            signals=(
+                thread.detected,
+                thread.rate_limited,
+                thread.status,
+                thread.finished,
+            ),
+        )
 
     def _on_thread_finished(self) -> None:
         if self._thread is self.sender():

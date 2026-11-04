@@ -106,8 +106,8 @@ def main() -> None:
 
     app._cursor_spend_tray = tray  # type: ignore[attr-defined]
     _install_posix_quit_handlers(app)
+    # Single ordered path: threads → popup → browser → SNI (see TrayApp.shutdown).
     app.aboutToQuit.connect(tray.shutdown)
-    app.aboutToQuit.connect(tray.tray.cleanup)
     sys.exit(app.exec())
 
 
