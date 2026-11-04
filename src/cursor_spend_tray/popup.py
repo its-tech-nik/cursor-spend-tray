@@ -2538,6 +2538,7 @@ class GithubBranchDropdown(QLabel):
             }
             QLabel:hover {
                 color: #F2F4F8;
+                text-decoration: underline;
             }
             """
         )
@@ -2555,6 +2556,18 @@ class GithubBranchDropdown(QLabel):
         metrics = QFontMetrics(self.font())
         self.setFixedWidth(metrics.horizontalAdvance(self.text()) + 2)
 
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        font = QFont(self.font())
+        font.setUnderline(True)
+        self.setFont(font)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        font = QFont(self.font())
+        font.setUnderline(False)
+        self.setFont(font)
+        super().leaveEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
         if (
             event.button() == Qt.MouseButton.LeftButton
@@ -2562,6 +2575,14 @@ class GithubBranchDropdown(QLabel):
         ):
             self._show_menu()
         super().mouseReleaseEvent(event)
+
+    def _parent_of_type(self, cls: type[QWidget]) -> QWidget | None:
+        current = self.parent()
+        while current is not None:
+            if isinstance(current, cls):
+                return current
+            current = current.parent()
+        return None
 
     def _show_menu(self) -> None:
         menu = QMenu(self)
@@ -2594,7 +2615,19 @@ class GithubBranchDropdown(QLabel):
             group.addAction(action)
             menu.addAction(action)
 
-        chosen = menu.exec(self.mapToGlobal(self.rect().bottomRight()))
+        card = self._parent_of_type(GithubProjectCard)
+        popup = self._parent_of_type(SpendPopup)
+        if isinstance(card, GithubProjectCard):
+            card.suppress_repo_open()
+        if isinstance(popup, SpendPopup):
+            popup.begin_nested_ui()
+        try:
+            chosen = menu.exec(self.mapToGlobal(self.rect().bottomRight()))
+        finally:
+            if isinstance(popup, SpendPopup):
+                popup.end_nested_ui()
+            if isinstance(card, GithubProjectCard):
+                card.release_repo_open_suppress()
         if chosen is None:
             return
         value = str(chosen.data() or "")
@@ -2643,6 +2676,7 @@ class GithubProjectCard(QFrame):
         super().__init__(parent)
         self._full_name = (project.full_name or "").strip()
         self._press_pos: QPoint | None = None
+        self._suppress_repo_open = False
         self.setObjectName("githubProjectCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
@@ -2766,7 +2800,27 @@ class GithubProjectCard(QFrame):
             current = current.parent()
         return False
 
+    def suppress_repo_open(self) -> None:
+        """Block card→browser opens while the branch menu is up (avoids ghost clicks)."""
+        self._suppress_repo_open = True
+        self._press_pos = None
+
+    def release_repo_open_suppress(self) -> None:
+        """Clear the block after the menu-dismiss click has been processed."""
+        self._press_pos = None
+        QTimer.singleShot(0, self._clear_repo_open_suppress)
+
+    def _clear_repo_open_suppress(self) -> None:
+        self._suppress_repo_open = False
+        self._press_pos = None
+
+    def _branch_toggle_global_rect(self) -> QRect:
+        origin = self._branch_toggle.mapToGlobal(QPoint(0, 0))
+        return QRect(origin, self._branch_toggle.size())
+
     def _open_repo(self) -> None:
+        if self._suppress_repo_open:
+            return
         if not self._full_name or "/" not in self._full_name:
             return
         QDesktopServices.openUrl(QUrl(f"https://github.com/{self._full_name}"))
@@ -2776,6 +2830,9 @@ class GithubProjectCard(QFrame):
             return False
         et = event.type()
         if et == QEvent.Type.MouseButtonPress:
+            if self._suppress_repo_open:
+                self._press_pos = None
+                return False
             if getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
                 try:
                     self._press_pos = event.globalPosition().toPoint()
@@ -2786,6 +2843,7 @@ class GithubProjectCard(QFrame):
             if (
                 getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton
                 and self._press_pos is not None
+                and not self._suppress_repo_open
             ):
                 try:
                     release = event.globalPosition().toPoint()
@@ -2793,7 +2851,9 @@ class GithubProjectCard(QFrame):
                     release = event.globalPos()
                 if (
                     release - self._press_pos
-                ).manhattanLength() < QApplication.startDragDistance():
+                ).manhattanLength() < QApplication.startDragDistance() and (
+                    not self._branch_toggle_global_rect().contains(release)
+                ):
                     self._open_repo()
             self._press_pos = None
             return False
@@ -3413,6 +3473,7 @@ class SpendPopup(QFrame):
         self._habits_renewal_time: time_of_day | None = None
         self._dismiss_armed = False
         self._keep_open = False
+        self._nested_ui_depth = 0
         self._awaiting_login = False
         self._browser_inaccessible = False
         self._arm_timer = QTimer(self)
@@ -3858,18 +3919,52 @@ class SpendPopup(QFrame):
         # Grace period: the tray Activate that opened us must not instantly dismiss.
         self._arm_timer.start(300)
 
+    def begin_nested_ui(self) -> None:
+        """Keep the unpinned popup open while a child QMenu (etc.) has focus."""
+        self._nested_ui_depth += 1
+
+    def end_nested_ui(self) -> None:
+        self._nested_ui_depth = max(0, self._nested_ui_depth - 1)
+
+    def _nested_ui_open(self) -> bool:
+        return self._nested_ui_depth > 0
+
+    def _active_child_popup(self) -> QWidget | None:
+        """QMenu (or similar) owned by this panel — e.g. the GitHub branch picker."""
+        popup = QApplication.activePopupWidget()
+        if popup is not None and self.isAncestorOf(popup):
+            return popup
+        return None
+
+    def _owns_window(self, window) -> bool:  # noqa: ANN001
+        if window is self.windowHandle():
+            return True
+        # Child QMenu focus can briefly be None while exec() is opening/closing.
+        if self._nested_ui_open():
+            return True
+        if window is None:
+            return False
+        child = self._active_child_popup()
+        return child is not None and window is child.windowHandle()
+
+    def _contains_global(self, global_pos: QPoint) -> bool:
+        if self.frameGeometry().contains(global_pos):
+            return True
+        child = self._active_child_popup()
+        return child is not None and child.frameGeometry().contains(global_pos)
+
     def _arm_dismiss(self) -> None:
         if self._keep_open:
             return
         self._dismiss_armed = True
         # If focus already left during the grace period, close now.
-        if self.isVisible() and QGuiApplication.focusWindow() is not self.windowHandle():
+        if self.isVisible() and not self._owns_window(QGuiApplication.focusWindow()):
             self.hide()
 
     def _on_focus_window_changed(self, window) -> None:  # noqa: ANN001
         if self._keep_open or not self._dismiss_armed or not self.isVisible():
             return
-        if window is self.windowHandle():
+        if self._owns_window(window):
             return
         self.hide()
 
@@ -3877,7 +3972,7 @@ class SpendPopup(QFrame):
         """Hide when a press lands outside this panel. Returns True if dismissed."""
         if self._keep_open or not self._dismiss_armed or not self.isVisible():
             return False
-        if self.frameGeometry().contains(global_pos):
+        if self._contains_global(global_pos):
             return False
         self.hide()
         return True
@@ -3888,6 +3983,7 @@ class SpendPopup(QFrame):
             and self.isVisible()
             and self._dismiss_armed
             and not self._keep_open
+            and not self._owns_window(QGuiApplication.focusWindow())
         ):
             self.hide()
         super().changeEvent(event)
@@ -3896,6 +3992,7 @@ class SpendPopup(QFrame):
         self._arm_timer.stop()
         self._dismiss_armed = False
         self._keep_open = False
+        self._nested_ui_depth = 0
         self.pin_button.set_checked(False)
         self.composer_history.clear_period_selection()
         BubbleTip.hide_shared()
@@ -4010,7 +4107,7 @@ class _OutsideClickFilter(QObject):
             global_pos = event.globalPosition().toPoint()
         except AttributeError:
             global_pos = event.globalPos()
-        if self._popup.frameGeometry().contains(global_pos):
+        if self._popup._contains_global(global_pos):
             return False
         self._popup.hide()
         return False
