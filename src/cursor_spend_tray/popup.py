@@ -1959,7 +1959,7 @@ class ComposerHistoryPreview(QFrame):
         self._view_toggle.changed.connect(self._on_view_mode)
 
         header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
+        header.setContentsMargins(5, 0, 0, 0)
         header.setSpacing(8)
         header.addWidget(self._title, stretch=0)
         header.addStretch(1)
@@ -3018,7 +3018,7 @@ class GithubSummaryPreview(QFrame):
         )
 
         header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
+        header.setContentsMargins(5, 0, 0, 0)
         header.setSpacing(8)
         header.addWidget(self._title, stretch=0)
         header.addStretch(1)
