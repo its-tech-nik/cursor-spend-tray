@@ -28,6 +28,7 @@ from .billing import (
     short_period_label,
 )
 from .config import data_dir
+from .grok_weekly import average_weekly_peaks_for_period, load_grok_week_peaks
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class UsagePeriodBucket:
     event_count: int = 0
     cursor_models_pct: int | None = None
     other_models_pct: int | None = None
+    grok_bot_pct: int | None = None
 
 
 @dataclass(frozen=True)
@@ -447,8 +449,12 @@ def associate_spend_pct(
     renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> None:
-    """Record scraped AUTO/API % against the current billing period (and tokens if known)."""
-    if cursor_models_pct is None and other_models_pct is None:
+    """Record scraped AUTO/API % against the current billing period (and tokens if known).
+
+    Grok Bot is weekly — see ``grok_weekly.record_grok_sample``; period chart
+    values are day-weighted averages of weekly peaks.
+    """
+    if cursor_models_pct is None and other_models_pct is None and total_tokens is None:
         return
     now = when or datetime.now(timezone.utc).astimezone()
     start = period_start_for(
@@ -737,6 +743,7 @@ def build_usage_preview(
         now, renewal_day=renewal_day, renewal_time=renewal_time
     )
 
+    grok_weeks = load_grok_week_peaks()
     periods: list[UsagePeriodBucket] = []
     for start in starts:
         key = start.isoformat()
@@ -745,6 +752,18 @@ def build_usage_preview(
         tokens = int(tok or a.get("total_tokens") or 0)
         cursor_pct = a.get("cursor_models_pct")
         other_pct = a.get("other_models_pct")
+        grok_pct = average_weekly_peaks_for_period(
+            start,
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+            weeks=grok_weeks,
+        )
+        # Legacy single snapshot from before weekly tracking.
+        if grok_pct is None and a.get("grok_bot_pct") is not None:
+            try:
+                grok_pct = int(a["grok_bot_pct"])
+            except (TypeError, ValueError):
+                grok_pct = None
         has_file = _period_csv_path(
             start,
             period_end_for(
@@ -753,7 +772,9 @@ def build_usage_preview(
         ).is_file()
         is_current = start == current_start
         if not tokens and not events and not a and not has_file and not is_current:
-            continue
+            # Still show periods that only have Grok weekly history.
+            if grok_pct is None:
+                continue
         periods.append(
             UsagePeriodBucket(
                 label=period_label(
@@ -764,11 +785,16 @@ def build_usage_preview(
                 event_count=events,
                 cursor_models_pct=int(cursor_pct) if cursor_pct is not None else None,
                 other_models_pct=int(other_pct) if other_pct is not None else None,
+                grok_bot_pct=grok_pct,
             )
         )
 
     if not periods or not any(
-        p.total_tokens or p.event_count or p.cursor_models_pct is not None
+        p.total_tokens
+        or p.event_count
+        or p.cursor_models_pct is not None
+        or p.other_models_pct is not None
+        or p.grok_bot_pct is not None
         for p in periods
     ):
         return UsageCsvPreview(
@@ -800,6 +826,8 @@ def build_usage_preview(
         insight_parts.append(f"AUTO {latest.cursor_models_pct}%")
     if latest.other_models_pct is not None:
         insight_parts.append(f"API {latest.other_models_pct}%")
+    if latest.grok_bot_pct is not None:
+        insight_parts.append(f"Grok {latest.grok_bot_pct}%")
     insight = f"{latest.label}: " + " · ".join(insight_parts)
 
     return UsageCsvPreview(

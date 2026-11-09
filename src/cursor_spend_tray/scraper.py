@@ -10,6 +10,7 @@ from .bidi_client import BidiClient, BidiError
 from .browser import BrowserFamily
 from .cdp_client import CdpClient, CdpError
 from .config import SETTINGS_URL, AppConfig, UsageSnapshot, renewal_from_usage_reset, resolve_usage_reset_at
+from .grok_weekly import record_grok_sample
 from .usage_csv import associate_spend_pct, sync_usage_csvs
 
 log = logging.getLogger(__name__)
@@ -559,6 +560,9 @@ class SpendingScraper:
                 f"auto_discover={snap.usage_reset_auto_discover}",
                 flush=True,
             )
+
+            # Grok is weekly — keep peak samples even when CSV sync fails.
+            record_grok_sample(grok_pct, reset_hint=grok_reset_hint)
 
             # Usage-events CSV (same signed-in session) → billing-period token totals.
             try:

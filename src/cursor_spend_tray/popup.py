@@ -1692,16 +1692,18 @@ def _merge_composer_usage_series(
     list[float | None],
     list[float | None],
     list[float | None],
+    list[float | None],
 ]:
-    """Align billing-period labels with tokens / AUTO% / API% from usage CSV."""
+    """Align billing-period labels with tokens / AUTO% / API% / Grok% from usage CSV."""
     labels: list[str] = []
     period_starts: list[str] = []
     tokens: list[float | None] = []
     auto_pct: list[float | None] = []
     api_pct: list[float | None] = []
+    grok_pct: list[float | None] = []
 
     if not usage.available:
-        return labels, period_starts, tokens, auto_pct, api_pct
+        return labels, period_starts, tokens, auto_pct, api_pct, grok_pct
 
     for u in sorted(usage.periods, key=lambda p: p.period_start):
         labels.append(str(getattr(u, "label", None) or u.period_start))
@@ -1710,12 +1712,14 @@ def _merge_composer_usage_series(
         tokens.append(float(tok) if tok or getattr(u, "event_count", 0) else None)
         cp = getattr(u, "cursor_models_pct", None)
         op = getattr(u, "other_models_pct", None)
+        gp = getattr(u, "grok_bot_pct", None)
         auto_pct.append(float(cp) if cp is not None else None)
         api_pct.append(float(op) if op is not None else None)
+        grok_pct.append(float(gp) if gp is not None else None)
 
     # Drop leading / trailing all-empty periods so the x-axis isn't padded
     # with blank slots (e.g. a phantom month from midnight-vs-renewal-time).
-    series_cols = (tokens, auto_pct, api_pct)
+    series_cols = (tokens, auto_pct, api_pct, grok_pct)
 
     def _row_has_data(i: int) -> bool:
         return any(col[i] is not None for col in series_cols)
@@ -1728,8 +1732,9 @@ def _merge_composer_usage_series(
         tokens = tokens[lo:hi]
         auto_pct = auto_pct[lo:hi]
         api_pct = api_pct[lo:hi]
+        grok_pct = grok_pct[lo:hi]
 
-    return labels, period_starts, tokens, auto_pct, api_pct
+    return labels, period_starts, tokens, auto_pct, api_pct, grok_pct
 
 
 class SegmentedToggle(QWidget):
@@ -1999,6 +2004,19 @@ class ComposerHistoryPreview(QFrame):
                 "for this billing period."
             ),
         )
+        self._chip_grok = SeriesToggleChip(
+            "Grok %",
+            fg="#C9A8D4",
+            bg="#241A28",
+            border="#46304A",
+            tooltip=(
+                "Average of Grok Bot weekly peak %\n"
+                "in this billing period.\n"
+                "\n"
+                "Weeks that cross a renewal boundary\n"
+                "are prorated by overlapping days."
+            ),
+        )
         self._chip_daily = SeriesToggleChip(
             "Daily",
             fg="#E0C090",
@@ -2031,6 +2049,7 @@ class ComposerHistoryPreview(QFrame):
         )
         self._chip_auto.hide()
         self._chip_api.hide()
+        self._chip_grok.hide()
         self._chip_daily.hide()
         self._chip_cumulative.hide()
         self._chip_commits.hide()
@@ -2039,6 +2058,7 @@ class ComposerHistoryPreview(QFrame):
             self._chip_tokens,
             self._chip_auto,
             self._chip_api,
+            self._chip_grok,
         ]
         self._month_chips: list[SeriesToggleChip] = [
             self._chip_daily,
@@ -2069,6 +2089,7 @@ class ComposerHistoryPreview(QFrame):
         self._tokens: list[float | None] = []
         self._auto_pct: list[float | None] = []
         self._api_pct: list[float | None] = []
+        self._grok_pct: list[float | None] = []
         self._month_period_start: str = ""
         self._daily: list[float | None] = []
         self._cumulative: list[float | None] = []
@@ -2160,7 +2181,7 @@ class ComposerHistoryPreview(QFrame):
                 self._github_day_labels = []
                 self._github_daily_commits = []
 
-        labels, period_starts, tokens, auto_pct, api_pct = (
+        labels, period_starts, tokens, auto_pct, api_pct, grok_pct = (
             _merge_composer_usage_series(usage)
         )
 
@@ -2184,6 +2205,7 @@ class ComposerHistoryPreview(QFrame):
         self._tokens = tokens
         self._auto_pct = auto_pct
         self._api_pct = api_pct
+        self._grok_pct = grok_pct
         if self._selected_year_index is not None and not (
             0 <= self._selected_year_index < len(labels)
         ):
@@ -2237,6 +2259,7 @@ class ComposerHistoryPreview(QFrame):
         tokens = self._tokens
         auto_pct = self._auto_pct
         api_pct = self._api_pct
+        grok_pct = self._grok_pct
 
         token_total = sum(int(v) for v in tokens if v is not None)
         caption_bits = [f"Billing periods · {len(labels)}"]
@@ -2247,11 +2270,13 @@ class ComposerHistoryPreview(QFrame):
 
         has_auto = any(v is not None for v in auto_pct)
         has_api = any(v is not None for v in api_pct)
+        has_grok = any(v is not None for v in grok_pct)
         for chip in self._month_chips:
             chip.hide()
         self._chip_tokens.show()
         self._chip_auto.setVisible(has_auto)
         self._chip_api.setVisible(has_api)
+        self._chip_grok.setVisible(has_grok)
 
         series = [
             ChartSeries("Tokens", "#E0C090", tokens, area=True),
@@ -2260,6 +2285,8 @@ class ComposerHistoryPreview(QFrame):
             series.append(ChartSeries("AUTO %", "#6FA8DC", auto_pct, unit="%"))
         if has_api:
             series.append(ChartSeries("API %", "#B0B0B0", api_pct, unit="%"))
+        if has_grok:
+            series.append(ChartSeries("Grok %", "#C9A8D4", grok_pct, unit="%"))
 
         self._chart.set_data(labels, series, caption=footer)
         if self._selected_year_index is not None:
@@ -2382,6 +2409,10 @@ class ComposerHistoryPreview(QFrame):
         self._chip_auto.setText("— AUTO" if auto is None else f"{auto:.0f}% AUTO")
         api = _pick(self._api_pct)
         self._chip_api.setText("— API" if api is None else f"{api:.0f}% API")
+        grok = _pick(self._grok_pct)
+        self._chip_grok.setText(
+            "— Grok" if grok is None else f"{grok:.0f}% Grok"
+        )
         self._chips_host.updateGeometry()
 
     def _update_month_chip_values(self, index: int | None) -> None:
