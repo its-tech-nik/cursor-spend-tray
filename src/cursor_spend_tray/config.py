@@ -24,6 +24,9 @@ from .browser import (
 )
 
 BetweenScrapesMode = Literal["keep_open", "quit"]
+TrayMetric = Literal["auto", "api", "grok"]
+TRAY_METRICS: tuple[TrayMetric, ...] = ("auto", "api", "grok")
+DEFAULT_TRAY_METRIC: TrayMetric = "auto"
 
 
 APP_NAME = "cursor-spend-tray"
@@ -108,6 +111,8 @@ class AppConfig(BaseModel):
     # keep_open: leave headless browser running between polls.
     # quit: stop after each scrape and relaunch before the next.
     between_scrapes: BetweenScrapesMode = "keep_open"
+    # Which Included-in-Pro ring percentage the StatusNotifierItem glyph shows.
+    tray_metric: TrayMetric = DEFAULT_TRAY_METRIC
 
     _browser: BrowserInfo | None = PrivateAttr(default=None)
 

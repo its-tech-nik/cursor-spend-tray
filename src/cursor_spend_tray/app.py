@@ -47,6 +47,7 @@ from .config import (
     USAGE_URL,
     AppConfig,
     BetweenScrapesMode,
+    TrayMetric,
     UsageSnapshot,
     data_dir,
     poll_interval_label,
@@ -199,29 +200,37 @@ def _usage_phrase(snap: UsageSnapshot) -> str:
     return " · ".join(parts)
 
 
-def _tray_pct_ink(pct: int | None) -> QColor:
-    """AUTO% ink — matches popup ring warn thresholds."""
+def _tray_pct_ink(pct: int | None, *, warn_at_70: bool = False) -> QColor:
+    """Usage % ink — matches popup ring warn thresholds for the selected metric."""
     if pct is None:
         return QColor("#ECECEC")
     if pct >= 90:
         return QColor("#D9897A")
-    if pct >= 70:
+    if warn_at_70 and pct >= 70:
         return QColor("#D0B56C")
     return QColor("#E8E8E8")
 
 
+def tray_metric_percent(snap: UsageSnapshot, metric: TrayMetric) -> int | None:
+    """Percent shown in the tray glyph for the selected Included-in-Pro metric."""
+    if metric == "api":
+        return snap.other_models_pct
+    if metric == "grok":
+        return snap.grok_bot_pct
+    return snap.cursor_models_pct
+
+
 def make_tray_icon(
-    cursor_pct: int | None = None,
-    other_pct: int | None = None,
+    pct: int | None = None,
     *,
+    warn_at_70: bool = False,
     disconnected: bool = False,
 ) -> QIcon:
-    """AUTO usage digits for the StatusNotifierItem glyph (tooltip still has %).
+    """Selected usage digits for the StatusNotifierItem glyph (tooltip still has %).
 
     Plasma scales tray icons into a fixed square cell, so we stay square and
     omit "%" — that keeps ~2×-tall digits readable without font stretch.
     """
-    del other_pct  # API stays in tooltip / popup; tray shows AUTO only.
     size = 64
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
@@ -232,14 +241,14 @@ def make_tray_icon(
     if disconnected:
         _draw_slash_overlay(painter, size, size)
     else:
-        label = "?" if cursor_pct is None else str(max(0, min(100, cursor_pct)))
+        label = "?" if pct is None else str(max(0, min(100, pct)))
         pct_font = QFont()
         pct_font.setWeight(QFont.Weight.Bold)
-        if cursor_pct is None:
+        if pct is None:
             target_px = 56
-        elif cursor_pct >= 100:
+        elif pct >= 100:
             target_px = 40
-        elif cursor_pct >= 10:
+        elif pct >= 10:
             target_px = 56
         else:
             target_px = 64
@@ -250,7 +259,7 @@ def make_tray_icon(
                 break
             px -= 1
         painter.setFont(pct_font)
-        painter.setPen(_tray_pct_ink(cursor_pct))
+        painter.setPen(_tray_pct_ink(pct, warn_at_70=warn_at_70))
         painter.drawText(
             QRectF(0, 0, size, size),
             int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
@@ -1027,6 +1036,10 @@ class TrayApp(QWidget):
 
         self.popup = SpendPopup()
         self.popup.refresh_requested.connect(self._refresh_now)
+        self.popup.tray_metric_changed.connect(self._on_tray_metric_changed)
+        self.popup.ring_selector.set_selected_metric(
+            self.config.tray_metric, animate=False, emit=False
+        )
         # Screen coords from Plasma's StatusNotifierItem.Activate(x, y).
         self._anchor_pos = QPoint()
 
@@ -2000,12 +2013,26 @@ class TrayApp(QWidget):
         )
         return QPoint(x, y)
 
+    def _on_tray_metric_changed(self, metric: str) -> None:
+        if metric not in ("auto", "api", "grok"):
+            return
+        typed: TrayMetric = metric  # type: ignore[assignment]
+        if self.config.tray_metric == typed:
+            return
+        self.config.tray_metric = typed
+        self.config.save()
+        if hasattr(self, "snapshot"):
+            self._paint_tray_icon(self.snapshot)
+
+    def _tray_display_pct(self, snap: UsageSnapshot) -> int | None:
+        return tray_metric_percent(snap, self.config.tray_metric)
+
     def _start_spinner(self) -> None:
         if getattr(self, "_shutting_down", False):
             return
-        # Keep AUTO digits visible whenever we already have a reading; only fall
-        # back to the refresh glyph when there is nothing to show yet.
-        if hasattr(self, "snapshot") and self.snapshot.cursor_models_pct is not None:
+        # Keep selected-metric digits visible whenever we already have a reading;
+        # only fall back to the refresh glyph when there is nothing to show yet.
+        if hasattr(self, "snapshot") and self._tray_display_pct(self.snapshot) is not None:
             self._spin_timer.stop()
             self._paint_tray_icon(self.snapshot)
             return
@@ -2016,17 +2043,18 @@ class TrayApp(QWidget):
     def _stop_spinner(self, *, restore: bool = True) -> None:
         was_spinning = self._spin_timer.isActive()
         self._spin_timer.stop()
-        # Temporary wait spinners must not leave a frozen glyph over the AUTO %.
+        # Temporary wait spinners must not leave a frozen glyph over the usage %.
         if restore and was_spinning and hasattr(self, "snapshot"):
             self._paint_tray_icon(self.snapshot)
 
     def _paint_tray_icon(self, snap: UsageSnapshot) -> None:
-        """Push AUTO percentage glyph + tooltip for the current snapshot."""
+        """Push selected-metric percentage glyph + tooltip for the current snapshot."""
         disconnected = bidi_unavailable(snap)
+        metric = self.config.tray_metric
         self.tray.set_icon(
             make_tray_icon(
-                snap.cursor_models_pct,
-                snap.other_models_pct,
+                self._tray_display_pct(snap),
+                warn_at_70=(metric == "api"),
                 disconnected=disconnected,
             )
         )
@@ -2034,7 +2062,7 @@ class TrayApp(QWidget):
         self.tray.set_tooltip(body, title=title)
 
     def _on_spin_tick(self) -> None:
-        if hasattr(self, "snapshot") and self.snapshot.cursor_models_pct is not None:
+        if hasattr(self, "snapshot") and self._tray_display_pct(self.snapshot) is not None:
             self._spin_timer.stop()
             self._paint_tray_icon(self.snapshot)
             return

@@ -37,6 +37,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -50,6 +51,9 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import (
+    DEFAULT_TRAY_METRIC,
+    TRAY_METRICS,
+    TrayMetric,
     UsageSnapshot,
     format_usage_reset_label,
     load_popup_panel_order,
@@ -263,6 +267,8 @@ class BrowserHelpBanner(QFrame):
 class UsageRing(QWidget):
     """Circular usage gauge with a short label underneath."""
 
+    clicked = pyqtSignal()
+
     def __init__(
         self,
         title: str,
@@ -276,6 +282,7 @@ class UsageRing(QWidget):
         super().__init__(parent)
         self._ring = _RingGlyph(fill, warn_at_70=warn_at_70)
         self._title = QLabel(title)
+        self._selected = False
 
         title_font = QFont()
         title_font.setPointSize(10)
@@ -303,8 +310,14 @@ class UsageRing(QWidget):
             self.setToolTip(tooltip)
             self._ring.setToolTip(tooltip)
 
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumWidth(108)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        # Clicks hit this widget so selection works on the ring and labels.
+        self._ring.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._subtitle.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
@@ -313,9 +326,31 @@ class UsageRing(QWidget):
         layout.addWidget(self._ring, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(self._title)
         layout.addWidget(self._subtitle)
+        self._apply_selection_opacity()
 
     def set_percent(self, value: int | None) -> None:
         self._ring.set_percent(value)
+
+    def content_rect(self) -> QRect:
+        """Donut + labels in local coords (ignores horizontal stretch empty space)."""
+        return QRect(self._ring.x(), 0, self._ring.width(), self.height())
+
+    def set_selected(self, selected: bool) -> None:
+        if selected == self._selected:
+            return
+        self._selected = selected
+        self._apply_selection_opacity()
+
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def _apply_selection_opacity(self) -> None:
+        # Soft-dim unselected rings so the sliding window reads as the focus.
+        opacity = 1.0 if self._selected else 0.55
+        for child in (self._ring, self._title, self._subtitle):
+            effect = QGraphicsOpacityEffect(child)
+            effect.setOpacity(opacity)
+            child.setGraphicsEffect(effect)
 
     def set_subtitle(self, text: str) -> None:
         clean = (text or "").strip()
@@ -325,6 +360,14 @@ class UsageRing(QWidget):
     def set_tooltip(self, text: str) -> None:
         self.setToolTip(text)
         self._ring.setToolTip(text)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class _RingGlyph(QWidget):
@@ -399,6 +442,177 @@ class _RingGlyph(QWidget):
         label = "—" if self._pct is None else f"{max(0, min(100, self._pct))}%"
         text_rect = QRectF(0, 0, self.width(), self.height())
         painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), label)
+        painter.end()
+
+
+class UsageRingSelector(QWidget):
+    """AUTO / API / GROK rings with a sliding selection window."""
+
+    selected_metric_changed = pyqtSignal(str)
+
+    # Vertical outward pad; horizontal edges sit mid-gap between options.
+    _PAD_Y = 8.0
+    _SPACING = 6
+    _RADIUS = 14.0
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.cursor_ring = UsageRing("AUTO", "#8BA4C7")
+        self.other_ring = UsageRing("API", "#B0B0B0", warn_at_70=True)
+        self.grok_ring = UsageRing(
+            "GROK",
+            "#9BB8D4",
+            subtitle="weekly",
+            tooltip=(
+                "Grok Bot weekly allowance from the Cursor spending page.\n"
+                "Resets every week; pauses at the limit until then."
+            ),
+        )
+        self._rings: dict[TrayMetric, UsageRing] = {
+            "auto": self.cursor_ring,
+            "api": self.other_ring,
+            "grok": self.grok_ring,
+        }
+        self._ordered = [self._rings[key] for key in TRAY_METRICS]
+        self._selected_metric: TrayMetric = DEFAULT_TRAY_METRIC
+        self._thumb = QRectF()
+        self._anim_x = QPropertyAnimation(self, b"thumbX", self)
+        self._anim_x.setDuration(200)
+        self._anim_x.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim_w = QPropertyAnimation(self, b"thumbWidth", self)
+        self._anim_w.setDuration(200)
+        self._anim_w.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # Side margins ≈ half the visual gutter so the outer window edge can land mid-gap.
+        pad_y = int(self._PAD_Y)
+        side = 8
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(side, 8 + pad_y, side, 4 + pad_y)
+        layout.setSpacing(self._SPACING)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        for key in TRAY_METRICS:
+            ring = self._rings[key]
+            ring.clicked.connect(lambda m=key: self.set_selected_metric(m))
+            layout.addWidget(ring, stretch=1)
+
+        self.cursor_ring.set_selected(True)
+        self.other_ring.set_selected(False)
+        self.grok_ring.set_selected(False)
+        QTimer.singleShot(0, lambda: self._snap_thumb(animate=False))
+
+    def selected_metric(self) -> TrayMetric:
+        return self._selected_metric
+
+    def set_selected_metric(
+        self, metric: str, *, animate: bool = True, emit: bool = True
+    ) -> None:
+        if metric not in self._rings:
+            return
+        typed: TrayMetric = metric  # type: ignore[assignment]
+        changed = typed != self._selected_metric
+        self._selected_metric = typed
+        self._sync_selection_styles()
+        self._snap_thumb(animate=animate and changed)
+        if emit and changed:
+            self.selected_metric_changed.emit(typed)
+
+    def _sync_selection_styles(self) -> None:
+        for key, ring in self._rings.items():
+            ring.set_selected(key == self._selected_metric)
+
+    def _mapped_content_rect(self, ring: UsageRing) -> QRectF:
+        """Donut column in selector coordinates (excludes stretch padding)."""
+        local = ring.content_rect()
+        top_left = ring.mapTo(self, local.topLeft())
+        return QRectF(
+            float(top_left.x()),
+            float(top_left.y()),
+            float(local.width()),
+            float(local.height()),
+        )
+
+    def _target_thumb(self) -> QRectF:
+        """Tallest-option height; horizontal edges bisect the gap to neighbors."""
+        contents = [self._mapped_content_rect(r) for r in self._ordered]
+        if not contents or any(c.width() <= 0 or c.height() <= 0 for c in contents):
+            return QRectF()
+        idx = next(
+            i
+            for i, r in enumerate(self._ordered)
+            if r is self._rings[self._selected_metric]
+        )
+        sel = contents[idx]
+        # Typical content-to-content gutter (falls back to layout spacing).
+        gaps = [
+            contents[i + 1].left() - contents[i].right()
+            for i in range(len(contents) - 1)
+        ]
+        half_gap = (sum(gaps) / len(gaps) / 2.0) if gaps else self._SPACING / 2.0
+
+        if idx > 0:
+            left = (contents[idx - 1].right() + sel.left()) / 2.0
+        else:
+            left = sel.left() - half_gap
+        if idx < len(contents) - 1:
+            right = (sel.right() + contents[idx + 1].left()) / 2.0
+        else:
+            right = sel.right() + half_gap
+
+        top = min(c.top() for c in contents) - self._PAD_Y
+        bottom = max(c.bottom() for c in contents) + self._PAD_Y
+        return QRectF(left, top, max(0.0, right - left), max(0.0, bottom - top))
+
+    def _snap_thumb(self, *, animate: bool) -> None:
+        target = self._target_thumb()
+        self._anim_x.stop()
+        self._anim_w.stop()
+        if not animate or self._thumb.isEmpty():
+            self._thumb = target
+            self.update()
+            return
+        self._anim_x.setStartValue(self._thumb.x())
+        self._anim_x.setEndValue(target.x())
+        self._anim_w.setStartValue(self._thumb.width())
+        self._anim_w.setEndValue(target.width())
+        # Keep y/height in sync immediately — rings share one row height.
+        self._thumb.setY(target.y())
+        self._thumb.setHeight(target.height())
+        self._anim_x.start()
+        self._anim_w.start()
+
+    def _get_thumb_x(self) -> float:
+        return self._thumb.x()
+
+    def _set_thumb_x(self, value: float) -> None:
+        self._thumb.moveLeft(float(value))
+        self.update()
+
+    def _get_thumb_width(self) -> float:
+        return self._thumb.width()
+
+    def _set_thumb_width(self, value: float) -> None:
+        self._thumb.setWidth(float(value))
+        self.update()
+
+    thumbX = pyqtProperty(float, _get_thumb_x, _set_thumb_x)
+    thumbWidth = pyqtProperty(float, _get_thumb_width, _set_thumb_width)
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        # Layout may still be settling; snap without animation after geometry lands.
+        QTimer.singleShot(0, lambda: self._snap_thumb(animate=False))
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, ARG002
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self._thumb.isEmpty():
+            painter.setPen(QPen(QColor("#3A465A"), 1))
+            painter.setBrush(QColor("#222830"))
+            painter.drawRoundedRect(
+                self._thumb.adjusted(0.5, 0.5, -0.5, -0.5),
+                self._RADIUS,
+                self._RADIUS,
+            )
         painter.end()
 
 
@@ -3605,6 +3819,7 @@ class SpendPopup(QFrame):
     """
 
     refresh_requested = pyqtSignal()
+    tray_metric_changed = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3681,38 +3896,17 @@ class SpendPopup(QFrame):
         heading_row.addWidget(self._heading)
         heading_row.addWidget(self._reset_label)
 
-        self.cursor_ring = UsageRing(
-            "AUTO",
-            "#8BA4C7",
-        )
-        self.other_ring = UsageRing(
-            "API",
-            "#B0B0B0",
-            warn_at_70=True,
-        )
-        self.grok_ring = UsageRing(
-            "GROK",
-            "#9BB8D4",
-            subtitle="weekly",
-            tooltip=(
-                "Grok Bot weekly allowance from the Cursor spending page.\n"
-                "Resets every week; pauses at the limit until then."
-            ),
-        )
-
-        rings = QHBoxLayout()
-        rings.setContentsMargins(0, 8, 0, 4)
-        rings.setSpacing(6)
-        rings.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        rings.addWidget(self.cursor_ring, stretch=1)
-        rings.addWidget(self.other_ring, stretch=1)
-        rings.addWidget(self.grok_ring, stretch=1)
+        self.ring_selector = UsageRingSelector()
+        self.cursor_ring = self.ring_selector.cursor_ring
+        self.other_ring = self.ring_selector.other_ring
+        self.grok_ring = self.ring_selector.grok_ring
+        self.ring_selector.selected_metric_changed.connect(self.tray_metric_changed.emit)
 
         card_layout = QVBoxLayout(self._card)
         card_layout.setContentsMargins(16, 16, 16, 16)
         card_layout.setSpacing(8)
         card_layout.addLayout(heading_row)
-        card_layout.addLayout(rings)
+        card_layout.addWidget(self.ring_selector)
 
         self.browser_help = BrowserHelpBanner()
         self.habits = AgentHabitsPreview()
