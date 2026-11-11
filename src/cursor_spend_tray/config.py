@@ -27,6 +27,18 @@ BetweenScrapesMode = Literal["keep_open", "quit"]
 TrayMetric = Literal["auto", "api", "grok"]
 TRAY_METRICS: tuple[TrayMetric, ...] = ("auto", "api", "grok")
 DEFAULT_TRAY_METRIC: TrayMetric = "auto"
+PopupOpenAnimation = Literal["none", "fade_scale", "slide_fade"]
+POPUP_OPEN_ANIMATIONS: tuple[PopupOpenAnimation, ...] = (
+    "none",
+    "fade_scale",
+    "slide_fade",
+)
+DEFAULT_POPUP_OPEN_ANIMATION: PopupOpenAnimation = "none"
+POPUP_OPEN_ANIMATION_LABELS: dict[PopupOpenAnimation, str] = {
+    "none": "None",
+    "fade_scale": "Fade + scale",
+    "slide_fade": "Slide from tray",
+}
 
 
 APP_NAME = "cursor-spend-tray"
@@ -113,8 +125,20 @@ class AppConfig(BaseModel):
     between_scrapes: BetweenScrapesMode = "keep_open"
     # Which Included-in-Pro ring percentage the StatusNotifierItem glyph shows.
     tray_metric: TrayMetric = DEFAULT_TRAY_METRIC
+    # SpendPopup open motion (context menu: Open animation).
+    popup_open_animation: PopupOpenAnimation = DEFAULT_POPUP_OPEN_ANIMATION
 
     _browser: BrowserInfo | None = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_removed_open_animations(cls, data: Any) -> Any:
+        """Map dropped open-animation ids (e.g. spring) onto a kept option."""
+        if not isinstance(data, dict):
+            return data
+        if data.get("popup_open_animation") == "spring":
+            data["popup_open_animation"] = "fade_scale"
+        return data
 
     def bidi_http_base(self) -> str:
         return f"http://{self.bidi_host}:{self.bidi_port}"

@@ -8,6 +8,7 @@ from PyQt6.QtCore import (
     QEvent,
     QMimeData,
     QObject,
+    QParallelAnimationGroup,
     QPoint,
     QPointF,
     QPropertyAnimation,
@@ -51,8 +52,10 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import (
+    DEFAULT_POPUP_OPEN_ANIMATION,
     DEFAULT_TRAY_METRIC,
     TRAY_METRICS,
+    PopupOpenAnimation,
     TrayMetric,
     UsageSnapshot,
     format_usage_reset_label,
@@ -3820,6 +3823,7 @@ class SpendPopup(QFrame):
 
     refresh_requested = pyqtSignal()
     tray_metric_changed = pyqtSignal(str)
+    open_animation_finished = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3836,6 +3840,10 @@ class SpendPopup(QFrame):
         self._nested_ui_depth = 0
         self._awaiting_login = False
         self._browser_inaccessible = False
+        self._open_animation: PopupOpenAnimation = DEFAULT_POPUP_OPEN_ANIMATION
+        self._open_anim_group: QParallelAnimationGroup | None = None
+        self._open_notify_gen = 0
+        self._popup_fixed_width = 420
         self._arm_timer = QTimer(self)
         self._arm_timer.setSingleShot(True)
         self._arm_timer.timeout.connect(self._arm_dismiss)
@@ -3849,18 +3857,20 @@ class SpendPopup(QFrame):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.NoDropShadowWindowHint
         )
+        # Frameless Tool windows keep an opaque rectangular buffer unless this
+        # is set — QSS border-radius alone leaves square filled corners.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        self.setAutoFillBackground(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setFixedWidth(420)
-        self.setStyleSheet(
-            """
-            SpendPopup {
-                background: #141414;
-                border: 1px solid #2A2A2A;
-                border-radius: 12px;
-            }
-            """
-        )
+        self.setFixedWidth(self._popup_fixed_width)
+        # Transparent shell; chrome is painted in paintEvent so corners stay
+        # anti-aliased and truly clear outside the 12px radius.
+        self.setStyleSheet("SpendPopup { background: transparent; border: none; }")
+        self._chrome_radius = 12.0
+        self._chrome_fill = QColor("#141414")
+        self._chrome_border = QColor("#2A2A2A")
 
         self._card = QFrame()
         self._card.setStyleSheet(
@@ -4004,6 +4014,15 @@ class SpendPopup(QFrame):
     def resizeEvent(self, event) -> None:  # noqa: ANN001
         super().resizeEvent(event)
         self._place_pin_button()
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, ARG002
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setBrush(self._chrome_fill)
+        painter.setPen(QPen(self._chrome_border, 1))
+        painter.drawRoundedRect(rect, self._chrome_radius, self._chrome_radius)
+        painter.end()
 
     def _on_github_branch_preference_changed(
         self, full_name: str, preference: str
@@ -4203,7 +4222,17 @@ class SpendPopup(QFrame):
             self.set_status(done_status)
         self.adjustSize()
 
-    def show_at(self, pos, *, keep_open: bool = False) -> None:  # noqa: ANN001
+    def set_open_animation(self, mode: PopupOpenAnimation) -> None:
+        """Select the open motion used by the next show_at()."""
+        self._open_animation = mode
+
+    def show_at(  # noqa: ANN001
+        self,
+        pos,
+        *,
+        keep_open: bool = False,
+        anchor: QPoint | None = None,
+    ) -> None:
         """Show near tray; close when focus leaves or user clicks elsewhere.
 
         keep_open=True pins the panel until tray click / hide() — outside clicks
@@ -4216,18 +4245,139 @@ class SpendPopup(QFrame):
         self._keep_open = keep_open
         self.pin_button.set_checked(keep_open)
         self._arm_timer.stop()
+        self._stop_open_animation()
         self.adjustSize()
         target = pos if isinstance(pos, QPoint) else QPoint(pos.x(), pos.y())
-        # Under XWayland a single pre- or post-show move() is often ignored.
-        self.setGeometry(target.x(), target.y(), self.width(), self.height())
-        self.show()
-        self.move(target)
+        self._open_notify_gen += 1
+        notify_gen = self._open_notify_gen
+        if self._open_animation == "none":
+            self.setWindowOpacity(1.0)
+            # Under XWayland a single pre- or post-show move() is often ignored.
+            self.setGeometry(target.x(), target.y(), self.width(), self.height())
+            self.show()
+            self.move(target)
+            QTimer.singleShot(
+                0, lambda p=target: self.move(p) if self.isVisible() else None
+            )
+            QTimer.singleShot(
+                50, lambda p=target: self.move(p) if self.isVisible() else None
+            )
+            # Instant open still notifies so preview→menu flows can continue.
+            QTimer.singleShot(
+                0, lambda g=notify_gen: self._emit_open_animation_finished(g)
+            )
+        else:
+            self._start_open_animation(
+                target, anchor=anchor, notify_gen=notify_gen
+            )
         self.raise_()
         self.activateWindow()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-        QTimer.singleShot(0, lambda p=target: self.move(p) if self.isVisible() else None)
-        QTimer.singleShot(50, lambda p=target: self.move(p) if self.isVisible() else None)
         self._wire_dismiss(keep_open)
+
+    def _emit_open_animation_finished(self, notify_gen: int) -> None:
+        if notify_gen != self._open_notify_gen:
+            return
+        self.open_animation_finished.emit()
+
+    def _restore_popup_size_constraints(self) -> None:
+        self.setFixedWidth(self._popup_fixed_width)
+
+    def _stop_open_animation(self) -> None:
+        group = self._open_anim_group
+        self._open_anim_group = None
+        if group is not None:
+            group.stop()
+            group.deleteLater()
+        self.setWindowOpacity(1.0)
+        self._restore_popup_size_constraints()
+
+    def _scaled_start_rect(self, final: QRect, scale: float) -> QRect:
+        sw = max(1, int(final.width() * scale))
+        sh = max(1, int(final.height() * scale))
+        return QRect(
+            final.x() + (final.width() - sw) // 2,
+            final.y() + (final.height() - sh) // 2,
+            sw,
+            sh,
+        )
+
+    def _start_open_animation(
+        self,
+        target: QPoint,
+        *,
+        anchor: QPoint | None,
+        notify_gen: int,
+    ) -> None:
+        """Play the configured open motion, ending at ``target``."""
+        width = max(self.width(), self._popup_fixed_width)
+        height = max(self.height(), 1)
+        final = QRect(target.x(), target.y(), width, height)
+        mode = self._open_animation
+
+        opacity = QPropertyAnimation(self, b"windowOpacity", self)
+        opacity.setStartValue(0.0)
+        opacity.setEndValue(1.0)
+
+        group = QParallelAnimationGroup(self)
+
+        if mode == "slide_fade":
+            offset = 14
+            # Tray above popup → slide down; tray below → slide up.
+            if anchor is not None and anchor.y() > target.y() + height // 2:
+                start_pos = QPoint(target.x(), target.y() + offset)
+            else:
+                start_pos = QPoint(target.x(), target.y() - offset)
+            self.setWindowOpacity(0.0)
+            self.setGeometry(start_pos.x(), start_pos.y(), width, height)
+            self.show()
+            pos_anim = QPropertyAnimation(self, b"pos", self)
+            pos_anim.setStartValue(start_pos)
+            pos_anim.setEndValue(target)
+            pos_anim.setDuration(220)
+            pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            opacity.setDuration(220)
+            opacity.setEasingCurve(QEasingCurve.Type.OutCubic)
+            group.addAnimation(pos_anim)
+            group.addAnimation(opacity)
+        else:
+            # fade_scale: grow from a slightly smaller rect + fade.
+            start = self._scaled_start_rect(final, 0.96)
+            # Geometry anim needs free width; restore fixed width when done.
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16_777_215)
+            self.setWindowOpacity(0.0)
+            self.setGeometry(start)
+            self.show()
+            geo = QPropertyAnimation(self, b"geometry", self)
+            geo.setStartValue(start)
+            geo.setEndValue(final)
+            geo.setDuration(200)
+            geo.setEasingCurve(QEasingCurve.Type.OutCubic)
+            opacity.setDuration(200)
+            opacity.setEasingCurve(QEasingCurve.Type.OutCubic)
+            group.addAnimation(geo)
+            group.addAnimation(opacity)
+
+        def _finish() -> None:
+            self._open_anim_group = None
+            self._restore_popup_size_constraints()
+            self.setWindowOpacity(1.0)
+            if self.isVisible():
+                self.setGeometry(final)
+                self.move(target)
+                # XWayland often ignores a single post-show move().
+                QTimer.singleShot(
+                    0, lambda p=target: self.move(p) if self.isVisible() else None
+                )
+                QTimer.singleShot(
+                    50, lambda p=target: self.move(p) if self.isVisible() else None
+                )
+            self._emit_open_animation_finished(notify_gen)
+
+        group.finished.connect(_finish)
+        self._open_anim_group = group
+        group.start()
 
     def set_keep_open(self, keep_open: bool) -> None:
         """Pin (or unpin) the visible popup without reopening it."""
@@ -4333,6 +4483,7 @@ class SpendPopup(QFrame):
 
     def hideEvent(self, event) -> None:  # noqa: ANN001
         self._arm_timer.stop()
+        self._stop_open_animation()
         self._dismiss_armed = False
         self._keep_open = False
         self._nested_ui_depth = 0

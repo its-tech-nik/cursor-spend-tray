@@ -44,9 +44,12 @@ from .browser_stats import BrowserResourceMonitor, format_run_summary, format_ru
 from .config import (
     APP_NAME,
     POLL_INTERVAL_MINUTES,
+    POPUP_OPEN_ANIMATION_LABELS,
+    POPUP_OPEN_ANIMATIONS,
     USAGE_URL,
     AppConfig,
     BetweenScrapesMode,
+    PopupOpenAnimation,
     TrayMetric,
     UsageSnapshot,
     data_dir,
@@ -477,6 +480,14 @@ class TrayContextMenu(QFrame):
 
     def close_submenus(self) -> None:
         self.close_child_flyouts()
+
+    def open_submenu(self, submenu: TrayContextSubmenu) -> None:
+        """Open a known flyout beside its parent row (menu must already be visible)."""
+        for row in self._rows:
+            if isinstance(row, _CtxSubmenuRow) and row.submenu is submenu:
+                self.close_child_flyouts()
+                submenu.popup_beside(row)
+                return
 
     def row_entered(self, row: QWidget) -> None:
         self._hover.row_entered(row)
@@ -1037,6 +1048,7 @@ class TrayApp(QWidget):
         self.popup = SpendPopup()
         self.popup.refresh_requested.connect(self._refresh_now)
         self.popup.tray_metric_changed.connect(self._on_tray_metric_changed)
+        self.popup.set_open_animation(self.config.popup_open_animation)
         self.popup.ring_selector.set_selected_metric(
             self.config.tray_metric, animate=False, emit=False
         )
@@ -1073,6 +1085,20 @@ class TrayApp(QWidget):
             self._poll_group.addAction(action)
             self._poll_actions.append(action)
         self._sync_poll_actions()
+
+        self._anim_actions: list[QAction] = []
+        self._anim_group = QActionGroup(self)
+        self._anim_group.setExclusive(True)
+        for mode in POPUP_OPEN_ANIMATIONS:
+            action = QAction(POPUP_OPEN_ANIMATION_LABELS[mode], self)
+            action.setCheckable(True)
+            action.setData(mode)
+            action.triggered.connect(
+                lambda checked=False, m=mode: self._on_popup_open_animation_chosen(m)
+            )
+            self._anim_group.addAction(action)
+            self._anim_actions.append(action)
+        self._sync_open_animation_actions()
 
         self._resource_monitor = BrowserResourceMonitor(config, self)
         self._browser_actions: list[QAction] = []
@@ -1117,6 +1143,13 @@ class TrayApp(QWidget):
         self._ctx.add_action(self._refresh_action)
         self._ctx.add_action(self._keep_open_action)
         self._ctx.add_separator()
+        self._anim_menu = self._ctx.add_submenu("Open animation", self._anim_actions)
+        self._anim_preview_gen = 0
+        self._pending_anim_preview_gen = 0
+        self._anim_preview_timer = QTimer(self)
+        self._anim_preview_timer.setSingleShot(True)
+        self._anim_preview_timer.setInterval(1000)
+        self._anim_preview_timer.timeout.connect(self._reopen_open_animation_menu)
         self._ctx.add_submenu("Refresh interval", self._poll_actions)
         browser_menu = self._ctx.add_submenu("Browser")
         browser_menu.add_action(self._view_browser_action)
@@ -1689,6 +1722,7 @@ class TrayApp(QWidget):
         self._arm_launch_retry()
 
     def _on_activated(self, pos: QPoint) -> None:
+        self._cancel_anim_menu_reopen()
         self._anchor_pos = QPoint(pos)
         if self._ctx.isVisible():
             self._ctx.hide()
@@ -1697,38 +1731,47 @@ class TrayApp(QWidget):
         if self.popup.isVisible():
             self.popup.hide()
             return
-        self.popup.show_at(self._popup_position())
+        self.popup.show_at(self._popup_position(), anchor=self._anchor_pos)
 
     def _on_secondary_activated(self, pos: QPoint) -> None:
         """Middle-click: refresh usage and open the popup."""
+        self._cancel_anim_menu_reopen()
         self._anchor_pos = QPoint(pos)
         if self._ctx.isVisible():
             self._ctx.hide()
         self._refresh_now()
         if not self.popup.isVisible():
-            self.popup.show_at(self._popup_position())
+            self.popup.show_at(self._popup_position(), anchor=self._anchor_pos)
 
     def _on_keep_open(self) -> None:
         """Open the popup pinned — outside clicks / focus loss do not dismiss it."""
+        self._cancel_anim_menu_reopen()
         if self._ctx.isVisible():
             self._ctx.hide()
-        self.popup.show_at(self._popup_position(), keep_open=True)
+        self.popup.show_at(
+            self._popup_position(), keep_open=True, anchor=self._anchor_pos
+        )
 
     def _on_context_menu(self, pos: QPoint) -> None:
+        self._cancel_anim_menu_reopen()
         self._anchor_pos = QPoint(pos)
         if self.popup.isVisible():
             self.popup.hide()
         if self._ctx.isVisible():
             self._ctx.hide()
             return
+        self._prepare_context_menu()
+        self._ctx.popup_at(pos)
+
+    def _prepare_context_menu(self) -> None:
         self._autostart_action.blockSignals(True)
         self._autostart_action.setChecked(autostart.is_enabled())
         self._autostart_action.blockSignals(False)
         self._sync_poll_actions()
+        self._sync_open_animation_actions()
         self._rebuild_browser_actions()
         self._sync_between_scrapes_actions()
         self._sync_reset_menu()
-        self._ctx.popup_at(pos)
 
     def _on_autostart_toggled(self, enabled: bool) -> None:
         try:
@@ -1756,6 +1799,11 @@ class TrayApp(QWidget):
     def _sync_poll_actions(self) -> None:
         current = self.config.poll_seconds
         for action in self._poll_actions:
+            self._set_action_checked(action, action.data() == current)
+
+    def _sync_open_animation_actions(self) -> None:
+        current = self.config.popup_open_animation
+        for action in self._anim_actions:
             self._set_action_checked(action, action.data() == current)
 
     def _rebuild_browser_actions(self) -> None:
@@ -1955,6 +2003,67 @@ class TrayApp(QWidget):
         self.scheduler.set_poll_seconds(seconds)
         self._sync_poll_actions()
         self.popup.set_status(f"Refresh every {poll_interval_label(minutes)}")
+
+    def _cancel_anim_menu_reopen(self) -> None:
+        """Drop a pending preview→menu reopen (tray click / manual menu)."""
+        self._anim_preview_gen += 1
+        self._anim_preview_timer.stop()
+        try:
+            self.popup.open_animation_finished.disconnect(
+                self._on_anim_preview_finished
+            )
+        except TypeError:
+            pass
+
+    def _on_popup_open_animation_chosen(self, mode: PopupOpenAnimation) -> None:
+        """Persist the open motion, preview it, then return to the submenu."""
+        if mode not in POPUP_OPEN_ANIMATIONS:
+            return
+        if self.config.popup_open_animation != mode:
+            self.config.popup_open_animation = mode
+            self.config.save()
+        self._sync_open_animation_actions()
+        self.popup.set_open_animation(mode)
+        label = POPUP_OPEN_ANIMATION_LABELS[mode]
+        self.popup.set_status(f"Open animation: {label}")
+        if self._ctx.isVisible():
+            self._ctx.hide()
+        # Hide first so show_at always plays the open motion from scratch.
+        if self.popup.isVisible():
+            self.popup.hide()
+        self._cancel_anim_menu_reopen()
+        self._pending_anim_preview_gen = self._anim_preview_gen
+        self.popup.open_animation_finished.connect(
+            self._on_anim_preview_finished,
+            Qt.ConnectionType.SingleShotConnection,
+        )
+        self.popup.show_at(self._popup_position(), anchor=self._anchor_pos)
+
+    def _on_anim_preview_finished(self) -> None:
+        if self._pending_anim_preview_gen != self._anim_preview_gen:
+            return
+        self._anim_preview_timer.start()
+
+    def _reopen_open_animation_menu(self) -> None:
+        if self._pending_anim_preview_gen != self._anim_preview_gen:
+            return
+        if self.popup.isVisible():
+            self.popup.hide()
+        if self._ctx.isVisible():
+            self._ctx.hide()
+        self._prepare_context_menu()
+        pos = QPoint(self._anchor_pos)
+        self._ctx.popup_at(pos)
+        # Row geometry is valid only after the menu has been shown/laid out.
+        QTimer.singleShot(0, self._open_anim_submenu_flyout)
+
+    def _open_anim_submenu_flyout(self) -> None:
+        if (
+            self._pending_anim_preview_gen != self._anim_preview_gen
+            or not self._ctx.isVisible()
+        ):
+            return
+        self._ctx.open_submenu(self._anim_menu)
 
     def _anchor_rect(self) -> QRect:
         """Icon rect from Plasma Activate(x, y). Those are screen coordinates."""
