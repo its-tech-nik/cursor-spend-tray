@@ -14,6 +14,7 @@ from PyQt6.QtGui import (
     QActionGroup,
     QColor,
     QConicalGradient,
+    QCursor,
     QDesktopServices,
     QFont,
     QFontMetrics,
@@ -70,6 +71,8 @@ log = logging.getLogger(__name__)
 _PANEL_EDGE_PX = 96
 _GAP_PX = 6
 _ICON_PAD = 12
+# Let a corner tray icon keep the popup visually centered (a little may hang off-screen).
+_EDGE_OVERHANG_PX = 105
 _LAUNCH_SETTLE_MS = 10_000
 _LAUNCH_RETRY_MS = 5_000      # retry interval while waiting for BiDi after launch
 _SPIN_INTERVAL_MS = 80        # icon animation frame interval (~12 fps)
@@ -1721,9 +1724,53 @@ class TrayApp(QWidget):
         # _arm_launch_retry → probe → scheduler.refresh() once remote debugging is up.
         self._arm_launch_retry()
 
+    @staticmethod
+    def _point_on_any_screen(pos: QPoint) -> bool:
+        """True when ``pos`` lies on (or just outside) a QScreen."""
+        for screen in QGuiApplication.screens():
+            if screen.geometry().adjusted(-16, -16, 16, 16).contains(pos):
+                return True
+        return False
+
+    def _activation_anchor(self, pos: QPoint) -> QPoint:
+        """Screen point for the tray icon that was just clicked.
+
+        Prefer Plasma's Activate(x, y). The panel is Wayland-native, so an
+        XWayland Qt app's QCursor.pos() often still points at whatever X11
+        window last saw the pointer — which parks the popup in the wrong place.
+        """
+        if not pos.isNull() and (pos.x() != 0 or pos.y() != 0):
+            if self._point_on_any_screen(pos):
+                return QPoint(pos)
+            # Some hosts report device pixels on scaled displays.
+            for screen in QGuiApplication.screens():
+                dpr = float(screen.devicePixelRatio())
+                if dpr <= 1.01:
+                    continue
+                scaled = QPoint(int(round(pos.x() / dpr)), int(round(pos.y() / dpr)))
+                if self._point_on_any_screen(scaled):
+                    log.info(
+                        "tray anchor: scaled Activate %s,%s -> %s,%s (dpr=%.2f)",
+                        pos.x(),
+                        pos.y(),
+                        scaled.x(),
+                        scaled.y(),
+                        dpr,
+                    )
+                    return scaled
+            log.warning(
+                "tray anchor: Activate %s,%s is off-screen; falling back to cursor",
+                pos.x(),
+                pos.y(),
+            )
+        cursor = QCursor.pos()
+        if not cursor.isNull() and self._point_on_any_screen(cursor):
+            return QPoint(cursor)
+        return QPoint(pos)
+
     def _on_activated(self, pos: QPoint) -> None:
         self._cancel_anim_menu_reopen()
-        self._anchor_pos = QPoint(pos)
+        self._anchor_pos = self._activation_anchor(pos)
         if self._ctx.isVisible():
             self._ctx.hide()
             return
@@ -1736,7 +1783,7 @@ class TrayApp(QWidget):
     def _on_secondary_activated(self, pos: QPoint) -> None:
         """Middle-click: refresh usage and open the popup."""
         self._cancel_anim_menu_reopen()
-        self._anchor_pos = QPoint(pos)
+        self._anchor_pos = self._activation_anchor(pos)
         if self._ctx.isVisible():
             self._ctx.hide()
         self._refresh_now()
@@ -1754,14 +1801,14 @@ class TrayApp(QWidget):
 
     def _on_context_menu(self, pos: QPoint) -> None:
         self._cancel_anim_menu_reopen()
-        self._anchor_pos = QPoint(pos)
+        self._anchor_pos = self._activation_anchor(pos)
         if self.popup.isVisible():
             self.popup.hide()
         if self._ctx.isVisible():
             self._ctx.hide()
             return
         self._prepare_context_menu()
-        self._ctx.popup_at(pos)
+        self._ctx.popup_at(self._anchor_pos)
 
     def _prepare_context_menu(self) -> None:
         self._autostart_action.blockSignals(True)
@@ -2088,14 +2135,20 @@ class TrayApp(QWidget):
         return dist_top <= dist_bottom
 
     def _popup_position(self) -> QPoint:
+        """Top-left so the popup is horizontally centered under the tray icon."""
         anchor = self._anchor_rect()
         self.popup.adjustSize()
-        pw = max(self.popup.width(), self.popup.sizeHint().width(), 420)
+        # Width is fixed on SpendPopup; don't let a stale sizeHint skew centering.
+        pw = int(getattr(self.popup, "_popup_fixed_width", 0) or 0)
+        if pw <= 0:
+            pw = max(self.popup.width(), 420)
         ph = max(self.popup.height(), self.popup.sizeHint().height(), 1)
         screen = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
         # XWayland availableGeometry often ignores Plasma panels — use full geometry.
         bounds = screen.geometry() if screen else QRect(0, 0, 1920, 1080)
 
+        # Ideal: center the popup under the icon. Allow a little overhang so
+        # corner tray icons don't shove the whole panel sideways.
         x = anchor.center().x() - pw // 2
         top_panel = self._panel_is_top(anchor, bounds)
         if top_panel:
@@ -2107,7 +2160,10 @@ class TrayApp(QWidget):
             if y < bounds.top() + 8:
                 y = bounds.top() + 8
 
-        x = max(bounds.left() + 8, min(x, bounds.right() - pw - 8))
+        x = max(
+            bounds.left() + 8 - _EDGE_OVERHANG_PX,
+            min(x, bounds.right() - pw - 8 + _EDGE_OVERHANG_PX),
+        )
         y = max(bounds.top() + 8, min(y, bounds.bottom() - ph - 8))
         log.info(
             "popup place click=%s,%s anchor=%s top_panel=%s -> %s,%s (%sx%s)",

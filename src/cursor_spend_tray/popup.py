@@ -974,13 +974,11 @@ def _format_chart_value(value: float | None, unit: str = "") -> str:
 class MultiSeriesHistoryChart(QWidget):
     """Single multi-line chart; series are min–max normalized (``%`` series use 0–100); hover shows raw values."""
 
-    # Fixed plot body + one legend row. Total height is constant so chip/series
-    # changes above the chart cannot stretch or shrink this widget.
+    # Fixed plot body. Legend lives in the Habits chips above — not inside the chart.
+    # Total height is constant so chip/series changes cannot stretch or shrink this widget.
     _PLOT_BODY = 160
     _AXIS_RESERVE = 0  # period axis label hidden; keep constant for height math
-    _LEGEND_TOP = 8
-    _LEGEND_GAP = 10
-    _LEGEND_ROWS = 1
+    _PLOT_TOP = 10
     # Pixel clearance inside the plot so peaks/floor dots aren't edge-clipped.
     _CEILING_CLEARANCE = 12.0
     # Keep 0% / min values clearly above the plot floor (dots + stroke + AA).
@@ -1014,24 +1012,8 @@ class MultiSeriesHistoryChart(QWidget):
         self.setFixedHeight(self._fixed_height())
         self.setCursor(Qt.CursorShape.CrossCursor)
 
-    def _legend_font(self) -> QFont:
-        font = QFont()
-        font.setPointSize(7)
-        return font
-
-    def _legend_row_height(self) -> float:
-        return float(max(12, QFontMetrics(self._legend_font()).height()))
-
     def _fixed_height(self) -> int:
-        rows = self._LEGEND_ROWS
-        row_h = self._legend_row_height()
-        legend = (
-            self._LEGEND_TOP
-            + rows * row_h
-            + max(0, rows - 1) * 2
-            + self._LEGEND_GAP
-        )
-        return int(legend + self._PLOT_BODY + self._AXIS_RESERVE)
+        return int(self._PLOT_TOP + self._PLOT_BODY + self._AXIS_RESERVE)
 
     def hasHeightForWidth(self) -> bool:  # noqa: N802
         return True
@@ -1301,42 +1283,9 @@ class MultiSeriesHistoryChart(QWidget):
         painter.setPen(QPen(QColor("#243041"), 1))
         painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 8, 8)
 
-        # Legend (may wrap to multiple rows when many series)
-        legend_y = 8.0
-        lx = 10.0
-        leg_font = QFont()
-        leg_font.setPointSize(7)
-        painter.setFont(leg_font)
-        metrics = painter.fontMetrics()
-        row_h = float(max(12, metrics.height()))
-        for series in self._series:
-            name_w = max(72, metrics.horizontalAdvance(series.name) + 4)
-            entry_w = 14 + name_w
-            if lx > 10.0 and lx + entry_w > self.width() - 10:
-                lx = 10.0
-                legend_y += row_h + 2
-            # Dot centered on the same row box as the label.
-            cy = legend_y + row_h / 2.0
-            visible = series.name not in self._hidden
-            dot = QColor(series.color)
-            label_color = QColor("#9AA6B8")
-            if not visible:
-                dot.setAlpha(70)
-                label_color = QColor("#4A5565")
-            painter.setBrush(dot)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QPointF(lx + 3, cy), 3, 3)
-            painter.setPen(label_color)
-            painter.drawText(
-                QRectF(lx + 10, legend_y, name_w, row_h),
-                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                series.name,
-            )
-            lx += entry_w + 8
-
-        axis_reserve = self._AXIS_RESERVE
-        plot_top = legend_y + row_h + self._LEGEND_GAP
-        available = self.height() - plot_top - axis_reserve
+        # Series identity is shown by the Habits chips above the chart.
+        plot_top = float(self._PLOT_TOP)
+        available = self.height() - plot_top - self._AXIS_RESERVE
         self._plot = QRectF(
             12,
             plot_top,
@@ -5562,6 +5511,14 @@ class SpendPopup(QFrame):
         """Select the open motion used by the next show_at()."""
         self._open_animation = mode
 
+    def _move_popup_to(self, target: QPoint) -> None:
+        """Place the frameless tool window; XWayland often ignores a lone move()."""
+        self.setGeometry(target.x(), target.y(), self.width(), self.height())
+        self.move(target)
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setFramePosition(target)
+
     def show_at(  # noqa: ANN001
         self,
         pos,
@@ -5589,14 +5546,14 @@ class SpendPopup(QFrame):
         if self._open_animation == "none":
             self.setWindowOpacity(1.0)
             # Under XWayland a single pre- or post-show move() is often ignored.
-            self.setGeometry(target.x(), target.y(), self.width(), self.height())
+            self._move_popup_to(target)
             self.show()
-            self.move(target)
+            self._move_popup_to(target)
             QTimer.singleShot(
-                0, lambda p=target: self.move(p) if self.isVisible() else None
+                0, lambda p=target: self._move_popup_to(p) if self.isVisible() else None
             )
             QTimer.singleShot(
-                50, lambda p=target: self.move(p) if self.isVisible() else None
+                50, lambda p=target: self._move_popup_to(p) if self.isVisible() else None
             )
             # Instant open still notifies so preview→menu flows can continue.
             QTimer.singleShot(
@@ -5700,14 +5657,15 @@ class SpendPopup(QFrame):
             self._restore_popup_size_constraints()
             self.setWindowOpacity(1.0)
             if self.isVisible():
-                self.setGeometry(final)
-                self.move(target)
+                self._move_popup_to(target)
                 # XWayland often ignores a single post-show move().
                 QTimer.singleShot(
-                    0, lambda p=target: self.move(p) if self.isVisible() else None
+                    0,
+                    lambda p=target: self._move_popup_to(p) if self.isVisible() else None,
                 )
                 QTimer.singleShot(
-                    50, lambda p=target: self.move(p) if self.isVisible() else None
+                    50,
+                    lambda p=target: self._move_popup_to(p) if self.isVisible() else None,
                 )
             self._emit_open_animation_finished(notify_gen)
 
