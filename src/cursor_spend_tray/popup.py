@@ -2998,13 +2998,20 @@ class ComposerHistoryPreview(QFrame):
         self._cumulative = list(daily.cumulative_tokens)
         day_labels = list(daily.days)
         commits = self._commits_aligned_to_days(day_labels)
-        self._commits = list(commits) if commits is not None else []
+        if commits is not None:
+            # Match token series: no commit dots on future (None) days.
+            self._commits = [
+                None if tok is None else count
+                for tok, count in zip(self._daily, commits, strict=True)
+            ]
+        else:
+            self._commits = []
 
         for chip in self._year_chips:
             chip.hide()
         self._chip_daily.show()
         self._chip_cumulative.show()
-        self._chip_commits.setVisible(commits is not None)
+        self._chip_commits.setVisible(bool(self._commits))
 
         caption_bits = [
             daily.label,
@@ -3012,8 +3019,10 @@ class ComposerHistoryPreview(QFrame):
         ]
         if daily.total_tokens:
             caption_bits.append(f"{daily.total_tokens:,} tokens")
-        if commits is not None:
-            commit_total = int(sum(v for v in commits if v is not None))
+        if self._commits:
+            commit_total = int(
+                sum(v for v in self._commits if v is not None)
+            )
             if commit_total:
                 caption_bits.append(f"{commit_total} commits")
         footer = " · ".join(caption_bits)
@@ -3027,13 +3036,12 @@ class ComposerHistoryPreview(QFrame):
                 "Cumulative", "#6FA8DC", list(daily.cumulative_tokens)
             ),
         ]
-        if commits is not None:
+        if self._commits:
             series.append(
                 ChartSeries(
                     "Commits",
                     "#A8C3A4",
-                    list(commits),
-                    point_labels=True,
+                    list(self._commits),
                 )
             )
 

@@ -88,11 +88,14 @@ class LoadPeriodDailySeriesTests(unittest.TestCase):
                 )
 
         self.assertTrue(series.available)
-        self.assertEqual(len(series.days), 4)  # 19..22
-        self.assertEqual(list(series.daily_tokens), [100.0, 0.0, 50.0, 0.0])
+        # Full period Oct 19–Nov 18 axis; values only through as_of (Oct 22).
+        self.assertEqual(len(series.days), 31)
+        self.assertEqual(list(series.daily_tokens)[:4], [100.0, 0.0, 50.0, 0.0])
         self.assertEqual(
-            list(series.cumulative_tokens), [100.0, 100.0, 150.0, 150.0]
+            list(series.cumulative_tokens)[:4], [100.0, 100.0, 150.0, 150.0]
         )
+        self.assertTrue(all(v is None for v in series.daily_tokens[4:]))
+        self.assertTrue(all(v is None for v in series.cumulative_tokens[4:]))
         self.assertEqual(series.total_tokens, 150)
 
 

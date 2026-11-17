@@ -310,8 +310,9 @@ class UsageDailySeries:
     period_start: str
     label: str
     days: tuple[str, ...] = ()  # axis labels, e.g. 'Oct 19'
-    daily_tokens: tuple[float, ...] = ()
-    cumulative_tokens: tuple[float, ...] = ()
+    # None = future day on the full-period axis (no chart dot).
+    daily_tokens: tuple[float | None, ...] = ()
+    cumulative_tokens: tuple[float | None, ...] = ()
     total_tokens: int = 0
     event_count: int = 0
     error_message: str = ""
@@ -397,11 +398,14 @@ def load_period_daily_series(
         now = datetime(as_of.year, as_of.month, as_of.day, tzinfo=_local_tz())
     else:
         now = datetime.now(timezone.utc).astimezone()
-    current_start = period_start_for(
-        now, renewal_day=renewal_day, renewal_time=renewal_time
-    )
-    axis_end = min(end, now.date()) if start == current_start else end
-    if axis_end < start:
+    # Always paint the full billing-period axis (including future days with
+    # zero usage) so the month chart stays visually consistent as days pass.
+    if end < start:
+        return UsageDailySeries.unavailable(
+            "Period has not started yet", period_start=start.isoformat(), label=label
+        )
+    # Reject periods that have not begun yet relative to as_of/now.
+    if start > now.date():
         return UsageDailySeries.unavailable(
             "Period has not started yet", period_start=start.isoformat(), label=label
         )
@@ -413,19 +417,25 @@ def load_period_daily_series(
         renewal_time=renewal_time,
     )
 
+    today = now.date()
     days: list[str] = []
-    daily: list[float] = []
-    cumulative: list[float] = []
+    daily: list[float | None] = []
+    cumulative: list[float | None] = []
     running = 0
     events = 0
     cursor = start
-    while cursor <= axis_end:
-        tok, cnt = by_day.get(cursor, (0, 0))
-        running += tok
-        events += cnt
+    while cursor <= end:
         days.append(short_period_label(cursor))
-        daily.append(float(tok))
-        cumulative.append(float(running))
+        if cursor > today:
+            # Keep the full-period axis, but no dots past today.
+            daily.append(None)
+            cumulative.append(None)
+        else:
+            tok, cnt = by_day.get(cursor, (0, 0))
+            running += tok
+            events += cnt
+            daily.append(float(tok))
+            cumulative.append(float(running))
         cursor += timedelta(days=1)
 
     if len(days) < 2:
