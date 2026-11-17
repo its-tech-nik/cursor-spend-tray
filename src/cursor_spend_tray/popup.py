@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from datetime import time as time_of_day
+from time import monotonic
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -43,8 +44,6 @@ from PyQt6.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
-    QLayout,
-    QLayoutItem,
     QMenu,
     QScrollArea,
     QScrollBar,
@@ -64,12 +63,15 @@ from .config import (
     load_popup_panel_order,
     save_popup_panel_order,
 )
+from .billing import period_label as billing_period_label
+from .billing import short_period_label as billing_short_period_label
 from .github_stats import (
     BRANCH_PREF_DEV,
     BRANCH_PREF_MAIN,
     GithubHabitsPreview,
     GithubProjectRow,
     collect_github_habits_preview,
+    github_preview_for_day,
     peek_cached_github_habits_preview,
     save_github_branch_pref,
 )
@@ -87,86 +89,6 @@ from .vscdb_stats import (
 )
 
 PANEL_MIME = "application/x-cursor-spend-tray-panel"
-
-
-class FlowLayout(QLayout):
-    """Left-flowing wrap layout — packs widgets tightly, wraps when needed."""
-
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        *,
-        hspacing: int = 4,
-        vspacing: int = 4,
-    ) -> None:
-        super().__init__(parent)
-        self._items: list[QLayoutItem] = []
-        self._hspacing = hspacing
-        self._vspacing = vspacing
-        self.setContentsMargins(0, 0, 0, 0)
-
-    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802
-        self._items.append(item)
-
-    def count(self) -> int:
-        return len(self._items)
-
-    def itemAt(self, index: int) -> QLayoutItem | None:  # noqa: N802
-        if 0 <= index < len(self._items):
-            return self._items[index]
-        return None
-
-    def takeAt(self, index: int) -> QLayoutItem | None:  # noqa: N802
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
-
-    def expandingDirections(self) -> Qt.Orientation:  # noqa: N802
-        return Qt.Orientation(0)
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802
-        return True
-
-    def heightForWidth(self, width: int) -> int:  # noqa: N802
-        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
-
-    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
-        super().setGeometry(rect)
-        self._do_layout(rect, test_only=False)
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        return self.minimumSize()
-
-    def minimumSize(self) -> QSize:  # noqa: N802
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        m = self.contentsMargins()
-        size += QSize(m.left() + m.right(), m.top() + m.bottom())
-        return size
-
-    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
-        m = self.contentsMargins()
-        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
-        x = effective.x()
-        y = effective.y()
-        row_h = 0
-        for item in self._items:
-            w = item.widget()
-            if w is not None and w.isHidden():
-                continue
-            hint = item.sizeHint()
-            next_x = x + hint.width() + self._hspacing
-            if row_h and next_x - self._hspacing > effective.right() + 1:
-                x = effective.x()
-                y += row_h + self._vspacing
-                next_x = x + hint.width() + self._hspacing
-                row_h = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x = next_x
-            row_h = max(row_h, hint.height())
-        return y + row_h - rect.y() + m.bottom()
 
 
 class CopyableCommand(QLabel):
@@ -274,6 +196,9 @@ class UsageRing(QWidget):
 
     clicked = pyqtSignal()
 
+    # glyph + layout spacing + title + spacing + subtitle (margins are 0 vertically)
+    _BODY_HEIGHT = 104 + 4 + 20 + 4 + 16
+
     def __init__(
         self,
         title: str,
@@ -309,7 +234,7 @@ class UsageRing(QWidget):
         self._subtitle.setStyleSheet(
             "color: #888888; background: transparent; border: none;"
         )
-        self._subtitle.setVisible(bool(subtitle.strip()))
+        # Always reserve the subtitle row so ring height never jumps.
 
         if tooltip:
             self.setToolTip(tooltip)
@@ -318,6 +243,7 @@ class UsageRing(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumWidth(108)
+        self.setFixedHeight(self._BODY_HEIGHT)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
         # Clicks hit this widget so selection works on the ring and labels.
         self._ring.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -358,9 +284,8 @@ class UsageRing(QWidget):
             child.setGraphicsEffect(effect)
 
     def set_subtitle(self, text: str) -> None:
-        clean = (text or "").strip()
-        self._subtitle.setText(clean)
-        self._subtitle.setVisible(bool(clean))
+        # Keep the row visible (possibly blank) so the fixed ring height holds.
+        self._subtitle.setText((text or "").strip())
 
     def set_tooltip(self, text: str) -> None:
         self.setToolTip(text)
@@ -462,8 +387,25 @@ class UsageRingSelector(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.cursor_ring = UsageRing("AUTO", "#8BA4C7")
-        self.other_ring = UsageRing("API", "#B0B0B0", warn_at_70=True)
+        self.cursor_ring = UsageRing(
+            "AUTO",
+            "#8BA4C7",
+            subtitle="month",
+            tooltip=(
+                "Included-in-Pro AUTO usage for the current billing month.\n"
+                "Resets on your subscription renewal day."
+            ),
+        )
+        self.other_ring = UsageRing(
+            "API",
+            "#B0B0B0",
+            subtitle="month",
+            warn_at_70=True,
+            tooltip=(
+                "Included-in-Pro API (other models) usage for the current\n"
+                "billing month. Resets on your subscription renewal day."
+            ),
+        )
         self.grok_ring = UsageRing(
             "GROK",
             "#9BB8D4",
@@ -491,14 +433,19 @@ class UsageRingSelector(QWidget):
         # Side margins ≈ half the visual gutter so the outer window edge can land mid-gap.
         pad_y = int(self._PAD_Y)
         side = 8
+        top_m = 8 + pad_y
+        bottom_m = 4 + pad_y
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(side, 8 + pad_y, side, 4 + pad_y)
+        layout.setContentsMargins(side, top_m, side, bottom_m)
         layout.setSpacing(self._SPACING)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         for key in TRAY_METRICS:
             ring = self._rings[key]
             ring.clicked.connect(lambda m=key: self.set_selected_metric(m))
             layout.addWidget(ring, stretch=1)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(top_m + UsageRing._BODY_HEIGHT + bottom_m)
 
         self.cursor_ring.set_selected(True)
         self.other_ring.set_selected(False)
@@ -2430,6 +2377,18 @@ class PeriodNavButton(QLabel):
 class ComposerHistoryPreview(QFrame):
     """Usage trends — Year (billing periods) or Month (days in period)."""
 
+    # period_start ISO, renewal_day, renewal_time (time | None)
+    focused_period_changed = pyqtSignal(str, int, object)
+    # ISO calendar day when a Month-view point is selected; None = whole period
+    focused_day_changed = pyqtSignal(object)
+
+    # Single horizontal chip row. Thin overlay scrollbar appears only while scrolling.
+    _CHIP_ROW_H = 24
+    _CHIPS_AREA_H = _CHIP_ROW_H
+    _CHIPS_BAR_H = 3
+    _CHIPS_BAR_HIDE_MS = 900
+    _SECTION_GAP = 8
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("composerHistory")
@@ -2621,10 +2580,95 @@ class ComposerHistoryPreview(QFrame):
             chip.toggled.connect(self._on_series_chip_toggled)
 
         chips_host = QWidget()
-        chips = FlowLayout(chips_host, hspacing=4, vspacing=4)
+        chips_host.setObjectName("habitsChipsHost")
+        chips_host.setStyleSheet(
+            "QWidget#habitsChipsHost { background: transparent; }"
+        )
+        chips_row = QHBoxLayout(chips_host)
+        chips_row.setContentsMargins(0, 0, 0, 0)
+        chips_row.setSpacing(4)
+        chips_row.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         for chip in self._series_chips:
-            chips.addWidget(chip)
+            chips_row.addWidget(chip, stretch=0)
+        chips_row.addStretch(1)
         self._chips_host = chips_host
+        self._chips_row = chips_row
+
+        self._chips_scroll = QScrollArea()
+        self._chips_scroll.setObjectName("habitsChipsScroll")
+        self._chips_scroll.setWidgetResizable(False)
+        self._chips_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._chips_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._chips_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._chips_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._chips_scroll.setFixedHeight(self._CHIPS_AREA_H)
+        self._chips_scroll.setWidget(chips_host)
+        self._chips_scroll.setStyleSheet(
+            """
+            QScrollArea#habitsChipsScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#habitsChipsScroll > QWidget > QWidget {
+                background: transparent;
+            }
+            """
+        )
+        # Thin overlay bar — shown briefly on scroll, never reserves layout space.
+        self._chips_bar = QScrollBar(
+            Qt.Orientation.Horizontal, self._chips_scroll
+        )
+        self._chips_bar.setObjectName("habitsChipsBar")
+        self._chips_bar.setFixedHeight(self._CHIPS_BAR_H)
+        self._chips_bar.setCursor(Qt.CursorShape.ArrowCursor)
+        self._chips_bar.setStyleSheet(
+            f"""
+            QScrollBar#habitsChipsBar {{
+                background: transparent;
+                height: {self._CHIPS_BAR_H}px;
+                margin: 0px;
+                border: none;
+            }}
+            QScrollBar#habitsChipsBar::handle:horizontal {{
+                background: #5A677A;
+                border-radius: 1px;
+                min-width: 20px;
+            }}
+            QScrollBar#habitsChipsBar::handle:horizontal:hover {{
+                background: #7A8AA0;
+            }}
+            QScrollBar#habitsChipsBar::add-line:horizontal,
+            QScrollBar#habitsChipsBar::sub-line:horizontal {{
+                width: 0px;
+                height: 0px;
+            }}
+            QScrollBar#habitsChipsBar::add-page:horizontal,
+            QScrollBar#habitsChipsBar::sub-page:horizontal {{
+                background: transparent;
+            }}
+            """
+        )
+        self._chips_bar.hide()
+        self._chips_bar_syncing = False
+        self._chips_bar_hide = QTimer(self)
+        self._chips_bar_hide.setSingleShot(True)
+        self._chips_bar_hide.setInterval(self._CHIPS_BAR_HIDE_MS)
+        self._chips_bar_hide.timeout.connect(self._chips_bar.hide)
+        hbar = self._chips_scroll.horizontalScrollBar()
+        hbar.valueChanged.connect(self._on_chips_hbar_value)
+        hbar.rangeChanged.connect(self._on_chips_hbar_range)
+        self._chips_bar.valueChanged.connect(self._on_chips_bar_value)
+        self._chips_scroll.installEventFilter(self)
+        self._chips_scroll.viewport().installEventFilter(self)
+        self._sync_chips_scroll_width()
 
         self._chart = MultiSeriesHistoryChart()
         self._chart.period_selected.connect(self._on_point_selected)
@@ -2650,10 +2694,13 @@ class ComposerHistoryPreview(QFrame):
         self._daily: list[float | None] = []
         self._cumulative: list[float | None] = []
         self._commits: list[float | None] = []
-        self._github_period_start: str = ""
-        self._github_day_labels: list[str] = []
-        self._github_daily_commits: list[float] = []
+        # period_start → (day_labels, daily_commits) for Month-view overlay
+        self._github_commits_by_period: dict[str, tuple[list[str], list[float]]] = {}
         self._selected_year_index: int | None = None
+        self._last_focused_period_key: tuple[str, int, str] | None = None
+        self._last_focused_day: str | None = None
+        self._month_day_count = 0
+        self._emit_day_focus = True
 
         self._fallback = QLabel("")
         fallback_font = QFont()
@@ -2668,48 +2715,234 @@ class ComposerHistoryPreview(QFrame):
         self._content = QWidget()
         content_layout = QVBoxLayout(self._content)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(8)
-        content_layout.addWidget(chips_host)
+        content_layout.setSpacing(self._SECTION_GAP)
+        content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        content_layout.addWidget(self._chips_scroll)
         content_layout.addWidget(self._chart)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(self._SECTION_GAP)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
         layout.addWidget(self._content)
         layout.addWidget(self._fallback)
+
+        header_h = max(self._title.sizeHint().height(), SegmentedToggle._H)
+        panel_h = (
+            header_h
+            + self._SECTION_GAP
+            + self._CHIPS_AREA_H
+            + self._SECTION_GAP
+            + self._chart.height()
+        )
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(panel_h)
 
     def drag_handle(self) -> QWidget:
         """Title label — sole drag affordance for reordering this panel."""
         return self._title
 
-    def apply_github_commits(self, preview: GithubHabitsPreview | None) -> None:
-        """Attach authored daily commits for the current billing period (Month view)."""
-        if preview is None or not preview.available:
-            self._github_period_start = ""
-            self._github_day_labels = []
-            self._github_daily_commits = []
+    def _sync_chips_scroll_width(self) -> None:
+        """Size the chip row to its content so the scroll area can overflow."""
+        spacing = self._chips_row.spacing()
+        widths: list[int] = []
+        for chip in self._series_chips:
+            if chip.isHidden():
+                continue
+            chip.ensurePolished()
+            w = max(chip.sizeHint().width(), chip.minimumSizeHint().width())
+            if w > 0:
+                widths.append(w)
+        if not widths:
+            content_w = self._chips_scroll.viewport().width()
         else:
-            self._github_period_start = preview.period_start
-            self._github_day_labels = list(preview.day_labels)
-            self._github_daily_commits = list(preview.daily_commits)
-        if self._mode == "month" and self._content.isVisible():
+            content_w = sum(widths) + spacing * max(0, len(widths) - 1)
+        content_w = max(content_w, self._chips_scroll.viewport().width())
+        self._chips_host.setFixedHeight(self._CHIP_ROW_H)
+        self._chips_host.setFixedWidth(content_w)
+        self._chips_host.updateGeometry()
+        self._sync_chips_bar_from_hbar()
+        if self._chips_bar.isVisible():
+            self._place_chips_bar()
+
+    def _chips_can_scroll(self) -> bool:
+        hbar = self._chips_scroll.horizontalScrollBar()
+        return hbar.maximum() > hbar.minimum()
+
+    def _sync_chips_bar_from_hbar(self) -> None:
+        hbar = self._chips_scroll.horizontalScrollBar()
+        self._chips_bar_syncing = True
+        self._chips_bar.setRange(hbar.minimum(), hbar.maximum())
+        self._chips_bar.setPageStep(hbar.pageStep())
+        self._chips_bar.setSingleStep(hbar.singleStep())
+        self._chips_bar.setValue(hbar.value())
+        self._chips_bar_syncing = False
+        if not self._chips_can_scroll():
+            self._chips_bar_hide.stop()
+            self._chips_bar.hide()
+
+    def _place_chips_bar(self) -> None:
+        margin = 4
+        area_w = self._chips_scroll.width()
+        area_h = self._chips_scroll.height()
+        self._chips_bar.setGeometry(
+            margin,
+            max(0, area_h - self._CHIPS_BAR_H - 1),
+            max(0, area_w - margin * 2),
+            self._CHIPS_BAR_H,
+        )
+        self._chips_bar.raise_()
+
+    def _flash_chips_bar(self) -> None:
+        if not self._chips_can_scroll():
+            self._chips_bar.hide()
+            return
+        self._sync_chips_bar_from_hbar()
+        self._place_chips_bar()
+        self._chips_bar.show()
+        self._chips_bar.raise_()
+        self._chips_bar_hide.start()
+
+    def _on_chips_hbar_value(self, value: int) -> None:
+        if self._chips_bar_syncing:
+            return
+        self._chips_bar_syncing = True
+        self._chips_bar.setValue(value)
+        self._chips_bar_syncing = False
+        self._flash_chips_bar()
+
+    def _on_chips_hbar_range(self, _minimum: int, _maximum: int) -> None:
+        self._sync_chips_bar_from_hbar()
+
+    def _on_chips_bar_value(self, value: int) -> None:
+        if self._chips_bar_syncing:
+            return
+        self._chips_bar_syncing = True
+        self._chips_scroll.horizontalScrollBar().setValue(value)
+        self._chips_bar_syncing = False
+        self._flash_chips_bar()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: ANN001
+        if obj is self._chips_scroll and event.type() == QEvent.Type.Resize:
+            if self._chips_bar.isVisible():
+                self._place_chips_bar()
+        if obj is self._chips_scroll.viewport():
+            et = event.type()
+            if et == QEvent.Type.Resize:
+                self._sync_chips_scroll_width()
+            elif et == QEvent.Type.Wheel:
+                # Map vertical wheel to horizontal chip scrolling.
+                delta = event.angleDelta().y() or event.angleDelta().x()  # type: ignore[attr-defined]
+                if delta:
+                    bar = self._chips_scroll.horizontalScrollBar()
+                    bar.setValue(bar.value() - int(delta))
+                    return True
+        return super().eventFilter(obj, event)
+
+    def apply_github_commits(self, preview: GithubHabitsPreview | None) -> None:
+        """Store authored daily commits for a billing period (Month view overlay)."""
+        if preview is None or not preview.available or not preview.period_start:
+            return
+        self._github_commits_by_period[preview.period_start] = (
+            list(preview.day_labels),
+            list(preview.daily_commits),
+        )
+        if (
+            self._mode == "month"
+            and self._content.isVisible()
+            and self._month_period_start == preview.period_start
+        ):
             self._render_month_view()
+
+    def focused_period_start(self) -> str:
+        """ISO start of the billing period the chart is focused on."""
+        meta = self.focused_period_meta()
+        return meta[0] if meta is not None else ""
+
+    def focused_period_meta(
+        self,
+    ) -> tuple[str, int, time_of_day | None] | None:
+        """``(period_start, renewal_day, renewal_time)`` for the focused slot."""
+        if not self._period_starts:
+            return None
+        idx = self._year_period_index()
+        if not (0 <= idx < len(self._period_starts)):
+            return None
+        return self._period_focus_meta(idx)
+
+    def _period_focus_meta(self, idx: int) -> tuple[str, int, time_of_day | None]:
+        period_start = self._period_starts[idx]
+        period_day = (
+            self._period_renewal_days[idx]
+            if 0 <= idx < len(self._period_renewal_days)
+            and self._period_renewal_days[idx]
+            else self._renewal_day
+        )
+        period_time = (
+            self._period_renewal_times[idx]
+            if 0 <= idx < len(self._period_renewal_times)
+            else self._renewal_time
+        )
+        if period_time is None:
+            period_time = self._renewal_time
+        return period_start, period_day, period_time
+
+    def _notify_focused_period(self) -> None:
+        if not self._period_starts:
+            return
+        idx = self._year_period_index()
+        if not (0 <= idx < len(self._period_starts)):
+            return
+        period_start, period_day, period_time = self._period_focus_meta(idx)
+        tod = period_time or time_of_day(0, 0)
+        key = (period_start, period_day, tod.strftime("%H:%M:%S"))
+        period_changed = key != self._last_focused_period_key
+        if period_changed:
+            self._last_focused_period_key = key
+            # New billing month → drop any day drill-down from the prior month.
+            self._clear_focused_day()
+            self.focused_period_changed.emit(period_start, period_day, period_time)
+
+    def _day_iso_for_index(self, index: int | None) -> str | None:
+        if self._mode != "month" or index is None or not self._month_period_start:
+            return None
+        if not (0 <= index < self._month_day_count):
+            return None
+        try:
+            start = date.fromisoformat(self._month_period_start)
+        except ValueError:
+            return None
+        # Axis is contiguous from period start (same as usage daily series).
+        return (start + timedelta(days=index)).isoformat()
+
+    def _clear_focused_day(self) -> None:
+        if self._last_focused_day is None:
+            return
+        self._last_focused_day = None
+        if self._emit_day_focus:
+            self.focused_day_changed.emit(None)
+
+    def _notify_focused_day(self, index: int | None) -> None:
+        if not self._emit_day_focus:
+            return
+        day = self._day_iso_for_index(index)
+        if day == self._last_focused_day:
+            return
+        self._last_focused_day = day
+        self.focused_day_changed.emit(day)
 
     def _commits_aligned_to_days(self, days: list[str]) -> list[float | None] | None:
         """Map cached GitHub daily commits onto the token day axis, or None if N/A."""
-        if (
-            not self._github_period_start
-            or self._month_period_start != self._github_period_start
-            or not self._github_day_labels
-            or len(self._github_day_labels) != len(self._github_daily_commits)
-        ):
+        entry = self._github_commits_by_period.get(self._month_period_start)
+        if entry is None:
+            return None
+        day_labels, daily_commits = entry
+        if not day_labels or len(day_labels) != len(daily_commits):
             return None
         by_label = {
             label: float(count)
-            for label, count in zip(
-                self._github_day_labels, self._github_daily_commits, strict=True
-            )
+            for label, count in zip(day_labels, daily_commits, strict=True)
         }
         return [by_label.get(day, 0.0) for day in days]
 
@@ -2727,15 +2960,11 @@ class ComposerHistoryPreview(QFrame):
         sdk = sdk or SdkHabitsPreview.unavailable("")
         self._renewal_day = renewal_day
         self._renewal_time = renewal_time
-        if github is not None:
-            if github.available:
-                self._github_period_start = github.period_start
-                self._github_day_labels = list(github.day_labels)
-                self._github_daily_commits = list(github.daily_commits)
-            else:
-                self._github_period_start = ""
-                self._github_day_labels = []
-                self._github_daily_commits = []
+        if github is not None and github.available and github.period_start:
+            self._github_commits_by_period[github.period_start] = (
+                list(github.day_labels),
+                list(github.daily_commits),
+            )
 
         (
             labels,
@@ -2787,15 +3016,19 @@ class ComposerHistoryPreview(QFrame):
             self._selected_year_index = None
 
         self._render_active_view()
+        self._notify_focused_period()
 
     def _on_view_mode(self, mode: str) -> None:
         if mode == self._mode:
             return
         if mode == "month" and self._mode == "year":
             self._selected_year_index = self._chart.selected_index()
+        if mode == "year" and self._mode == "month":
+            self._clear_focused_day()
         self._mode = mode
         self._view_toggle.set_mode(mode, animate=True)
         self._render_active_view()
+        self._notify_focused_period()
 
     def _render_active_view(self) -> None:
         if self._mode == "month":
@@ -2828,6 +3061,7 @@ class ComposerHistoryPreview(QFrame):
             return
         self._selected_year_index = idx
         self._render_month_view()
+        self._notify_focused_period()
 
     def _render_year_view(self) -> None:
         labels = self._year_labels
@@ -2937,12 +3171,14 @@ class ComposerHistoryPreview(QFrame):
             self._chart.select_index(self._selected_year_index)
         self._update_year_chip_values(self._chart.selected_index())
         self._sync_series_chip_states()
+        self._notify_focused_period()
 
     def _render_month_view(self) -> None:
         if not self._period_starts:
             self._content.hide()
             self._fallback.setText("No billing period selected")
             self._fallback.show()
+            self._month_day_count = 0
             self._sync_month_nav()
             return
 
@@ -2981,14 +3217,17 @@ class ComposerHistoryPreview(QFrame):
                 chip.hide()
             for chip in self._month_chips:
                 chip.hide()
+            self._sync_chips_scroll_width()
             label = self._year_labels[idx] if idx < len(self._year_labels) else period_start
             footer = f"{label} · {daily.error_message or 'No daily data'}"
             self._chart.set_data([], [], caption=footer)
             self._daily = []
             self._cumulative = []
             self._commits = []
+            self._month_day_count = 0
             self._month_period_start = period_start
             self._sync_month_nav()
+            self._notify_focused_period()
             return
 
         self._fallback.hide()
@@ -2997,6 +3236,7 @@ class ComposerHistoryPreview(QFrame):
         self._daily = list(daily.daily_tokens)
         self._cumulative = list(daily.cumulative_tokens)
         day_labels = list(daily.days)
+        self._month_day_count = len(day_labels)
         commits = self._commits_aligned_to_days(day_labels)
         if commits is not None:
             # Match token series: no commit dots on future (None) days.
@@ -3046,23 +3286,30 @@ class ComposerHistoryPreview(QFrame):
             )
 
         self._chart.set_data(day_labels, series, caption=footer)
-        self._update_month_chip_values(self._chart.selected_index())
+        selected = self._chart.selected_index()
+        self._update_month_chip_values(selected)
         self._sync_series_chip_states()
+        self._notify_focused_period()
+        self._notify_focused_day(selected)
 
     def _on_point_selected(self, index: int | None) -> None:
         if self._mode == "month":
             self._update_month_chip_values(index)
+            self._notify_focused_day(index)
             return
         self._selected_year_index = index
         self._update_year_chip_values(index)
+        self._notify_focused_period()
 
     def clear_period_selection(self) -> None:
         self._chart.clear_selection()
         if self._mode == "month":
             self._update_month_chip_values(None)
+            self._notify_focused_day(None)
         else:
             self._selected_year_index = None
             self._update_year_chip_values(None)
+            self._notify_focused_period()
 
     def _update_year_chip_values(self, index: int | None) -> None:
         """Show only chips with values for the focused period (selected or latest)."""
@@ -3174,7 +3421,7 @@ class ComposerHistoryPreview(QFrame):
                 text=f"{grok:.0f}% Grok" if grok is not None else "",
             )
 
-        self._chips_host.updateGeometry()
+        self._sync_chips_scroll_width()
         self._sync_series_chip_states()
 
     def _update_month_chip_values(self, index: int | None) -> None:
@@ -3203,7 +3450,7 @@ class ComposerHistoryPreview(QFrame):
             self._chip_commits.setText(
                 f"{n} commit" if n == 1 else f"{n} commits"
             )
-        self._chips_host.updateGeometry()
+        self._sync_chips_scroll_width()
 
     def _on_series_chip_toggled(self, series_name: str) -> None:
         visible = self._chart.toggle_series(series_name)
@@ -3769,6 +4016,31 @@ class GithubProjectCard(QFrame):
 
 # How many project cards fit in the GitHub list viewport before scrolling.
 _GITHUB_CARDS_VIEWPORT = 3
+# Natural GithubProjectCard height (org + name + metrics, 9px vertical padding).
+# Must match a real card — a taller guess makes the empty/loading viewport jump.
+_GITHUB_CARD_PLACEHOLDER_H = 54
+
+
+def _probe_github_card_height() -> int:
+    """Measure one off-screen project card so empty/loading match a full row."""
+    probe = GithubProjectCard(
+        GithubProjectRow(
+            name="repo",
+            full_name="owner/repo",
+            commit_count=0,
+            pr_count=0,
+            additions=0,
+            deletions=0,
+            branch_preference=BRANCH_PREF_MAIN,
+        )
+    )
+    probe.ensurePolished()
+    probe.adjustSize()
+    h = max(probe.sizeHint().height(), probe.minimumSizeHint().height())
+    probe.deleteLater()
+    if h <= 0:
+        return _GITHUB_CARD_PLACEHOLDER_H
+    return min(h, _GITHUB_CARD_PLACEHOLDER_H * 2)
 
 
 class GithubSummaryPreview(QFrame):
@@ -3788,6 +4060,8 @@ class GithubSummaryPreview(QFrame):
             }
             """
         )
+        # Slot height locked to a real 3-card row (probe once; refresh when cards appear).
+        self._card_slot_h = _probe_github_card_height()
 
         self._title = QLabel("GitHub activity")
         title_font = QFont()
@@ -3846,9 +4120,12 @@ class GithubSummaryPreview(QFrame):
         self._cards_layout = QVBoxLayout(self._cards_host)
         self._cards_layout.setContentsMargins(0, 0, 0, 0)
         self._cards_layout.setSpacing(8)
+        # Keep cards packed at the top — never distribute extra scroll-area space.
+        self._cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self._cards_scroll_needed = False
         self._pointer_inside = False
+        self._reserved_cards_h = 0
         self._cards_scroll = QScrollArea()
         self._cards_scroll.setObjectName("githubCardsScroll")
         self._cards_scroll.setWidgetResizable(True)
@@ -3863,6 +4140,9 @@ class GithubSummaryPreview(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._cards_scroll.setWidget(self._cards_host)
+        # Start at a full 3-card viewport so the panel never boots collapsed.
+        self._reserved_cards_h = self._viewport_height_for_card(self._card_slot_h)
+        self._cards_scroll.setFixedHeight(self._reserved_cards_h)
         self._apply_cards_scroll_chrome()
 
         self._fallback = QLabel("Loading GitHub…")
@@ -3956,28 +4236,43 @@ class GithubSummaryPreview(QFrame):
             if w is not None:
                 w.deleteLater()
 
-    def _sync_cards_viewport(self, *, relayout_popup: bool = False) -> None:
-        """Fit the scroll viewport to up to three project cards; scroll the rest."""
+    def _viewport_height_for_card(self, card_h: int) -> int:
+        """Always reserve room for ``_GITHUB_CARDS_VIEWPORT`` project rows."""
         spacing = self._cards_layout.spacing()
-        heights: list[int] = []
+        n = _GITHUB_CARDS_VIEWPORT
+        return n * max(1, card_h) + max(0, n - 1) * spacing
+
+    def _measure_project_card_height(self) -> int:
+        """Natural project-card height from size hints (never the stretched paint height)."""
+        card_h = 0
         for i in range(self._cards_layout.count()):
             item = self._cards_layout.itemAt(i)
             w = item.widget() if item is not None else None
-            if w is None:
+            if not isinstance(w, GithubProjectCard):
                 continue
             w.ensurePolished()
+            # Do not use w.height() — inside a tall scroll host that value is
+            # already stretched and would feed back into an ever-growing viewport.
             h = max(w.sizeHint().height(), w.minimumSizeHint().height())
-            if h > 0:
-                heights.append(h)
-        if not heights:
-            self._cards_scroll.setFixedHeight(0)
-            self._cards_scroll_needed = False
-        else:
-            card_h = max(heights)
-            visible = min(len(heights), _GITHUB_CARDS_VIEWPORT)
-            viewport_h = visible * card_h + max(0, visible - 1) * spacing
-            self._cards_scroll.setFixedHeight(viewport_h)
-            self._cards_scroll_needed = len(heights) > _GITHUB_CARDS_VIEWPORT
+            if h > card_h:
+                card_h = h
+        if card_h <= 0:
+            # Keep the last known real slot height so empty/loading don't jump.
+            return self._card_slot_h or _GITHUB_CARD_PLACEHOLDER_H
+        # Guard against a pathological sizeHint blowing up the 3-slot viewport.
+        card_h = min(card_h, _GITHUB_CARD_PLACEHOLDER_H * 2)
+        self._card_slot_h = card_h
+        return card_h
+
+    def _apply_fixed_cards_viewport(
+        self, *, card_count: int = 0, relayout_popup: bool = False
+    ) -> None:
+        """Lock the scroll area to three card slots (scroll when there are more)."""
+        card_h = self._measure_project_card_height()
+        viewport_h = self._viewport_height_for_card(card_h)
+        self._reserved_cards_h = viewport_h
+        self._cards_scroll.setFixedHeight(viewport_h)
+        self._cards_scroll_needed = card_count > _GITHUB_CARDS_VIEWPORT
         self._apply_cards_scroll_chrome()
         if relayout_popup:
             host = self.parentWidget()
@@ -3986,6 +4281,48 @@ class GithubSummaryPreview(QFrame):
                     host.adjustSize()
                     break
                 host = host.parentWidget()
+
+    def _sync_cards_viewport(self, *, relayout_popup: bool = False) -> None:
+        """Keep a fixed 3-card viewport; scroll when there are more projects."""
+        card_count = 0
+        for i in range(self._cards_layout.count()):
+            item = self._cards_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if isinstance(w, GithubProjectCard):
+                card_count += 1
+        self._apply_fixed_cards_viewport(
+            card_count=card_count, relayout_popup=relayout_popup
+        )
+
+    def show_collecting(self, *, period_label: str = "") -> None:
+        """Show a loader while commits are collected, keeping the 3-card height."""
+        label = (period_label or "").strip()
+        self._window.setText(label)
+        message = (
+            f"Collecting commits for {label}…"
+            if label
+            else "Collecting commits for this billing period…"
+        )
+        self._clear_cards()
+        self._fallback.hide()
+        self._content.show()
+
+        placeholder = QLabel(message)
+        ph_font = QFont()
+        ph_font.setPointSize(9)
+        placeholder.setFont(ph_font)
+        placeholder.setWordWrap(True)
+        placeholder.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        placeholder.setStyleSheet(
+            "color: #7E8694; background: transparent; border: none;"
+        )
+        placeholder.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._cards_layout.addWidget(placeholder)
+        self._apply_fixed_cards_viewport(card_count=0)
 
     def apply_preview(self, preview: GithubHabitsPreview) -> None:
         self._clear_cards()
@@ -4002,8 +4339,17 @@ class GithubSummaryPreview(QFrame):
         login = f" · @{preview.login}" if preview.login else ""
         self._window.setText(f"{period}{login}")
 
-        self._chip_commits.setText(f"{preview.total_commits} commits")
-        self._chip_prs.setText(f"{preview.total_prs} PRs")
+        # Day drill-down labels are short ("Oct 20"); period labels contain an en-dash.
+        day_scoped = bool(preview.period_label) and "–" not in preview.period_label
+
+        self._chip_commits.setText(
+            f"{preview.total_commits} commit"
+            if preview.total_commits == 1
+            else f"{preview.total_commits} commits"
+        )
+        self._chip_prs.setVisible(not day_scoped)
+        if not day_scoped:
+            self._chip_prs.setText(f"{preview.total_prs} PRs")
         self._chip_added.setText(
             _format_signed_lines(preview.total_additions, positive=True)
         )
@@ -4012,7 +4358,12 @@ class GithubSummaryPreview(QFrame):
         )
 
         if not preview.projects:
-            empty = QLabel("No authored commits or PRs in this billing period")
+            empty_text = (
+                f"No authored commits on {preview.period_label}"
+                if day_scoped
+                else "No authored commits or PRs in this billing period"
+            )
+            empty = QLabel(empty_text)
             empty_font = QFont()
             empty_font.setPointSize(9)
             empty.setFont(empty_font)
@@ -4352,6 +4703,40 @@ class _HabitsLoadWorker(QThread):
             self.finished_err.emit(str(exc))
 
 
+class _GithubPeriodLoadWorker(QThread):
+    """Collect GitHub activity for one billing period (cache miss / nav)."""
+
+    finished_ok = pyqtSignal(object)
+    finished_err = pyqtSignal(str)
+
+    def __init__(
+        self,
+        *,
+        renewal_day: int,
+        renewal_time: time_of_day | None,
+        period_start: str,
+        use_cache: bool = True,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._renewal_day = renewal_day
+        self._renewal_time = renewal_time
+        self._period_start = period_start
+        self._use_cache = use_cache
+
+    def run(self) -> None:
+        try:
+            github = collect_github_habits_preview(
+                renewal_day=self._renewal_day,
+                renewal_time=self._renewal_time,
+                period_start=self._period_start,
+                use_cache=self._use_cache,
+            )
+            self.finished_ok.emit(github)
+        except Exception as exc:  # noqa: BLE001 — surfaced to popup
+            self.finished_err.emit(str(exc))
+
+
 def _renewal_boundary_key(
     renewal_day: int, renewal_time: time_of_day | None
 ) -> tuple[int, str]:
@@ -4380,6 +4765,26 @@ class SpendPopup(QFrame):
         self._habits_pending: tuple[int, time_of_day | None, bool] | None = None
         self._habits_renewal_day = 19
         self._habits_renewal_time: time_of_day | None = None
+        self._github_by_period: dict[str, GithubHabitsPreview] = {}
+        self._focused_github_period = ""
+        self._focused_github_day: str | None = None
+        self._github_period_worker: _GithubPeriodLoadWorker | None = None
+        self._github_period_gen = 0
+        self._github_period_pending: (
+            tuple[str, int, time_of_day | None, bool] | None
+        ) = None
+        self._github_period_running: str | None = None
+        # Debounce + once-per-period guards so graph clicking cannot spam ``gh``.
+        self._github_fetch_debounce_ms = 450
+        self._github_rate_limit_backoff_s = 10 * 60
+        self._github_fetch_started: set[str] = set()
+        self._github_backoff_until: dict[str, float] = {}
+        self._github_sync_request: (
+            tuple[str, int, time_of_day | None, bool] | None
+        ) = None
+        self._github_sync_timer = QTimer(self)
+        self._github_sync_timer.setSingleShot(True)
+        self._github_sync_timer.timeout.connect(self._flush_github_period_sync)
         self._dismiss_armed = False
         self._keep_open = False
         self._nested_ui_depth = 0
@@ -4466,6 +4871,12 @@ class SpendPopup(QFrame):
         self.browser_help = BrowserHelpBanner()
         self.habits = AgentHabitsPreview()
         self.composer_history = ComposerHistoryPreview()
+        self.composer_history.focused_period_changed.connect(
+            self._on_history_period_focused
+        )
+        self.composer_history.focused_day_changed.connect(
+            self._on_history_day_focused
+        )
         self.github_summary = GithubSummaryPreview()
         self.github_summary.branch_preference_changed.connect(
             self._on_github_branch_preference_changed
@@ -4559,10 +4970,336 @@ class SpendPopup(QFrame):
         elif github is not None and github.available:
             self.composer_history.apply_github_commits(github)
         if github is not None and github.available:
-            self.github_summary.apply_preview(github)
+            self._remember_github_preview(github)
+            # Focused-period signal from apply_preview may already have painted.
+            if self._focused_github_period:
+                self._paint_github_for_focus()
+            else:
+                self.github_summary.apply_preview(github)
             painted = True
         if painted:
             self.adjustSize()
+
+    def _remember_github_preview(self, preview: GithubHabitsPreview) -> None:
+        if not preview.available or not preview.period_start:
+            return
+        self._github_by_period[preview.period_start] = preview
+        self.composer_history.apply_github_commits(preview)
+
+    def _github_preview_for(self, period_start: str) -> GithubHabitsPreview | None:
+        if not period_start:
+            return None
+        cached = self._github_by_period.get(period_start)
+        if cached is not None and cached.available:
+            return cached
+        peeked = peek_cached_github_habits_preview(period_start=period_start)
+        if peeked is not None and peeked.available:
+            self._github_by_period[period_start] = peeked
+            self.composer_history.apply_github_commits(peeked)
+            return peeked
+        return None
+
+    def _on_history_period_focused(
+        self,
+        period_start: str,
+        renewal_day: int,
+        renewal_time: object,
+    ) -> None:
+        """Keep GitHub projects/commits aligned with the chart's focused month."""
+        typed_time = renewal_time if isinstance(renewal_time, time_of_day) else None
+        # Month change clears any day drill-down from the history chart.
+        self._focused_github_day = None
+        self._sync_github_for_period(
+            period_start,
+            renewal_day=renewal_day,
+            renewal_time=typed_time,
+        )
+
+    def _on_history_day_focused(self, day: object) -> None:
+        """Filter GitHub projects to the selected Month-view calendar day."""
+        self._focused_github_day = (
+            day.strip() if isinstance(day, str) and day.strip() else None
+        )
+        # Day drill-down is local when day_stats exist; never spam gh per click.
+        self._paint_github_for_focus()
+
+    @staticmethod
+    def _github_message_looks_rate_limited(message: str) -> bool:
+        lower = (message or "").lower()
+        return (
+            "rate limit" in lower
+            or "ratelimit" in lower
+            or "secondary rate" in lower
+            or ("403" in lower and "rate" in lower)
+            or "http 429" in lower
+            or " status 429" in lower
+            or lower.strip().startswith("429")
+        )
+
+    def _github_in_backoff(self, period_start: str) -> bool:
+        until = self._github_backoff_until.get(period_start)
+        if until is None:
+            return False
+        if monotonic() >= until:
+            self._github_backoff_until.pop(period_start, None)
+            return False
+        return True
+
+    def _paint_github_for_focus(self) -> None:
+        """Paint the GitHub panel for the focused period, optionally day-filtered."""
+        period = self._focused_github_period
+        if not period:
+            return
+        cached = self._github_preview_for(period)
+        if cached is None:
+            return
+        day = self._focused_github_day
+        if day and cached.has_day_stats():
+            self.github_summary.apply_preview(github_preview_for_day(cached, day))
+        else:
+            # Show period totals while a one-shot day-stats upgrade may be pending.
+            self.github_summary.apply_preview(cached)
+            if day and not cached.has_day_stats():
+                self._request_github_day_stats_upgrade(period)
+        self.adjustSize()
+
+    def _request_github_day_stats_upgrade(self, period_start: str) -> None:
+        """Fetch day breakdowns once for a period (debounced; never per-click)."""
+        start = (period_start or "").strip()
+        if (
+            not start
+            or start in self._github_fetch_started
+            or self._github_in_backoff(start)
+        ):
+            return
+        meta = self.composer_history.focused_period_meta()
+        if meta is None or meta[0] != start:
+            return
+        _, renewal_day, renewal_time = meta
+        self._github_sync_request = (start, renewal_day, renewal_time, True)
+        self._github_sync_timer.start(self._github_fetch_debounce_ms)
+
+    def _sync_github_for_period(
+        self,
+        period_start: str,
+        *,
+        renewal_day: int,
+        renewal_time: time_of_day | None,
+        force: bool = False,
+    ) -> None:
+        """Paint from cache immediately; debounce any ``gh`` collect for misses."""
+        start = (period_start or "").strip()
+        if not start:
+            return
+        self._focused_github_period = start
+
+        cached = self._github_preview_for(start)
+        if cached is not None and not force:
+            self._paint_github_for_focus()
+            return
+
+        if not force and start in self._github_fetch_started:
+            # Already fetched / in flight this session — do not re-hit gh on clicks.
+            if cached is None and self._github_in_backoff(start):
+                self.github_summary.apply_preview(
+                    GithubHabitsPreview.unavailable(
+                        "GitHub rate limited — try again in a few minutes"
+                    )
+                )
+                self.adjustSize()
+            return
+
+        if not force and self._github_in_backoff(start):
+            self.github_summary.apply_preview(
+                GithubHabitsPreview.unavailable(
+                    "GitHub rate limited — try again in a few minutes"
+                )
+            )
+            self.adjustSize()
+            return
+
+        if cached is None:
+            try:
+                label = billing_period_label(
+                    date.fromisoformat(start),
+                    renewal_day=renewal_day,
+                    renewal_time=renewal_time,
+                )
+            except ValueError:
+                label = start
+            collect_label = label
+            day = self._focused_github_day
+            if day:
+                try:
+                    collect_label = billing_short_period_label(
+                        date.fromisoformat(day)
+                    )
+                except ValueError:
+                    collect_label = day
+            self.github_summary.show_collecting(period_label=collect_label)
+            self.adjustSize()
+
+        # Debounce: rapid graph clicks only keep the latest period request.
+        self._github_sync_request = (start, renewal_day, renewal_time, force)
+        self._github_sync_timer.start(self._github_fetch_debounce_ms)
+
+    def _flush_github_period_sync(self) -> None:
+        req = self._github_sync_request
+        self._github_sync_request = None
+        if req is None:
+            return
+        period_start, renewal_day, renewal_time, force = req
+        if period_start != self._focused_github_period:
+            return
+        if not force:
+            cached = self._github_preview_for(period_start)
+            if cached is not None and (
+                self._focused_github_day is None or cached.has_day_stats()
+            ):
+                self._paint_github_for_focus()
+                return
+            if period_start in self._github_fetch_started:
+                return
+            if self._github_in_backoff(period_start):
+                return
+        self._start_github_period_worker(
+            period_start=period_start,
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+            use_cache=not force,
+        )
+
+    def _start_github_period_worker(
+        self,
+        *,
+        period_start: str,
+        renewal_day: int,
+        renewal_time: time_of_day | None,
+        use_cache: bool,
+    ) -> None:
+        worker = self._github_period_worker
+        if worker is not None and worker.isRunning():
+            if period_start == self._github_period_running and use_cache:
+                return
+            # Only keep the latest pending period — drop the rest.
+            self._github_period_pending = (
+                period_start,
+                renewal_day,
+                renewal_time,
+                not use_cache,
+            )
+            return
+
+        self._github_fetch_started.add(period_start)
+        self._github_period_gen += 1
+        gen = self._github_period_gen
+        self._github_period_running = period_start
+        self._github_period_pending = None
+        self._github_period_worker = None
+
+        worker = _GithubPeriodLoadWorker(
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+            period_start=period_start,
+            use_cache=use_cache,
+            parent=self,
+        )
+        worker.finished_ok.connect(
+            lambda github, g=gen, ps=period_start: self._on_github_period_loaded(
+                g, ps, github
+            )
+        )
+        worker.finished_err.connect(
+            lambda message, g=gen, ps=period_start: self._on_github_period_failed(
+                g, ps, message
+            )
+        )
+        worker.finished.connect(
+            lambda w=worker: self._on_github_period_worker_finished(w)
+        )
+        self._github_period_worker = worker
+        worker.start()
+
+    def _on_github_period_worker_finished(
+        self, worker: _GithubPeriodLoadWorker
+    ) -> None:
+        if self._github_period_worker is worker:
+            self._github_period_worker = None
+            self._github_period_running = None
+        worker.deleteLater()
+        pending = self._github_period_pending
+        if pending is None:
+            return
+        period_start, renewal_day, renewal_time, force = pending
+        self._github_period_pending = None
+        # Only continue for the period the user still has focused.
+        if period_start != self._focused_github_period:
+            focused = self._focused_github_period
+            if (
+                focused
+                and self._github_preview_for(focused) is None
+                and focused not in self._github_fetch_started
+                and not self._github_in_backoff(focused)
+            ):
+                meta = self.composer_history.focused_period_meta()
+                if meta is not None and meta[0] == focused:
+                    self._start_github_period_worker(
+                        period_start=focused,
+                        renewal_day=meta[1],
+                        renewal_time=meta[2],
+                        use_cache=True,
+                    )
+            return
+        if (
+            not force
+            and self._github_preview_for(period_start) is not None
+        ):
+            self._paint_github_for_focus()
+            return
+        if not force and period_start in self._github_fetch_started:
+            # A prior attempt already ran; do not loop.
+            return
+        self._start_github_period_worker(
+            period_start=period_start,
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+            use_cache=not force,
+        )
+
+    def _on_github_period_loaded(
+        self, gen: int, period_start: str, github: object
+    ) -> None:
+        if gen != self._github_period_gen:
+            return
+        assert isinstance(github, GithubHabitsPreview)
+        if github.available:
+            self._remember_github_preview(github)
+            self._github_backoff_until.pop(period_start, None)
+        elif self._github_message_looks_rate_limited(github.error_message):
+            self._github_backoff_until[period_start] = (
+                monotonic() + self._github_rate_limit_backoff_s
+            )
+        if period_start != self._focused_github_period:
+            return
+        if github.available:
+            self._paint_github_for_focus()
+        else:
+            self.github_summary.apply_preview(github)
+            self.adjustSize()
+
+    def _on_github_period_failed(
+        self, gen: int, period_start: str, message: str
+    ) -> None:
+        if gen != self._github_period_gen:
+            return
+        if self._github_message_looks_rate_limited(message):
+            self._github_backoff_until[period_start] = (
+                monotonic() + self._github_rate_limit_backoff_s
+            )
+        if period_start != self._focused_github_period:
+            return
+        self.github_summary.apply_preview(GithubHabitsPreview.unavailable(message))
+        self.adjustSize()
 
     def _place_pin_button(self) -> None:
         inset = 12 + 6
@@ -4588,6 +5325,18 @@ class SpendPopup(QFrame):
         """Reload stats after the row toggle persists a main/dev choice."""
         short = full_name.split("/")[-1] if "/" in full_name else full_name
         self.set_status(f"Counting {short} on {preference}…")
+        self._github_by_period.clear()
+        self._github_fetch_started.clear()
+        self._github_backoff_until.clear()
+        meta = self.composer_history.focused_period_meta()
+        if meta is not None:
+            period_start, renewal_day, renewal_time = meta
+            self._sync_github_for_period(
+                period_start,
+                renewal_day=renewal_day,
+                renewal_time=renewal_time,
+                force=True,
+            )
         self.refresh_habits(force=True, status_when_done="")
 
     def stop_habits_worker(self, *, timeout_ms: int = 8_000) -> None:
@@ -4599,6 +5348,24 @@ class SpendPopup(QFrame):
         """
         self._habits_pending = None
         self._habits_gen += 1
+        self._github_period_pending = None
+        self._github_sync_request = None
+        self._github_sync_timer.stop()
+        self._github_period_gen += 1
+        github_worker = self._github_period_worker
+        self._github_period_worker = None
+        self._github_period_running = None
+        if github_worker is not None:
+            stop_qthread(
+                github_worker,
+                wait_ms=timeout_ms,
+                label="github period worker",
+                signals=(
+                    github_worker.finished_ok,
+                    github_worker.finished_err,
+                    github_worker.finished,
+                ),
+            )
         worker = self._habits_worker
         self._habits_worker = None
         if worker is None:
@@ -4760,6 +5527,9 @@ class SpendPopup(QFrame):
             self.habits.apply_preview(sdk)
         else:
             self._habits_panel.hide()
+        # Incremental store: auto-refresh merges the live period into disk+memory.
+        if github.available:
+            self._remember_github_preview(github)
         self.composer_history.apply_preview(
             vscdb,
             usage,
@@ -4768,7 +5538,15 @@ class SpendPopup(QFrame):
             renewal_day=self._habits_renewal_day,
             renewal_time=self._habits_renewal_time,
         )
-        self.github_summary.apply_preview(github)
+        # apply_preview notifies focus → syncs GitHub panel for that month.
+        # Respect day drill-down; never clobber another month with live-period data.
+        focused = self._focused_github_period
+        if focused:
+            self._paint_github_for_focus()
+        elif github.available:
+            self.github_summary.apply_preview(github)
+        elif not github.available and not focused:
+            self.github_summary.apply_preview(github)
         # A queued follow-up rebuild (boundary change / force) should keep the
         # status line until that load finishes.
         if self._habits_pending is not None:

@@ -13,6 +13,7 @@ from cursor_spend_tray.github_stats import (
     BRANCH_PREF_DEV,
     BRANCH_PREF_MAIN,
     CACHE_VERSION,
+    GithubDayStat,
     GithubHabitsPreview,
     GithubProjectRow,
     _CACHE_MAX_AGE_S,
@@ -24,6 +25,7 @@ from cursor_spend_tray.github_stats import (
     _save_cache,
     collect_github_habits_preview,
     default_branch_preference,
+    github_preview_for_day,
     normalize_branch_preference,
     peek_cached_github_habits_preview,
     resolve_track_branch,
@@ -126,7 +128,7 @@ class CollectGithubHabitsPreviewTests(unittest.TestCase):
             ),
             patch(
                 "cursor_spend_tray.github_stats._branch_period_activity",
-                return_value=(7, 1004, 261, {date(2026, 10, 20): 7}),
+                return_value=(7, 1004, 261, {date(2026, 10, 20): (7, 1004, 261)}),
             ) as activity,
             patch("cursor_spend_tray.github_stats._save_cache"),
             patch(
@@ -210,7 +212,10 @@ class GithubHabitsCacheTtlTests(unittest.TestCase):
             # Simulate a pre-TTL cache file with no stamp.
             path = self.root / "github-habits-cache.json"
             payload = json.loads(path.read_text(encoding="utf-8"))
-            payload.pop("fetched_at", None)
+            periods = payload.get("periods") or {}
+            entry = periods.get(self.preview.period_start)
+            if isinstance(entry, dict):
+                entry.pop("fetched_at", None)
             path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_fresh_cache_is_a_hit(self) -> None:
@@ -299,7 +304,7 @@ class GithubHabitsCacheTtlTests(unittest.TestCase):
             ),
             patch(
                 "cursor_spend_tray.github_stats._branch_period_activity",
-                return_value=(11, 50, 10, {date(2026, 11, 1): 11}),
+                return_value=(11, 50, 10, {date(2026, 11, 1): (11, 50, 10)}),
             ) as activity,
         ):
             preview = collect_github_habits_preview(
@@ -313,7 +318,172 @@ class GithubHabitsCacheTtlTests(unittest.TestCase):
         self.assertFalse(preview.cache_hit)
         self.assertEqual(preview.total_commits, 11)
         self.assertEqual(sum(preview.daily_commits), 11.0)
+        self.assertTrue(preview.has_day_stats())
+        self.assertEqual(preview.projects[0].day_stats[0].day, "2026-11-01")
         activity.assert_called_once()
+
+    def test_saving_one_period_preserves_siblings(self) -> None:
+        self._write_cache(fetched_at=self.fetched_at)
+        older = GithubHabitsPreview(
+            available=True,
+            login="dev",
+            period_label="Sep 19 – Oct 18",
+            period_start=date(2026, 9, 19).isoformat(),
+            period_end=date(2026, 10, 18).isoformat(),
+            projects=(),
+            total_commits=2,
+            total_prs=0,
+            total_additions=4,
+            total_deletions=1,
+        )
+        _save_cache(
+            older,
+            renewal_day=19,
+            renewal_time=time(20, 0),
+            prefs_fingerprint=self.prefs_fp,
+            fetched_at=self.fetched_at,
+        )
+        peeked_new = peek_cached_github_habits_preview(
+            period_start=date(2026, 10, 19)
+        )
+        peeked_old = peek_cached_github_habits_preview(
+            period_start=date(2026, 9, 19)
+        )
+        self.assertIsNotNone(peeked_new)
+        self.assertIsNotNone(peeked_old)
+        assert peeked_new is not None and peeked_old is not None
+        self.assertEqual(peeked_new.total_commits, 6)
+        self.assertEqual(peeked_old.total_commits, 2)
+
+    def test_historical_period_cache_ignores_ttl(self) -> None:
+        older = GithubHabitsPreview(
+            available=True,
+            login="dev",
+            period_label="Sep 19 – Oct 18",
+            period_start=date(2026, 9, 19).isoformat(),
+            period_end=date(2026, 10, 18).isoformat(),
+            projects=(
+                GithubProjectRow(
+                    name="legacy",
+                    full_name="acme/legacy",
+                    commit_count=3,
+                    day_stats=(
+                        GithubDayStat(
+                            day="2026-09-20",
+                            commit_count=3,
+                            additions=0,
+                            deletions=0,
+                        ),
+                    ),
+                ),
+            ),
+            total_commits=3,
+            total_prs=0,
+            total_additions=0,
+            total_deletions=0,
+        )
+        _save_cache(
+            older,
+            renewal_day=19,
+            renewal_time=time(20, 0),
+            prefs_fingerprint=self.prefs_fp,
+            fetched_at=self.fetched_at,
+        )
+        with (
+            patch(
+                "cursor_spend_tray.github_stats.time.time",
+                return_value=self.fetched_at + _CACHE_MAX_AGE_S + 5,
+            ),
+            patch(
+                "cursor_spend_tray.github_stats._viewer_login",
+            ) as viewer,
+        ):
+            preview = collect_github_habits_preview(
+                renewal_day=19,
+                renewal_time=time(20, 0),
+                use_cache=True,
+                now=datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc),
+                branch_prefs={},
+                period_start=date(2026, 9, 19),
+            )
+        self.assertTrue(preview.available)
+        self.assertTrue(preview.cache_hit)
+        self.assertEqual(preview.total_commits, 3)
+        viewer.assert_not_called()
+
+    def test_peek_by_period_start(self) -> None:
+        self._write_cache(fetched_at=self.fetched_at)
+        hit = peek_cached_github_habits_preview(period_start="2026-10-19")
+        miss = peek_cached_github_habits_preview(period_start="2026-01-19")
+        self.assertIsNotNone(hit)
+        self.assertIsNone(miss)
+
+
+class GithubPreviewForDayTests(unittest.TestCase):
+    def test_filters_projects_to_selected_day(self) -> None:
+        preview = GithubHabitsPreview(
+            available=True,
+            login="dev",
+            period_label="Oct 19 – Nov 18",
+            period_start="2026-10-19",
+            period_end="2026-11-18",
+            projects=(
+                GithubProjectRow(
+                    name="alpha",
+                    full_name="acme/alpha",
+                    commit_count=5,
+                    pr_count=1,
+                    additions=40,
+                    deletions=4,
+                    day_stats=(
+                        GithubDayStat(
+                            day="2026-10-20",
+                            commit_count=2,
+                            additions=10,
+                            deletions=1,
+                        ),
+                        GithubDayStat(
+                            day="2026-10-21",
+                            commit_count=3,
+                            additions=30,
+                            deletions=3,
+                        ),
+                    ),
+                ),
+                GithubProjectRow(
+                    name="beta",
+                    full_name="acme/beta",
+                    commit_count=1,
+                    pr_count=0,
+                    additions=5,
+                    deletions=0,
+                    day_stats=(
+                        GithubDayStat(
+                            day="2026-10-21",
+                            commit_count=1,
+                            additions=5,
+                            deletions=0,
+                        ),
+                    ),
+                ),
+            ),
+            total_commits=6,
+            total_prs=1,
+            total_additions=45,
+            total_deletions=4,
+        )
+        day = github_preview_for_day(preview, "2026-10-21")
+        self.assertTrue(day.available)
+        self.assertEqual(day.period_label, "Oct 21")
+        self.assertEqual(day.total_commits, 4)
+        self.assertEqual(day.total_prs, 0)
+        self.assertEqual(day.total_additions, 35)
+        self.assertEqual(day.total_deletions, 3)
+        self.assertEqual([p.name for p in day.projects], ["alpha", "beta"])
+        self.assertEqual(day.projects[0].commit_count, 3)
+        empty = github_preview_for_day(preview, "2026-10-22")
+        self.assertEqual(empty.total_commits, 0)
+        self.assertEqual(empty.projects, ())
 
 
 if __name__ == "__main__":

@@ -27,9 +27,10 @@ from .config import data_dir
 
 log = logging.getLogger(__name__)
 
-CACHE_VERSION = 7
-# Soft TTL for collect(..., use_cache=True). Peek hydrate ignores this so the
-# UI can paint instantly; the background worker re-queries gh once the entry ages.
+CACHE_VERSION = 9
+# Soft TTL for the *current* billing period on collect(..., use_cache=True).
+# Peek hydrate ignores this so the UI can paint instantly; historical periods
+# stay cached until prefs / renewal fingerprint change (or the file is cleared).
 _CACHE_MAX_AGE_S = 5 * 60
 _GH_TIMEOUT_S = 90
 _COMMIT_PAGE_SIZE = 100
@@ -69,6 +70,16 @@ _BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]+")
 
 
 @dataclass(frozen=True)
+class GithubDayStat:
+    """Per-calendar-day authored commit totals for one repository."""
+
+    day: str  # ISO date
+    commit_count: int = 0
+    additions: int = 0
+    deletions: int = 0
+
+
+@dataclass(frozen=True)
 class GithubProjectRow:
     """One repository's authored activity for the billing period."""
 
@@ -81,6 +92,8 @@ class GithubProjectRow:
     branch_preference: str = BRANCH_PREF_MAIN
     default_branch: str = "main"
     track_branch: str = "main"
+    # Sparse per-day commit breakdown (ISO day → totals) for month drill-down.
+    day_stats: tuple[GithubDayStat, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -106,6 +119,14 @@ class GithubHabitsPreview:
     @staticmethod
     def unavailable(message: str) -> GithubHabitsPreview:
         return GithubHabitsPreview(available=False, error_message=message)
+
+    def has_day_stats(self) -> bool:
+        """True when day drill-down data is present (or there is nothing to break down)."""
+        if not self.available:
+            return False
+        if self.total_commits <= 0:
+            return True
+        return any(p.day_stats for p in self.projects)
 
 
 def _cache_path() -> Path:
@@ -215,23 +236,80 @@ def _tuple_strs(raw: object) -> tuple[str, ...]:
     return tuple(str(item) for item in raw)
 
 
-def _preview_from_cache_payload(payload: dict) -> GithubHabitsPreview | None:
+def _day_stats_from_cache(raw: object) -> tuple[GithubDayStat, ...]:
+    if not isinstance(raw, list):
+        return ()
+    out: list[GithubDayStat] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        day = str(item.get("day") or "").strip()
+        if not day:
+            continue
+        try:
+            out.append(
+                GithubDayStat(
+                    day=day,
+                    commit_count=int(item.get("commit_count") or 0),
+                    additions=int(item.get("additions") or 0),
+                    deletions=int(item.get("deletions") or 0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
+def _project_from_cache_row(row: object) -> GithubProjectRow | None:
+    if not isinstance(row, dict):
+        return None
+    full_name = str(row.get("full_name") or "").strip()
+    name = str(row.get("name") or "").strip() or full_name
+    if not full_name and not name:
+        return None
     try:
-        projects = tuple(GithubProjectRow(**row) for row in payload.get("projects") or [])
+        return GithubProjectRow(
+            name=name,
+            full_name=full_name or name,
+            commit_count=int(row.get("commit_count") or 0),
+            pr_count=int(row.get("pr_count") or 0),
+            additions=int(row.get("additions") or 0),
+            deletions=int(row.get("deletions") or 0),
+            branch_preference=normalize_branch_preference(
+                row.get("branch_preference"),
+                default_branch=str(row.get("default_branch") or "main"),
+            ),
+            default_branch=str(row.get("default_branch") or "main"),
+            track_branch=str(row.get("track_branch") or "main"),
+            day_stats=_day_stats_from_cache(row.get("day_stats")),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _preview_from_period_entry(entry: dict) -> GithubHabitsPreview | None:
+    try:
+        projects = tuple(
+            p
+            for p in (
+                _project_from_cache_row(row) for row in entry.get("projects") or []
+            )
+            if p is not None
+        )
         return GithubHabitsPreview(
             available=True,
-            login=str(payload.get("login") or ""),
-            period_label=str(payload.get("period_label") or ""),
-            period_start=str(payload.get("period_start") or ""),
-            period_end=str(payload.get("period_end") or ""),
+            login=str(entry.get("login") or ""),
+            period_label=str(entry.get("period_label") or ""),
+            period_start=str(entry.get("period_start") or ""),
+            period_end=str(entry.get("period_end") or ""),
             projects=projects,
-            total_commits=int(payload.get("total_commits") or 0),
-            total_prs=int(payload.get("total_prs") or 0),
-            total_additions=int(payload.get("total_additions") or 0),
-            total_deletions=int(payload.get("total_deletions") or 0),
-            day_labels=_tuple_strs(payload.get("day_labels")),
-            daily_commits=_tuple_floats(payload.get("daily_commits")),
-            cumulative_commits=_tuple_floats(payload.get("cumulative_commits")),
+            total_commits=int(entry.get("total_commits") or 0),
+            total_prs=int(entry.get("total_prs") or 0),
+            total_additions=int(entry.get("total_additions") or 0),
+            total_deletions=int(entry.get("total_deletions") or 0),
+            day_labels=_tuple_strs(entry.get("day_labels")),
+            daily_commits=_tuple_floats(entry.get("daily_commits")),
+            cumulative_commits=_tuple_floats(entry.get("cumulative_commits")),
             cache_hit=True,
             elapsed_ms=0,
         )
@@ -239,25 +317,94 @@ def _preview_from_cache_payload(payload: dict) -> GithubHabitsPreview | None:
         return None
 
 
+def _legacy_v7_period_entry(payload: dict) -> dict | None:
+    """Lift a single-period v7 cache file into one ``periods`` map entry."""
+    start = str(payload.get("period_start") or "").strip()
+    if not start:
+        return None
+    return {
+        "renewal_day": payload.get("renewal_day"),
+        "renewal_time": payload.get("renewal_time"),
+        "fetched_at": payload.get("fetched_at"),
+        "login": payload.get("login"),
+        "period_label": payload.get("period_label"),
+        "period_start": start,
+        "period_end": payload.get("period_end"),
+        "total_commits": payload.get("total_commits"),
+        "total_prs": payload.get("total_prs"),
+        "total_additions": payload.get("total_additions"),
+        "total_deletions": payload.get("total_deletions"),
+        "day_labels": payload.get("day_labels"),
+        "daily_commits": payload.get("daily_commits"),
+        "cumulative_commits": payload.get("cumulative_commits"),
+        "projects": payload.get("projects"),
+    }
+
+
+def _normalize_cache_payload(raw: dict) -> dict | None:
+    """Return a v9 multi-period payload, migrating older single/multi-period files."""
+    version = raw.get("version")
+    if version == CACHE_VERSION:
+        periods = raw.get("periods")
+        if not isinstance(periods, dict):
+            return None
+        return raw
+    if version == 8:
+        periods = raw.get("periods")
+        if not isinstance(periods, dict):
+            return None
+        return {
+            "version": CACHE_VERSION,
+            "prefs_fingerprint": raw.get("prefs_fingerprint"),
+            "periods": periods,
+        }
+    if version == 7:
+        entry = _legacy_v7_period_entry(raw)
+        if entry is None:
+            return None
+        start = str(entry["period_start"])
+        return {
+            "version": CACHE_VERSION,
+            "prefs_fingerprint": raw.get("prefs_fingerprint"),
+            "periods": {start: entry},
+        }
+    return None
+
+
 def _read_cache_payload() -> dict | None:
     path = _cache_path()
     if not path.is_file():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
+    if not isinstance(raw, dict):
         return None
-    return payload
+    return _normalize_cache_payload(raw)
 
 
-def _cache_age_s(payload: dict, *, now: float | None = None) -> float | None:
+def _cache_age_s(entry: dict, *, now: float | None = None) -> float | None:
     """Seconds since ``fetched_at``, or ``None`` when the stamp is missing/invalid."""
-    fetched_at = payload.get("fetched_at")
+    fetched_at = entry.get("fetched_at")
     if not isinstance(fetched_at, (int, float)):
         return None
     return max(0.0, float(now if now is not None else time.time()) - float(fetched_at))
+
+
+def _period_entry_from_payload(
+    payload: dict, period_start: date | str
+) -> dict | None:
+    key = (
+        period_start
+        if isinstance(period_start, str)
+        else period_start.isoformat()
+    )
+    periods = payload.get("periods")
+    if not isinstance(periods, dict):
+        return None
+    entry = periods.get(key)
+    return entry if isinstance(entry, dict) else None
 
 
 def _load_cache(
@@ -266,33 +413,77 @@ def _load_cache(
     renewal_time: time_of_day | None,
     period_start: date,
     prefs_fingerprint: str,
-    max_age_s: float = _CACHE_MAX_AGE_S,
+    max_age_s: float | None = _CACHE_MAX_AGE_S,
     now: float | None = None,
 ) -> GithubHabitsPreview | None:
     payload = _read_cache_payload()
     if payload is None:
         return None
-    if payload.get("renewal_day") != renewal_day:
-        return None
-    if payload.get("renewal_time") != _renewal_time_key(renewal_time):
-        return None
-    if payload.get("period_start") != period_start.isoformat():
-        return None
     if payload.get("prefs_fingerprint") != prefs_fingerprint:
         return None
-    age = _cache_age_s(payload, now=now)
-    # Missing stamp (pre-TTL caches) or aged-out → miss so the worker revalidates.
-    if age is None or age > max_age_s:
+    entry = _period_entry_from_payload(payload, period_start)
+    if entry is None:
         return None
-    return _preview_from_cache_payload(payload)
+    if entry.get("renewal_day") != renewal_day:
+        return None
+    if entry.get("renewal_time") != _renewal_time_key(renewal_time):
+        return None
+    if max_age_s is not None:
+        age = _cache_age_s(entry, now=now)
+        # Missing stamp or aged-out → miss so the worker revalidates.
+        if age is None or age > max_age_s:
+            return None
+    return _preview_from_period_entry(entry)
 
 
-def peek_cached_github_habits_preview() -> GithubHabitsPreview | None:
-    """Last on-disk GitHub summary for instant UI hydrate (may be slightly stale)."""
+def peek_cached_github_habits_preview(
+    period_start: date | str | None = None,
+) -> GithubHabitsPreview | None:
+    """On-disk GitHub summary for instant UI hydrate (may be slightly stale).
+
+    When ``period_start`` is set, return that billing period only. Otherwise
+    return the chronologically latest cached period (startup hydrate).
+    """
     payload = _read_cache_payload()
     if payload is None:
         return None
-    return _preview_from_cache_payload(payload)
+    periods = payload.get("periods")
+    if not isinstance(periods, dict) or not periods:
+        return None
+    if period_start is not None:
+        entry = _period_entry_from_payload(payload, period_start)
+        return _preview_from_period_entry(entry) if entry is not None else None
+    keys = sorted(str(k) for k in periods.keys() if str(k).strip())
+    if not keys:
+        return None
+    entry = periods.get(keys[-1])
+    return _preview_from_period_entry(entry) if isinstance(entry, dict) else None
+
+
+def _period_cache_dict(
+    preview: GithubHabitsPreview,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None,
+    fetched_at: float,
+) -> dict:
+    return {
+        "renewal_day": renewal_day,
+        "renewal_time": _renewal_time_key(renewal_time),
+        "fetched_at": fetched_at,
+        "login": preview.login,
+        "period_label": preview.period_label,
+        "period_start": preview.period_start,
+        "period_end": preview.period_end,
+        "total_commits": preview.total_commits,
+        "total_prs": preview.total_prs,
+        "total_additions": preview.total_additions,
+        "total_deletions": preview.total_deletions,
+        "day_labels": list(preview.day_labels),
+        "daily_commits": list(preview.daily_commits),
+        "cumulative_commits": list(preview.cumulative_commits),
+        "projects": [asdict(p) for p in preview.projects],
+    }
 
 
 def _save_cache(
@@ -303,26 +494,33 @@ def _save_cache(
     prefs_fingerprint: str,
     fetched_at: float | None = None,
 ) -> None:
+    """Merge one period into the on-disk multi-period cache (keeps siblings)."""
+    if not preview.available or not preview.period_start:
+        return
     try:
         data_dir().mkdir(parents=True, exist_ok=True)
+        stamp = float(time.time() if fetched_at is None else fetched_at)
+        existing = _read_cache_payload()
+        periods: dict[str, Any] = {}
+        if (
+            existing is not None
+            and existing.get("prefs_fingerprint") == prefs_fingerprint
+        ):
+            raw_periods = existing.get("periods")
+            if isinstance(raw_periods, dict):
+                periods = {
+                    str(k): v for k, v in raw_periods.items() if isinstance(v, dict)
+                }
+        periods[preview.period_start] = _period_cache_dict(
+            preview,
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+            fetched_at=stamp,
+        )
         payload = {
             "version": CACHE_VERSION,
-            "renewal_day": renewal_day,
-            "renewal_time": _renewal_time_key(renewal_time),
             "prefs_fingerprint": prefs_fingerprint,
-            "fetched_at": float(time.time() if fetched_at is None else fetched_at),
-            "login": preview.login,
-            "period_label": preview.period_label,
-            "period_start": preview.period_start,
-            "period_end": preview.period_end,
-            "total_commits": preview.total_commits,
-            "total_prs": preview.total_prs,
-            "total_additions": preview.total_additions,
-            "total_deletions": preview.total_deletions,
-            "day_labels": list(preview.day_labels),
-            "daily_commits": list(preview.daily_commits),
-            "cumulative_commits": list(preview.cumulative_commits),
-            "projects": [asdict(p) for p in preview.projects],
+            "periods": periods,
         }
         _cache_path().write_text(json.dumps(payload), encoding="utf-8")
     except OSError as exc:
@@ -677,9 +875,10 @@ def _branch_period_activity(
     author: str,
     period_start: date,
     period_end: date,
-) -> tuple[int, int, int, dict[date, int]]:
-    """Return ``(commit_count, additions, deletions, commits_by_day)`` on branch.
+) -> tuple[int, int, int, dict[date, tuple[int, int, int]]]:
+    """Return ``(commit_count, additions, deletions, by_day)`` on branch.
 
+    ``by_day`` maps calendar day → ``(commits, additions, deletions)``.
     Sums each non-merge commit’s additions/deletions (no tree diff / compare).
     Missing branch → zeros.
     """
@@ -697,17 +896,25 @@ def _branch_period_activity(
     stats = _fetch_commit_stats(non_merge)
     additions = 0
     deletions = 0
-    for _, sha in non_merge:
+    by_day: dict[date, list[int]] = {}
+    for item in non_merge_items:
+        sha = str(item.get("sha") or "")
         add, dele = stats.get(f"{full_name}#{sha}", (0, 0))
         additions += add
         deletions += dele
-    by_day: dict[date, int] = {}
-    for item in non_merge_items:
         day = _commit_day(item)
         if day is None or day < period_start or day > period_end:
             continue
-        by_day[day] = by_day.get(day, 0) + 1
-    return len(non_merge), additions, deletions, by_day
+        bucket = by_day.setdefault(day, [0, 0, 0])
+        bucket[0] += 1
+        bucket[1] += add
+        bucket[2] += dele
+    return (
+        len(non_merge),
+        additions,
+        deletions,
+        {day: (vals[0], vals[1], vals[2]) for day, vals in by_day.items()},
+    )
 
 
 def _display_name(short: str, full: str, short_counts: dict[str, int]) -> str:
@@ -736,6 +943,21 @@ def _discover_repos(
     return repos
 
 
+def _day_stats_from_by_day(
+    by_day: dict[date, tuple[int, int, int]],
+) -> tuple[GithubDayStat, ...]:
+    return tuple(
+        GithubDayStat(
+            day=day.isoformat(),
+            commit_count=counts[0],
+            additions=counts[1],
+            deletions=counts[2],
+        )
+        for day, counts in sorted(by_day.items())
+        if counts[0] > 0
+    )
+
+
 def _project_from_branch(
     *,
     full_name: str,
@@ -746,7 +968,7 @@ def _project_from_branch(
     pr_count: int,
     period_start: date,
     period_end: date,
-) -> tuple[GithubProjectRow, dict[date, int]]:
+) -> tuple[GithubProjectRow, dict[date, tuple[int, int, int]]]:
     pref = normalize_branch_preference(preference, default_branch=default_branch)
     track = resolve_track_branch(pref, default_branch)
     commit_count, additions, deletions, by_day = _branch_period_activity(
@@ -767,9 +989,79 @@ def _project_from_branch(
             branch_preference=pref,
             default_branch=default_branch,
             track_branch=track,
+            day_stats=_day_stats_from_by_day(by_day),
         ),
         by_day,
     )
+
+
+def github_preview_for_day(
+    preview: GithubHabitsPreview,
+    day: date | str,
+) -> GithubHabitsPreview:
+    """Filter a period preview down to authored commits on one calendar day."""
+    if not preview.available:
+        return preview
+    if isinstance(day, date) and not isinstance(day, datetime):
+        day_iso = day.isoformat()
+    else:
+        day_iso = str(day).strip()
+    if not day_iso:
+        return preview
+    try:
+        label = short_period_label(date.fromisoformat(day_iso))
+    except ValueError:
+        label = day_iso
+
+    rows: list[GithubProjectRow] = []
+    for project in preview.projects:
+        stat = next((s for s in project.day_stats if s.day == day_iso), None)
+        if stat is None or stat.commit_count <= 0:
+            continue
+        rows.append(
+            GithubProjectRow(
+                name=project.name,
+                full_name=project.full_name,
+                commit_count=stat.commit_count,
+                pr_count=0,
+                additions=stat.additions,
+                deletions=stat.deletions,
+                branch_preference=project.branch_preference,
+                default_branch=project.default_branch,
+                track_branch=project.track_branch,
+                day_stats=(stat,),
+            )
+        )
+    rows.sort(
+        key=lambda r: (-r.commit_count, -r.additions, r.name.lower())
+    )
+    return GithubHabitsPreview(
+        available=True,
+        login=preview.login,
+        period_label=label,
+        period_start=preview.period_start,
+        period_end=preview.period_end,
+        projects=tuple(rows),
+        total_commits=sum(p.commit_count for p in rows),
+        total_prs=0,
+        total_additions=sum(p.additions for p in rows),
+        total_deletions=sum(p.deletions for p in rows),
+        day_labels=preview.day_labels,
+        daily_commits=preview.daily_commits,
+        cumulative_commits=preview.cumulative_commits,
+        cache_hit=preview.cache_hit,
+        elapsed_ms=preview.elapsed_ms,
+    )
+
+
+def _coerce_period_start(value: date | str) -> date:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"Invalid period start: {value}") from exc
 
 
 def collect_github_habits_preview(
@@ -779,11 +1071,27 @@ def collect_github_habits_preview(
     use_cache: bool = True,
     now: datetime | None = None,
     branch_prefs: dict[str, str] | None = None,
+    period_start: date | str | None = None,
 ) -> GithubHabitsPreview:
-    """Aggregate authored commits (per tracking branch) + PRs for the billing period."""
+    """Aggregate authored commits (per tracking branch) + PRs for a billing period.
+
+    ``period_start`` selects a historical Cursor billing window; omit it for the
+    period containing ``now``. Results merge into the multi-period on-disk cache.
+    """
     t0 = time.perf_counter()
     when = now or datetime.now().astimezone()
-    start = period_start_for(when, renewal_day=renewal_day, renewal_time=renewal_time)
+    today = when.astimezone().date()
+    current_start = period_start_for(
+        when, renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    try:
+        start = (
+            current_start
+            if period_start is None
+            else _coerce_period_start(period_start)
+        )
+    except ValueError as exc:
+        return GithubHabitsPreview.unavailable(str(exc))
     end = period_end_for(start, renewal_day=renewal_day, renewal_time=renewal_time)
     label = period_label(start, renewal_day=renewal_day, renewal_time=renewal_time)
     raw_prefs = (
@@ -798,14 +1106,20 @@ def collect_github_habits_preview(
         if k and "/" in k and v in BRANCH_PREFS
     }
     fingerprint = _prefs_fingerprint(prefs)
+    is_current_period = start == current_start
 
     if use_cache:
+        # Soft TTL only for the live period; historical months stay until prefs change.
         cached = _load_cache(
             renewal_day=renewal_day,
             renewal_time=renewal_time,
             period_start=start,
             prefs_fingerprint=fingerprint,
+            max_age_s=_CACHE_MAX_AGE_S if is_current_period else None,
         )
+        # Return whatever we have — even pre-day-stats entries — so graph clicks /
+        # habits polls do not re-hammer gh. Callers that need day_stats can pass
+        # use_cache=False once to upgrade a period.
         if cached is not None:
             return cached
 
@@ -836,7 +1150,7 @@ def collect_github_habits_preview(
                 period_end=end,
             )
             rows.append(row)
-            for day, count in by_day.items():
+            for day, (count, _add, _dele) in by_day.items():
                 commits_by_day[day] = commits_by_day.get(day, 0) + count
         short_counts: dict[str, int] = {}
         for row in rows:
@@ -852,6 +1166,7 @@ def collect_github_habits_preview(
                 branch_preference=row.branch_preference,
                 default_branch=row.default_branch,
                 track_branch=row.track_branch,
+                day_stats=row.day_stats,
             )
             for row in rows
         ]
@@ -862,7 +1177,7 @@ def collect_github_habits_preview(
             commits_by_day,
             period_start=start,
             period_end=end,
-            as_of=when.astimezone().date(),
+            as_of=today,
         )
     except RuntimeError as exc:
         return GithubHabitsPreview.unavailable(str(exc))
