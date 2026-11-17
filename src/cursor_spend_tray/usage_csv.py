@@ -23,17 +23,20 @@ from .billing import (
     period_end_for,
     period_label,
     period_ms_range,
+    period_range_label,
     period_start_for,
     renewal_instant,
     short_period_label,
 )
-from .config import data_dir
+from .config import UsageSnapshot, data_dir, renewal_from_usage_reset
 from .grok_weekly import average_weekly_peaks_for_period, load_grok_week_peaks
 
 log = logging.getLogger(__name__)
 
 EXPORT_URL = "https://cursor.com/api/dashboard/export-usage-events-csv"
-CACHE_VERSION = 2
+CACHE_VERSION = 3
+# Soft cap on year-axis points once legacy + current eras are concatenated.
+_YEAR_PERIOD_CAP = 14
 
 
 def _renewal_time_key(renewal_time: time_of_day | None) -> str:
@@ -56,6 +59,13 @@ class UsagePeriodBucket:
     cursor_models_pct: int | None = None
     other_models_pct: int | None = None
     grok_bot_pct: int | None = None
+    # "legacy" = previous renewal-day family; "current" = active subscription.
+    era: str = "current"
+    renewal_day: int = 0
+    # HH:MM:SS for month-view bucketing; empty → midnight.
+    renewal_time: str = ""
+    # Inclusive label/axis end (ISO); empty → natural period_end_for.
+    period_end: str = ""
 
 
 @dataclass(frozen=True)
@@ -69,6 +79,9 @@ class UsageCsvPreview:
     insight: str = ""
     error_message: str = ""
     csv_dir: str = ""
+    # When set, year chart splits tokens into legacy vs current series here.
+    change_date: str = ""
+    previous_renewal_day: int | None = None
 
     @staticmethod
     def unavailable(message: str) -> UsageCsvPreview:
@@ -349,6 +362,7 @@ def load_period_daily_series(
     renewal_day: int,
     renewal_time: time_of_day | None = None,
     as_of: datetime | date | None = None,
+    inclusive_end: date | str | None = None,
 ) -> UsageDailySeries:
     """Build contiguous daily + cumulative token series for one billing period."""
     if isinstance(period_start, str):
@@ -361,12 +375,21 @@ def load_period_daily_series(
     else:
         start = period_start
 
-    label = period_label(
+    natural_end = period_end_for(
         start, renewal_day=renewal_day, renewal_time=renewal_time
     )
-    end = period_end_for(
-        start, renewal_day=renewal_day, renewal_time=renewal_time
-    )
+    end = natural_end
+    if inclusive_end is not None:
+        if isinstance(inclusive_end, str):
+            try:
+                end = date.fromisoformat(inclusive_end)
+            except ValueError:
+                end = natural_end
+        else:
+            end = inclusive_end
+        if end > natural_end:
+            end = natural_end
+    label = period_range_label(start, end)
     if isinstance(as_of, datetime):
         now = as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
         now = now.astimezone(_local_tz())
@@ -518,28 +541,129 @@ def _save_cached_totals(
     _totals_path().write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _aggregate_all_csvs(
+def _parse_period_csv_name(path: Path) -> tuple[date, date] | None:
+    """Parse ``YYYY-MM-DD_to_YYYY-MM-DD.csv`` → (start, end)."""
+    stem = path.stem
+    if "_to_" not in stem:
+        return None
+    left, right = stem.split("_to_", 1)
+    try:
+        return date.fromisoformat(left), date.fromisoformat(right)
+    except ValueError:
+        return None
+
+
+def discover_csv_families() -> dict[int, list[tuple[date, date, Path]]]:
+    """Group on-disk period CSVs by ``period_start.day`` (renewal-day family)."""
+    families: dict[int, list[tuple[date, date, Path]]] = {}
+    for path in sorted(usage_csv_dir().glob("*_to_*.csv")):
+        parsed = _parse_period_csv_name(path)
+        if parsed is None:
+            continue
+        start, end = parsed
+        families.setdefault(start.day, []).append((start, end, path))
+    for day in families:
+        families[day].sort(key=lambda item: item[0])
+    return families
+
+
+def infer_subscription_eras(
+    *,
+    active_day: int,
+    snap: UsageSnapshot | None = None,
+) -> tuple[int | None, date | None, time_of_day | None]:
+    """Return ``(previous_renewal_day, change_date, previous_renewal_time)``.
+
+    Previous family prefers the manual reset day when it differs from the
+    active boundary and still has CSV files; otherwise the largest other
+    family. Change date prefers ``renewal_boundary_history``, then the auto
+    stamp date, then the earliest mtime of active-family files.
+    """
+    snap = snap or UsageSnapshot.load()
+    families = discover_csv_families()
+    active_day = max(1, min(28, int(active_day)))
+    prev_day: int | None = None
+    prev_time: time_of_day | None = None
+
+    if snap.usage_reset_at_manual is not None:
+        manual_day, manual_time = renewal_from_usage_reset(snap.usage_reset_at_manual)
+        if manual_day != active_day and manual_day in families:
+            prev_day = manual_day
+            prev_time = manual_time
+
+    if prev_day is None:
+        others = [
+            (day, len(files))
+            for day, files in families.items()
+            if day != active_day
+        ]
+        if others:
+            prev_day = max(others, key=lambda item: (item[1], item[0]))[0]
+
+    if prev_day is None:
+        return None, None, None
+
+    change_date: date | None = None
+    for entry in reversed(snap.renewal_boundary_history):
+        if entry.day == active_day:
+            change_date = datetime.fromtimestamp(entry.since).astimezone().date()
+            break
+
+    if change_date is None and snap.usage_reset_at_auto is not None:
+        auto_day, _ = renewal_from_usage_reset(snap.usage_reset_at_auto)
+        if auto_day == active_day:
+            change_date = (
+                datetime.fromtimestamp(snap.usage_reset_at_auto).astimezone().date()
+            )
+
+    if change_date is None and active_day in families:
+        mtimes = [path.stat().st_mtime for _, _, path in families[active_day]]
+        if mtimes:
+            change_date = datetime.fromtimestamp(min(mtimes)).astimezone().date()
+
+    return prev_day, change_date, prev_time
+
+
+def _aggregate_family_csvs(
     *,
     renewal_day: int,
     renewal_time: time_of_day | None,
 ) -> dict[date, tuple[int, int]]:
-    """Sum tokens across every on-disk period CSV with time-aware bucketing."""
+    """Sum tokens from CSVs whose filename period-start day matches ``renewal_day``.
+
+    Overlapping families (e.g. day-19 and day-14 exports of the same events)
+    are intentionally not mixed — that was double-counting year totals.
+    """
     totals: dict[date, list[int]] = {}
-    csv_dir = usage_csv_dir()
-    for path in sorted(csv_dir.glob("*_to_*.csv")):
+    day = max(1, min(28, int(renewal_day)))
+    for path in sorted(usage_csv_dir().glob("*_to_*.csv")):
+        parsed = _parse_period_csv_name(path)
+        if parsed is None or parsed[0].day != day:
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         rows = parse_usage_csv(text)
         by_period = sum_tokens_by_period(
-            rows, renewal_day=renewal_day, renewal_time=renewal_time
+            rows, renewal_day=day, renewal_time=renewal_time
         )
         for start, (tok, cnt) in by_period.items():
             bucket = totals.setdefault(start, [0, 0])
             bucket[0] += tok
             bucket[1] += cnt
     return {k: (v[0], v[1]) for k, v in totals.items()}
+
+
+def _aggregate_all_csvs(
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None,
+) -> dict[date, tuple[int, int]]:
+    """Sum tokens for the active renewal-day family only (no cross-family mix)."""
+    return _aggregate_family_csvs(
+        renewal_day=renewal_day, renewal_time=renewal_time
+    )
 
 
 FETCH_JS_TEMPLATE = """
@@ -724,70 +848,197 @@ async def sync_usage_csvs(
     return preview
 
 
+def _bucket_for_start(
+    start: date,
+    *,
+    renewal_day: int,
+    renewal_time: time_of_day | None,
+    by_period: dict[date, tuple[int, int]],
+    assoc: dict[str, dict[str, Any]],
+    grok_weeks: Any,
+    era: str,
+    current_start: date | None,
+    label_end: date | None = None,
+) -> UsagePeriodBucket | None:
+    key = start.isoformat()
+    a = assoc.get(key) or {}
+    tok, events = by_period.get(start, (0, 0))
+    tokens = int(tok or a.get("total_tokens") or 0)
+    cursor_pct = a.get("cursor_models_pct")
+    other_pct = a.get("other_models_pct")
+    grok_pct = average_weekly_peaks_for_period(
+        start,
+        renewal_day=renewal_day,
+        renewal_time=renewal_time,
+        weeks=grok_weeks,
+    )
+    if grok_pct is None and a.get("grok_bot_pct") is not None:
+        try:
+            grok_pct = int(a["grok_bot_pct"])
+        except (TypeError, ValueError):
+            grok_pct = None
+    natural_end = period_end_for(
+        start, renewal_day=renewal_day, renewal_time=renewal_time
+    )
+    end = label_end if label_end is not None else natural_end
+    if end < start:
+        end = start
+    has_file = _period_csv_path(start, natural_end).is_file()
+    is_current = current_start is not None and start == current_start
+    if not tokens and not events and not a and not has_file and not is_current:
+        if grok_pct is None:
+            return None
+    tod = renewal_time or time_of_day(0, 0)
+    label = (
+        period_range_label(start, end)
+        if label_end is not None
+        else period_label(
+            start, renewal_day=renewal_day, renewal_time=renewal_time
+        )
+    )
+    return UsagePeriodBucket(
+        label=label,
+        period_start=key,
+        total_tokens=tokens,
+        event_count=events,
+        cursor_models_pct=int(cursor_pct) if cursor_pct is not None else None,
+        other_models_pct=int(other_pct) if other_pct is not None else None,
+        grok_bot_pct=grok_pct,
+        era=era,
+        renewal_day=renewal_day,
+        renewal_time=tod.strftime("%H:%M:%S"),
+        period_end=end.isoformat(),
+    )
+
+
 def build_usage_preview(
     *,
     renewal_day: int,
     renewal_time: time_of_day | None = None,
 ) -> UsageCsvPreview:
-    """Build chart-ready period buckets from on-disk CSVs / totals cache + spend % assoc."""
+    """Build chart-ready period buckets from on-disk CSVs + spend % assoc.
+
+    When a previous renewal-day CSV family exists, periods before the
+    subscription change keep that family's shape (so AUTO/API keys still
+    join); periods on/after the change use the active renewal day.
+    """
     assoc = _load_assoc()
-    starts = _iter_period_starts(
-        renewal_day=renewal_day, renewal_time=renewal_time
-    )
     csv_dir = usage_csv_dir()
-    by_period = _aggregate_all_csvs(
-        renewal_day=renewal_day, renewal_time=renewal_time
-    )
+    snap = UsageSnapshot.load()
     now = datetime.now(timezone.utc).astimezone()
     current_start = period_start_for(
         now, renewal_day=renewal_day, renewal_time=renewal_time
     )
-
     grok_weeks = load_grok_week_peaks()
+
+    prev_day, change_date, prev_time = infer_subscription_eras(
+        active_day=renewal_day, snap=snap
+    )
     periods: list[UsagePeriodBucket] = []
-    for start in starts:
-        key = start.isoformat()
-        a = assoc.get(key) or {}
-        tok, events = by_period.get(start, (0, 0))
-        tokens = int(tok or a.get("total_tokens") or 0)
-        cursor_pct = a.get("cursor_models_pct")
-        other_pct = a.get("other_models_pct")
-        grok_pct = average_weekly_peaks_for_period(
-            start,
-            renewal_day=renewal_day,
-            renewal_time=renewal_time,
-            weeks=grok_weeks,
+
+    if prev_day is not None and change_date is not None:
+        legacy_by = _aggregate_family_csvs(
+            renewal_day=prev_day, renewal_time=prev_time
         )
-        # Legacy single snapshot from before weekly tracking.
-        if grok_pct is None and a.get("grok_bot_pct") is not None:
-            try:
-                grok_pct = int(a["grok_bot_pct"])
-            except (TypeError, ValueError):
-                grok_pct = None
-        has_file = _period_csv_path(
-            start,
-            period_end_for(
-                start, renewal_day=renewal_day, renewal_time=renewal_time
-            ),
-        ).is_file()
-        is_current = start == current_start
-        if not tokens and not events and not a and not has_file and not is_current:
-            # Still show periods that only have Grok weekly history.
-            if grok_pct is None:
-                continue
-        periods.append(
-            UsagePeriodBucket(
-                label=period_label(
-                    start, renewal_day=renewal_day, renewal_time=renewal_time
-                ),
-                period_start=key,
-                total_tokens=tokens,
-                event_count=events,
-                cursor_models_pct=int(cursor_pct) if cursor_pct is not None else None,
-                other_models_pct=int(other_pct) if other_pct is not None else None,
-                grok_bot_pct=grok_pct,
+        # Prefer real CSV period starts for the prior family (exact spend-% keys).
+        # Include the in-progress period at the change (start < change_date) so
+        # spend-% for that window is not dropped when end straddles the cut.
+        legacy_starts = sorted(
+            {
+                start
+                for start, _end, _path in discover_csv_families().get(prev_day, [])
+                if start < change_date
+            }
+            | {start for start in legacy_by if start < change_date}
+        )
+        for start in legacy_starts:
+            natural_end = period_end_for(
+                start, renewal_day=prev_day, renewal_time=prev_time
             )
+            # Truncate the in-progress cycle at the plan-change day so the
+            # overlay end matches the new cycle's start (same calendar day).
+            label_end = (
+                change_date if natural_end >= change_date else None
+            )
+            bucket = _bucket_for_start(
+                start,
+                renewal_day=prev_day,
+                renewal_time=prev_time,
+                by_period=legacy_by,
+                assoc=assoc,
+                grok_weeks=grok_weeks,
+                era="legacy",
+                current_start=None,
+                label_end=label_end,
+            )
+            if bucket is not None:
+                periods.append(bucket)
+
+        current_by = _aggregate_family_csvs(
+            renewal_day=renewal_day, renewal_time=renewal_time
         )
+        current_starts = [
+            start
+            for start in _iter_period_starts(
+                history_start=change_date,
+                renewal_day=renewal_day,
+                renewal_time=renewal_time,
+            )
+            if start >= change_date
+        ]
+        # Also include any post-change family files not covered by the iterator.
+        for start, _end, _path in discover_csv_families().get(renewal_day, []):
+            if start >= change_date and start not in current_starts:
+                current_starts.append(start)
+        current_starts = sorted(set(current_starts))
+        for start in current_starts:
+            bucket = _bucket_for_start(
+                start,
+                renewal_day=renewal_day,
+                renewal_time=renewal_time,
+                by_period=current_by,
+                assoc=assoc,
+                grok_weeks=grok_weeks,
+                era="current",
+                current_start=current_start,
+            )
+            if bucket is not None:
+                periods.append(bucket)
+
+        # Keep the year axis readable: drop oldest legacy points if needed.
+        if len(periods) > _YEAR_PERIOD_CAP:
+            overflow = len(periods) - _YEAR_PERIOD_CAP
+            legacy_count = sum(1 for p in periods if p.era == "legacy")
+            drop = min(overflow, legacy_count)
+            if drop:
+                trimmed: list[UsagePeriodBucket] = []
+                skip = drop
+                for p in periods:
+                    if p.era == "legacy" and skip > 0:
+                        skip -= 1
+                        continue
+                    trimmed.append(p)
+                periods = trimmed
+    else:
+        starts = _iter_period_starts(
+            renewal_day=renewal_day, renewal_time=renewal_time
+        )
+        by_period = _aggregate_family_csvs(
+            renewal_day=renewal_day, renewal_time=renewal_time
+        )
+        for start in starts:
+            bucket = _bucket_for_start(
+                start,
+                renewal_day=renewal_day,
+                renewal_time=renewal_time,
+                by_period=by_period,
+                assoc=assoc,
+                grok_weeks=grok_weeks,
+                era="current",
+                current_start=current_start,
+            )
+            if bucket is not None:
+                periods.append(bucket)
 
     if not periods or not any(
         p.total_tokens
@@ -803,18 +1054,20 @@ def build_usage_preview(
             csv_dir=str(csv_dir),
         )
 
-    # Refresh on-disk cache so tray restarts stay aligned with renewal clock.
+    # Refresh on-disk cache for the *active* family (sync / skip-fetch helper).
     try:
-        cached = {
+        active_cached = {
             p.period_start: {
                 "label": p.label,
                 "total_tokens": p.total_tokens,
                 "event_count": p.event_count,
+                "era": p.era,
             }
             for p in periods
+            if p.era == "current" and p.renewal_day == renewal_day
         }
         _save_cached_totals(
-            cached, renewal_day=renewal_day, renewal_time=renewal_time
+            active_cached, renewal_day=renewal_day, renewal_time=renewal_time
         )
     except OSError as exc:
         log.debug("Could not save period totals: %s", exc)
@@ -839,6 +1092,8 @@ def build_usage_preview(
         latest=periods[-1].label,
         insight=insight,
         csv_dir=str(csv_dir),
+        change_date=change_date.isoformat() if change_date else "",
+        previous_renewal_day=prev_day,
     )
 
 

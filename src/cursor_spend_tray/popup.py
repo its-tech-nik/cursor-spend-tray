@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from datetime import time as time_of_day
 
 from PyQt6.QtCore import (
@@ -31,6 +32,7 @@ from PyQt6.QtGui import (
     QFont,
     QFontMetrics,
     QGuiApplication,
+    QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
@@ -1048,6 +1050,8 @@ class MultiSeriesHistoryChart(QWidget):
         self._hidden: set[str] = set()
         self._hover_index: int | None = None
         self._selected_index: int | None = None
+        # Year-chart index where a prior plan ends and a new plan begins.
+        self._plan_change_index: int | None = None
         self._footer_caption = ""
         self._footer_nav_visible = False
         self._plot = QRectF()
@@ -1102,12 +1106,17 @@ class MultiSeriesHistoryChart(QWidget):
         *,
         weights: list[int] | None = None,
         caption: str = "",
+        plan_change_index: int | None = None,
     ) -> None:
         selected_label = self.selected_label()
         self._labels = list(labels)
         self._series = list(series)
         self._weights = list(weights or [])
         self._footer_caption = caption.strip()
+        if plan_change_index is not None and 0 <= plan_change_index < len(self._labels):
+            self._plan_change_index = plan_change_index
+        else:
+            self._plan_change_index = None
         names = {s.name for s in self._series}
         self._hidden &= names
         self._hover_index = None
@@ -1279,12 +1288,25 @@ class MultiSeriesHistoryChart(QWidget):
         header = self._labels[idx]
         if idx < len(self._weights):
             header += f" · {self._weights[idx]}"
+        if self._plan_change_index is not None and idx == self._plan_change_index:
+            header += " · plan change"
         lines = [(header, "#D5DEEA")]
+        value_lines: list[tuple[str, str]] = []
         for series in self._visible_series():
             raw = series.values[idx] if idx < len(series.values) else None
-            lines.append(
+            if raw is None:
+                continue
+            value_lines.append(
                 (f"{series.name}: {_format_chart_value(raw, series.unit)}", series.color)
             )
+        # Only annotate the change slot when both eras actually contribute values.
+        if (
+            self._plan_change_index is not None
+            and idx == self._plan_change_index
+            and len(value_lines) >= 2
+        ):
+            lines.append(("prior plan ends · new plan starts", "#8B8496"))
+        lines.extend(value_lines)
         self._value_card.set_lines(lines)
         anchor = self.mapToGlobal(QPoint(int(round(x)), int(round(self._plot.top()))))
         self._value_card.place(anchor)
@@ -1422,6 +1444,9 @@ class MultiSeriesHistoryChart(QWidget):
             QPointF(self._plot.right(), floor_y),
         )
 
+        # Plan-change marker behind series so dots still read on top.
+        self._paint_plan_change_marker(painter)
+
         # Area fills first (behind), then every line/dot on top.
         area_series = [s for s in visible_series if s.area]
         line_series = [s for s in visible_series if not s.area]
@@ -1455,6 +1480,90 @@ class MultiSeriesHistoryChart(QWidget):
         self._paint_footer_caption(painter, floor_y)
         painter.end()
         self._position_footer_nav()
+
+    def _paint_plan_change_marker(self, painter: QPainter) -> None:
+        """Dotted rule spanning prior-end / new-start points, with red/green washes."""
+        idx = self._plan_change_index
+        n = len(self._labels)
+        if idx is None or n < 2 or not (0 <= idx < n):
+            return
+        draw = self._draw_rect()
+        x = self._plot.left() + (self._plot.width() * idx / (n - 1))
+        # Soft horizontal washes across ~one period width on each side.
+        period_w = self._plot.width() / (n - 1)
+        wash_w = max(18.0, min(period_w * 0.85, self._plot.width() * 0.18))
+
+        # Height = vertical span of the end-of-plan and start-of-plan dots.
+        ys: list[float] = []
+        for series in self._visible_series():
+            points = self._normalized_points(series)
+            if idx >= len(points):
+                continue
+            pt = points[idx]
+            if pt is not None:
+                ys.append(pt.y())
+        if len(ys) >= 2:
+            band_top = min(ys)
+            band_bottom = max(ys)
+        elif len(ys) == 1:
+            # Single visible point — short stub around it.
+            band_top = ys[0] - 8.0
+            band_bottom = ys[0] + 8.0
+        else:
+            mid_y = (draw.top() + draw.bottom()) / 2.0
+            band_top = mid_y - 12.0
+            band_bottom = mid_y + 12.0
+        # Keep a readable minimum span and stay inside the draw rect.
+        if band_bottom - band_top < 12.0:
+            mid = (band_top + band_bottom) / 2.0
+            band_top = mid - 6.0
+            band_bottom = mid + 6.0
+        band_top = max(draw.top(), band_top)
+        band_bottom = min(draw.bottom(), band_bottom)
+
+        left = max(self._plot.left(), x - wash_w)
+        right = min(self._plot.right(), x + wash_w)
+
+        # Prior plan ends — red fade into the change from the left.
+        if x > left + 1.0:
+            red = QLinearGradient(left, 0.0, x, 0.0)
+            red.setColorAt(0.0, QColor(220, 80, 80, 0))
+            red.setColorAt(0.55, QColor(220, 80, 80, 28))
+            red.setColorAt(1.0, QColor(220, 80, 80, 70))
+            painter.fillRect(QRectF(left, band_top, x - left, band_bottom - band_top), red)
+
+        # New plan starts — green fade out to the right.
+        if right > x + 1.0:
+            green = QLinearGradient(x, 0.0, right, 0.0)
+            green.setColorAt(0.0, QColor(80, 180, 110, 70))
+            green.setColorAt(0.45, QColor(80, 180, 110, 28))
+            green.setColorAt(1.0, QColor(80, 180, 110, 0))
+            painter.fillRect(
+                QRectF(x, band_top, right - x, band_bottom - band_top), green
+            )
+
+        pen = QPen(QColor("#E8E8E8"), 1.15, Qt.PenStyle.DotLine)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(x, band_top), QPointF(x, band_bottom))
+
+        label = "plan change"
+        font = QFont()
+        font.setPointSize(7)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        tw = float(metrics.horizontalAdvance(label))
+        th = float(metrics.height())
+        text_x = x + 4.0
+        if text_x + tw > self._plot.right() - 2.0:
+            text_x = x - tw - 4.0
+        text_x = max(self._plot.left() + 2.0, text_x)
+        painter.setPen(QColor("#B8C0CC"))
+        painter.drawText(
+            QRectF(text_x, band_top - th - 1.0, tw + 2.0, th),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            label,
+        )
 
     def _paint_footer_caption(self, painter: QPainter, floor_y: float) -> None:
         """Draw period summary in the thin strip below the graph floor line."""
@@ -1575,13 +1684,20 @@ class MultiSeriesHistoryChart(QWidget):
 
         points = self._normalized_points(series)
         usable = [p for p in points if p is not None]
-        if len(usable) < 2:
+        if not usable:
             return
         pen = QPen(QColor(series.color), 1.9)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(pen)
+        if len(usable) == 1:
+            # Lone sample (e.g. only the current period has AUTO/API yet).
+            painter.setBrush(QColor(series.color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(usable[0], 2.6, 2.6)
+            self._paint_point_labels(painter, series, points)
+            return
         path = QPainterPath()
         started = False
         for pt in points:
@@ -1901,6 +2017,18 @@ def _format_token_chip(n: int) -> str:
     return f"{n} tokens"
 
 
+def _parse_bucket_renewal_time(raw: str) -> time_of_day | None:
+    if not raw:
+        return None
+    try:
+        parts = [int(x) for x in raw.split(":")]
+        while len(parts) < 3:
+            parts.append(0)
+        return time_of_day(parts[0], parts[1], parts[2])
+    except ValueError:
+        return None
+
+
 def _merge_composer_usage_series(
     usage: UsageCsvPreview,
 ) -> tuple[
@@ -1910,48 +2038,199 @@ def _merge_composer_usage_series(
     list[float | None],
     list[float | None],
     list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[int],
+    list[time_of_day | None],
+    list[str],
 ]:
-    """Align billing-period labels with tokens / AUTO% / API% / Grok% from usage CSV."""
-    labels: list[str] = []
-    period_starts: list[str] = []
-    tokens: list[float | None] = []
-    auto_pct: list[float | None] = []
-    api_pct: list[float | None] = []
-    grok_pct: list[float | None] = []
+    """Align billing-period labels with dual-era tokens + AUTO/API/Grok %.
 
+    When a legacy period ends on the same day the current era begins (plan
+    change), both are collapsed onto one x-slot so the new-plan points sit in
+    the same horizontal space as free-floating, differently colored dots.
+    """
+    empty = (
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
     if not usage.available:
-        return labels, period_starts, tokens, auto_pct, api_pct, grok_pct
+        return empty
 
-    for u in sorted(usage.periods, key=lambda p: p.period_start):
-        labels.append(str(getattr(u, "label", None) or u.period_start))
-        period_starts.append(u.period_start)
+    rows: list[dict[str, object]] = []
+    for u in sorted(
+        usage.periods,
+        key=lambda p: (p.period_start, 0 if p.era == "legacy" else 1),
+    ):
         tok = int(getattr(u, "total_tokens", 0) or 0)
-        tokens.append(float(tok) if tok or getattr(u, "event_count", 0) else None)
+        value = float(tok) if tok or getattr(u, "event_count", 0) else None
         cp = getattr(u, "cursor_models_pct", None)
         op = getattr(u, "other_models_pct", None)
         gp = getattr(u, "grok_bot_pct", None)
-        auto_pct.append(float(cp) if cp is not None else None)
-        api_pct.append(float(op) if op is not None else None)
-        grok_pct.append(float(gp) if gp is not None else None)
+        rows.append(
+            {
+                "label": str(getattr(u, "label", None) or u.period_start),
+                "period_start": u.period_start,
+                "period_end": str(getattr(u, "period_end", "") or ""),
+                "era": getattr(u, "era", "current") or "current",
+                "renewal_day": int(getattr(u, "renewal_day", 0) or 0),
+                "renewal_time": _parse_bucket_renewal_time(
+                    str(getattr(u, "renewal_time", "") or "")
+                ),
+                "tokens": value,
+                "auto": float(cp) if cp is not None else None,
+                "api": float(op) if op is not None else None,
+                "grok": float(gp) if gp is not None else None,
+            }
+        )
 
-    # Drop leading / trailing all-empty periods so the x-axis isn't padded
-    # with blank slots (e.g. a phantom month from midnight-vs-renewal-time).
-    series_cols = (tokens, auto_pct, api_pct, grok_pct)
+    # Collapse plan-change pair onto one x index (legacy end == current start).
+    collapsed: list[dict[str, object]] = []
+    i = 0
+    while i < len(rows):
+        cur = rows[i]
+        nxt = rows[i + 1] if i + 1 < len(rows) else None
+        if (
+            nxt is not None
+            and cur["era"] == "legacy"
+            and nxt["era"] == "current"
+            and cur["period_end"]
+            and cur["period_end"] == nxt["period_start"]
+        ):
+            change = str(nxt["period_start"])
+            try:
+                d = date.fromisoformat(change)
+                change_label = f"{d.strftime('%b')} {d.day}, {d.year}"
+            except ValueError:
+                change_label = change
+            collapsed.append(
+                {
+                    "label": change_label,
+                    # Month drill-down uses the active (new) plan period.
+                    "period_start": nxt["period_start"],
+                    "period_end": nxt["period_end"],
+                    "renewal_day": nxt["renewal_day"],
+                    "renewal_time": nxt["renewal_time"],
+                    "tokens_legacy": cur["tokens"],
+                    "tokens_current": nxt["tokens"],
+                    "auto_legacy": cur["auto"],
+                    "auto_current": nxt["auto"],
+                    "api_legacy": cur["api"],
+                    "api_current": nxt["api"],
+                    "grok_legacy": cur["grok"],
+                    "grok_current": nxt["grok"],
+                }
+            )
+            i += 2
+            continue
+        era = cur["era"]
+        collapsed.append(
+            {
+                "label": cur["label"],
+                "period_start": cur["period_start"],
+                "period_end": cur["period_end"],
+                "renewal_day": cur["renewal_day"],
+                "renewal_time": cur["renewal_time"],
+                "tokens_legacy": cur["tokens"] if era == "legacy" else None,
+                "tokens_current": cur["tokens"] if era != "legacy" else None,
+                "auto_legacy": cur["auto"] if era == "legacy" else None,
+                "auto_current": cur["auto"] if era != "legacy" else None,
+                "api_legacy": cur["api"] if era == "legacy" else None,
+                "api_current": cur["api"] if era != "legacy" else None,
+                "grok_legacy": cur["grok"] if era == "legacy" else None,
+                "grok_current": cur["grok"] if era != "legacy" else None,
+            }
+        )
+        i += 1
 
-    def _row_has_data(i: int) -> bool:
-        return any(col[i] is not None for col in series_cols)
+    labels: list[str] = []
+    period_starts: list[str] = []
+    tokens_legacy: list[float | None] = []
+    tokens_current: list[float | None] = []
+    auto_legacy: list[float | None] = []
+    auto_current: list[float | None] = []
+    api_legacy: list[float | None] = []
+    api_current: list[float | None] = []
+    grok_legacy: list[float | None] = []
+    grok_current: list[float | None] = []
+    renewal_days: list[int] = []
+    renewal_times: list[time_of_day | None] = []
+    period_ends: list[str] = []
 
-    keep = [i for i in range(len(labels)) if _row_has_data(i)]
+    for row in collapsed:
+        labels.append(str(row["label"]))
+        period_starts.append(str(row["period_start"]))
+        period_ends.append(str(row["period_end"] or ""))
+        renewal_days.append(int(row["renewal_day"] or 0))
+        renewal_times.append(row["renewal_time"])  # type: ignore[arg-type]
+        tokens_legacy.append(row["tokens_legacy"])  # type: ignore[arg-type]
+        tokens_current.append(row["tokens_current"])  # type: ignore[arg-type]
+        auto_legacy.append(row["auto_legacy"])  # type: ignore[arg-type]
+        auto_current.append(row["auto_current"])  # type: ignore[arg-type]
+        api_legacy.append(row["api_legacy"])  # type: ignore[arg-type]
+        api_current.append(row["api_current"])  # type: ignore[arg-type]
+        grok_legacy.append(row["grok_legacy"])  # type: ignore[arg-type]
+        grok_current.append(row["grok_current"])  # type: ignore[arg-type]
+
+    series_cols = (
+        tokens_legacy,
+        tokens_current,
+        auto_legacy,
+        auto_current,
+        api_legacy,
+        api_current,
+        grok_legacy,
+        grok_current,
+    )
+
+    def _row_has_data(idx: int) -> bool:
+        return any(col[idx] is not None for col in series_cols)
+
+    keep = [idx for idx in range(len(labels)) if _row_has_data(idx)]
     if keep:
         lo, hi = keep[0], keep[-1] + 1
         labels = labels[lo:hi]
         period_starts = period_starts[lo:hi]
-        tokens = tokens[lo:hi]
-        auto_pct = auto_pct[lo:hi]
-        api_pct = api_pct[lo:hi]
-        grok_pct = grok_pct[lo:hi]
+        tokens_legacy = tokens_legacy[lo:hi]
+        tokens_current = tokens_current[lo:hi]
+        auto_legacy = auto_legacy[lo:hi]
+        auto_current = auto_current[lo:hi]
+        api_legacy = api_legacy[lo:hi]
+        api_current = api_current[lo:hi]
+        grok_legacy = grok_legacy[lo:hi]
+        grok_current = grok_current[lo:hi]
+        renewal_days = renewal_days[lo:hi]
+        renewal_times = renewal_times[lo:hi]
+        period_ends = period_ends[lo:hi]
 
-    return labels, period_starts, tokens, auto_pct, api_pct, grok_pct
+    return (
+        labels,
+        period_starts,
+        tokens_legacy,
+        tokens_current,
+        auto_legacy,
+        auto_current,
+        api_legacy,
+        api_current,
+        grok_legacy,
+        grok_current,
+        renewal_days,
+        renewal_times,
+        period_ends,
+    )
 
 
 class SegmentedToggle(QWidget):
@@ -2196,7 +2475,19 @@ class ComposerHistoryPreview(QFrame):
                 "Total tokens from Cursor\n"
                 "usage-events CSV this period.\n"
                 "\n"
-                "Native Cursor usage — not pi."
+                "Prior subscription renewal day\n"
+                "when a plan change split the chart."
+            ),
+        )
+        self._chip_tokens_new = SeriesToggleChip(
+            "Tokens · new",
+            fg="#7EB8A0",
+            bg="#1A2420",
+            border="#2F4638",
+            tooltip=(
+                "Tokens under the current\n"
+                "subscription renewal day\n"
+                "(after the plan change)."
             ),
         )
         self._chip_auto = SeriesToggleChip(
@@ -2210,6 +2501,17 @@ class ComposerHistoryPreview(QFrame):
                 "for this billing period."
             ),
         )
+        self._chip_auto_new = SeriesToggleChip(
+            "AUTO · new",
+            fg="#8EC0E8",
+            bg="#1A2030",
+            border="#3A4F6A",
+            tooltip=(
+                "AUTO % under the current\n"
+                "subscription renewal day\n"
+                "(after the plan change)."
+            ),
+        )
         self._chip_api = SeriesToggleChip(
             "API %",
             fg="#B0B0B0",
@@ -2219,6 +2521,17 @@ class ComposerHistoryPreview(QFrame):
                 "Included-in-Pro API usage %\n"
                 "from the Cursor spending page\n"
                 "for this billing period."
+            ),
+        )
+        self._chip_api_new = SeriesToggleChip(
+            "API · new",
+            fg="#D0D0D0",
+            bg="#1E1E1E",
+            border="#4A4A4A",
+            tooltip=(
+                "API % under the current\n"
+                "subscription renewal day\n"
+                "(after the plan change)."
             ),
         )
         self._chip_grok = SeriesToggleChip(
@@ -2232,6 +2545,17 @@ class ComposerHistoryPreview(QFrame):
                 "\n"
                 "Weeks that cross a renewal boundary\n"
                 "are prorated by overlapping days."
+            ),
+        )
+        self._chip_grok_new = SeriesToggleChip(
+            "Grok · new",
+            fg="#D4B8E0",
+            bg="#241A28",
+            border="#5A4060",
+            tooltip=(
+                "Grok % under the current\n"
+                "subscription renewal day\n"
+                "(after the plan change)."
             ),
         )
         self._chip_daily = SeriesToggleChip(
@@ -2264,18 +2588,26 @@ class ComposerHistoryPreview(QFrame):
                 "calendar day (tracked branches)."
             ),
         )
+        self._chip_tokens_new.hide()
         self._chip_auto.hide()
+        self._chip_auto_new.hide()
         self._chip_api.hide()
+        self._chip_api_new.hide()
         self._chip_grok.hide()
+        self._chip_grok_new.hide()
         self._chip_daily.hide()
         self._chip_cumulative.hide()
         self._chip_commits.hide()
 
         self._year_chips: list[SeriesToggleChip] = [
             self._chip_tokens,
+            self._chip_tokens_new,
             self._chip_auto,
+            self._chip_auto_new,
             self._chip_api,
+            self._chip_api_new,
             self._chip_grok,
+            self._chip_grok_new,
         ]
         self._month_chips: list[SeriesToggleChip] = [
             self._chip_daily,
@@ -2303,10 +2635,17 @@ class ComposerHistoryPreview(QFrame):
         self._renewal_time: time_of_day | None = None
         self._year_labels: list[str] = []
         self._period_starts: list[str] = []
-        self._tokens: list[float | None] = []
-        self._auto_pct: list[float | None] = []
-        self._api_pct: list[float | None] = []
-        self._grok_pct: list[float | None] = []
+        self._period_renewal_days: list[int] = []
+        self._period_renewal_times: list[time_of_day | None] = []
+        self._period_ends: list[str] = []
+        self._tokens_legacy: list[float | None] = []
+        self._tokens_current: list[float | None] = []
+        self._auto_legacy: list[float | None] = []
+        self._auto_current: list[float | None] = []
+        self._api_legacy: list[float | None] = []
+        self._api_current: list[float | None] = []
+        self._grok_legacy: list[float | None] = []
+        self._grok_current: list[float | None] = []
         self._month_period_start: str = ""
         self._daily: list[float | None] = []
         self._cumulative: list[float | None] = []
@@ -2398,9 +2737,21 @@ class ComposerHistoryPreview(QFrame):
                 self._github_day_labels = []
                 self._github_daily_commits = []
 
-        labels, period_starts, tokens, auto_pct, api_pct, grok_pct = (
-            _merge_composer_usage_series(usage)
-        )
+        (
+            labels,
+            period_starts,
+            tokens_legacy,
+            tokens_current,
+            auto_legacy,
+            auto_current,
+            api_legacy,
+            api_current,
+            grok_legacy,
+            grok_current,
+            renewal_days,
+            renewal_times,
+            period_ends,
+        ) = _merge_composer_usage_series(usage)
 
         if len(labels) < 2:
             message = (
@@ -2419,10 +2770,17 @@ class ComposerHistoryPreview(QFrame):
 
         self._year_labels = labels
         self._period_starts = period_starts
-        self._tokens = tokens
-        self._auto_pct = auto_pct
-        self._api_pct = api_pct
-        self._grok_pct = grok_pct
+        self._period_renewal_days = renewal_days
+        self._period_renewal_times = renewal_times
+        self._period_ends = period_ends
+        self._tokens_legacy = tokens_legacy
+        self._tokens_current = tokens_current
+        self._auto_legacy = auto_legacy
+        self._auto_current = auto_current
+        self._api_legacy = api_legacy
+        self._api_current = api_current
+        self._grok_legacy = grok_legacy
+        self._grok_current = grok_current
         if self._selected_year_index is not None and not (
             0 <= self._selected_year_index < len(labels)
         ):
@@ -2473,39 +2831,108 @@ class ComposerHistoryPreview(QFrame):
 
     def _render_year_view(self) -> None:
         labels = self._year_labels
-        tokens = self._tokens
-        auto_pct = self._auto_pct
-        api_pct = self._api_pct
-        grok_pct = self._grok_pct
+        tokens_legacy = self._tokens_legacy
+        tokens_current = self._tokens_current
+        auto_legacy = self._auto_legacy
+        auto_current = self._auto_current
+        api_legacy = self._api_legacy
+        api_current = self._api_current
+        grok_legacy = self._grok_legacy
+        grok_current = self._grok_current
 
-        token_total = sum(int(v) for v in tokens if v is not None)
+        token_total = sum(
+            int(v)
+            for col in (tokens_legacy, tokens_current)
+            for v in col
+            if v is not None
+        )
         caption_bits = [f"Billing periods · {len(labels)}"]
         if token_total:
             caption_bits.append(f"{token_total:,} tokens")
         footer = " · ".join(caption_bits)
         self._chart.set_footer_nav_visible(False)
 
-        has_auto = any(v is not None for v in auto_pct)
-        has_api = any(v is not None for v in api_pct)
-        has_grok = any(v is not None for v in grok_pct)
+        has_tok_legacy = any(v is not None for v in tokens_legacy)
+        has_tok_current = any(v is not None for v in tokens_current)
+        dual = has_tok_legacy and has_tok_current
+        has_auto_legacy = any(v is not None for v in auto_legacy)
+        has_auto_current = any(v is not None for v in auto_current)
+        has_api_legacy = any(v is not None for v in api_legacy)
+        has_api_current = any(v is not None for v in api_current)
+        has_grok_legacy = any(v is not None for v in grok_legacy)
+        has_grok_current = any(v is not None for v in grok_current)
         for chip in self._month_chips:
             chip.hide()
-        self._chip_tokens.show()
-        self._chip_auto.setVisible(has_auto)
-        self._chip_api.setVisible(has_api)
-        self._chip_grok.setVisible(has_grok)
+        # Chip visibility is period-focused in `_update_year_chip_values`.
 
-        series = [
-            ChartSeries("Tokens", "#E0C090", tokens, area=True),
-        ]
-        if has_auto:
-            series.append(ChartSeries("AUTO %", "#6FA8DC", auto_pct, unit="%"))
-        if has_api:
-            series.append(ChartSeries("API %", "#B0B0B0", api_pct, unit="%"))
-        if has_grok:
-            series.append(ChartSeries("Grok %", "#C9A8D4", grok_pct, unit="%"))
+        series: list[ChartSeries] = []
+        if dual:
+            series.append(
+                ChartSeries("Tokens", "#E0C090", tokens_legacy, area=True)
+            )
+            series.append(
+                ChartSeries("Tokens · new", "#7EB8A0", tokens_current, area=True)
+            )
+        elif has_tok_legacy:
+            series.append(
+                ChartSeries("Tokens", "#E0C090", tokens_legacy, area=True)
+            )
+        else:
+            series.append(
+                ChartSeries("Tokens", "#E0C090", tokens_current, area=True)
+            )
+        if dual:
+            if has_auto_legacy:
+                series.append(
+                    ChartSeries("AUTO %", "#6FA8DC", auto_legacy, unit="%")
+                )
+            if has_auto_current:
+                series.append(
+                    ChartSeries("AUTO · new", "#8EC0E8", auto_current, unit="%")
+                )
+            if has_api_legacy:
+                series.append(
+                    ChartSeries("API %", "#B0B0B0", api_legacy, unit="%")
+                )
+            if has_api_current:
+                series.append(
+                    ChartSeries("API · new", "#D0D0D0", api_current, unit="%")
+                )
+            if has_grok_legacy:
+                series.append(
+                    ChartSeries("Grok %", "#C9A8D4", grok_legacy, unit="%")
+                )
+            if has_grok_current:
+                series.append(
+                    ChartSeries("Grok · new", "#D4B8E0", grok_current, unit="%")
+                )
+        else:
+            auto = auto_legacy if has_auto_legacy else auto_current
+            api = api_legacy if has_api_legacy else api_current
+            grok = grok_legacy if has_grok_legacy else grok_current
+            if any(v is not None for v in auto):
+                series.append(ChartSeries("AUTO %", "#6FA8DC", auto, unit="%"))
+            if any(v is not None for v in api):
+                series.append(ChartSeries("API %", "#B0B0B0", api, unit="%"))
+            if any(v is not None for v in grok):
+                series.append(ChartSeries("Grok %", "#C9A8D4", grok, unit="%"))
 
-        self._chart.set_data(labels, series, caption=footer)
+        plan_change_index = next(
+            (
+                i
+                for i, (legacy, current) in enumerate(
+                    zip(tokens_legacy, tokens_current, strict=True)
+                )
+                if legacy is not None and current is not None
+            ),
+            None,
+        )
+        self._chart.set_data(
+            labels,
+            series,
+            caption=footer,
+            plan_change_index=plan_change_index,
+        )
         if self._selected_year_index is not None:
             self._chart.select_index(self._selected_year_index)
         self._update_year_chip_values(self._chart.selected_index())
@@ -2525,10 +2952,29 @@ class ComposerHistoryPreview(QFrame):
 
         idx = self._year_period_index()
         period_start = self._period_starts[idx]
+        period_day = (
+            self._period_renewal_days[idx]
+            if 0 <= idx < len(self._period_renewal_days)
+            and self._period_renewal_days[idx]
+            else self._renewal_day
+        )
+        period_time = (
+            self._period_renewal_times[idx]
+            if 0 <= idx < len(self._period_renewal_times)
+            else self._renewal_time
+        )
+        if period_time is None:
+            period_time = self._renewal_time
+        inclusive_end = (
+            self._period_ends[idx]
+            if 0 <= idx < len(self._period_ends) and self._period_ends[idx]
+            else None
+        )
         daily = load_period_daily_series(
             period_start,
-            renewal_day=self._renewal_day,
-            renewal_time=self._renewal_time,
+            renewal_day=period_day,
+            renewal_time=period_time,
+            inclusive_end=inclusive_end,
         )
         if not daily.available:
             for chip in self._year_chips:
@@ -2611,26 +3057,117 @@ class ComposerHistoryPreview(QFrame):
             self._update_year_chip_values(None)
 
     def _update_year_chip_values(self, index: int | None) -> None:
-        """Show the clicked period's values in the chips, or the latest when none."""
+        """Show only chips with values for the focused period (selected or latest)."""
 
-        def _pick(values: list[float | None]) -> float | None:
-            if index is not None:
-                return values[index] if 0 <= index < len(values) else None
-            return next((v for v in reversed(values) if v is not None), None)
+        # Focus the selected period; otherwise the latest axis slot.
+        if index is not None and 0 <= index < len(self._year_labels):
+            focus = index
+        elif self._year_labels:
+            focus = len(self._year_labels) - 1
+        else:
+            focus = None
 
-        tokens = _pick(self._tokens)
-        self._chip_tokens.setText(
-            "— tokens" if tokens is None else _format_token_chip(int(tokens))
+        def _at(values: list[float | None]) -> float | None:
+            if focus is None or not (0 <= focus < len(values)):
+                return None
+            return values[focus]
+
+        dual_history = any(v is not None for v in self._tokens_legacy) and any(
+            v is not None for v in self._tokens_current
         )
-        auto = _pick(self._auto_pct)
-        self._chip_auto.setText("— AUTO" if auto is None else f"{auto:.0f}% AUTO")
-        api = _pick(self._api_pct)
-        self._chip_api.setText("— API" if api is None else f"{api:.0f}% API")
-        grok = _pick(self._grok_pct)
-        self._chip_grok.setText(
-            "— Grok" if grok is None else f"{grok:.0f}% Grok"
-        )
+
+        tok_l = _at(self._tokens_legacy)
+        tok_c = _at(self._tokens_current)
+        auto_l = _at(self._auto_legacy)
+        auto_c = _at(self._auto_current)
+        api_l = _at(self._api_legacy)
+        api_c = _at(self._api_current)
+        grok_l = _at(self._grok_legacy)
+        grok_c = _at(self._grok_current)
+
+        def _set_chip(
+            chip: SeriesToggleChip,
+            *,
+            visible: bool,
+            text: str,
+        ) -> None:
+            chip.setVisible(visible)
+            if visible:
+                chip.setText(text)
+
+        if dual_history:
+            _set_chip(
+                self._chip_tokens,
+                visible=tok_l is not None,
+                text=_format_token_chip(int(tok_l)) if tok_l is not None else "",
+            )
+            _set_chip(
+                self._chip_tokens_new,
+                visible=tok_c is not None,
+                text=_format_token_chip(int(tok_c)) if tok_c is not None else "",
+            )
+            _set_chip(
+                self._chip_auto,
+                visible=auto_l is not None,
+                text=f"{auto_l:.0f}% AUTO" if auto_l is not None else "",
+            )
+            _set_chip(
+                self._chip_auto_new,
+                visible=auto_c is not None,
+                text=f"{auto_c:.0f}% AUTO" if auto_c is not None else "",
+            )
+            _set_chip(
+                self._chip_api,
+                visible=api_l is not None,
+                text=f"{api_l:.0f}% API" if api_l is not None else "",
+            )
+            _set_chip(
+                self._chip_api_new,
+                visible=api_c is not None,
+                text=f"{api_c:.0f}% API" if api_c is not None else "",
+            )
+            _set_chip(
+                self._chip_grok,
+                visible=grok_l is not None,
+                text=f"{grok_l:.0f}% Grok" if grok_l is not None else "",
+            )
+            _set_chip(
+                self._chip_grok_new,
+                visible=grok_c is not None,
+                text=f"{grok_c:.0f}% Grok" if grok_c is not None else "",
+            )
+        else:
+            tokens = tok_c if tok_c is not None else tok_l
+            auto = auto_c if auto_c is not None else auto_l
+            api = api_c if api_c is not None else api_l
+            grok = grok_c if grok_c is not None else grok_l
+            self._chip_tokens_new.hide()
+            self._chip_auto_new.hide()
+            self._chip_api_new.hide()
+            self._chip_grok_new.hide()
+            _set_chip(
+                self._chip_tokens,
+                visible=tokens is not None,
+                text=_format_token_chip(int(tokens)) if tokens is not None else "",
+            )
+            _set_chip(
+                self._chip_auto,
+                visible=auto is not None,
+                text=f"{auto:.0f}% AUTO" if auto is not None else "",
+            )
+            _set_chip(
+                self._chip_api,
+                visible=api is not None,
+                text=f"{api:.0f}% API" if api is not None else "",
+            )
+            _set_chip(
+                self._chip_grok,
+                visible=grok is not None,
+                text=f"{grok:.0f}% Grok" if grok is not None else "",
+            )
+
         self._chips_host.updateGeometry()
+        self._sync_series_chip_states()
 
     def _update_month_chip_values(self, index: int | None) -> None:
         def _pick(values: list[float | None]) -> float | None:

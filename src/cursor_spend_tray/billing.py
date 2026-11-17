@@ -163,14 +163,8 @@ def period_key(
     ).isoformat()
 
 
-def period_label(
-    start: date,
-    *,
-    renewal_day: int,
-    renewal_time: time | None = None,
-) -> str:
-    """Human label like 'Aug 19–Sep 18, 2026'."""
-    end = period_end_for(start, renewal_day=renewal_day, renewal_time=renewal_time)
+def period_range_label(start: date, end: date) -> str:
+    """Human label for an inclusive start→end range, e.g. 'Aug 19–Sep 18, 2026'."""
     if start.year != end.year:
         return (
             f"{start.strftime('%b')} {start.day}, {start.year}–"
@@ -179,6 +173,17 @@ def period_label(
     if start.month == end.month:
         return f"{start.strftime('%b')} {start.day}–{end.day}, {start.year}"
     return f"{start.strftime('%b')} {start.day}–{end.strftime('%b')} {end.day}, {start.year}"
+
+
+def period_label(
+    start: date,
+    *,
+    renewal_day: int,
+    renewal_time: time | None = None,
+) -> str:
+    """Human label like 'Aug 19–Sep 18, 2026'."""
+    end = period_end_for(start, renewal_day=renewal_day, renewal_time=renewal_time)
+    return period_range_label(start, end)
 
 
 def short_period_label(start: date) -> str:

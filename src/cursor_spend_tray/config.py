@@ -310,6 +310,14 @@ def resolve_usage_reset_at(
     return prev_reset_at
 
 
+class RenewalBoundaryEntry(BaseModel):
+    """One effective renewal-day change (for dual-era year charts)."""
+
+    day: int
+    time: str  # HH:MM:SS local
+    since: float  # unix timestamp when this boundary became effective
+
+
 class UsageSnapshot(BaseModel):
     cursor_models_pct: int | None = None
     other_models_pct: int | None = None
@@ -327,6 +335,8 @@ class UsageSnapshot(BaseModel):
     usage_reset_at_manual: float | None = None
     # When True, use the auto stamp and allow scrapes to rewrite usage_reset_at_auto.
     usage_reset_auto_discover: bool = True
+    # Appended when the effective renewal day changes (auto discover or manual).
+    renewal_boundary_history: list[RenewalBoundaryEntry] = []
     fetched_at: float | None = None
     source: str = "none"
     error: str | None = None
@@ -353,25 +363,59 @@ class UsageSnapshot(BaseModel):
             return self.usage_reset_at_auto
         return self.usage_reset_at_manual
 
-    def reset_stamp_fields(self) -> dict[str, float | None | bool]:
+    def reset_stamp_fields(self) -> dict[str, Any]:
         """Copy reset-related fields for UsageSnapshot reconstruction in the scraper."""
         return {
             "usage_reset_at_auto": self.usage_reset_at_auto,
             "usage_reset_at_manual": self.usage_reset_at_manual,
             "usage_reset_auto_discover": self.usage_reset_auto_discover,
+            "renewal_boundary_history": [
+                entry.model_dump() for entry in self.renewal_boundary_history
+            ],
         }
 
     def renewal_boundary(self) -> tuple[int, time_of_day]:
         """Day + clock for period splits (falls back to the 19th at midnight)."""
         return renewal_from_usage_reset(self.effective_usage_reset_at())
 
+    def note_renewal_boundary_change(
+        self,
+        *,
+        previous_effective_at: float | None,
+        since: float | None = None,
+    ) -> bool:
+        """Append history when the effective renewal *day* changes. Returns True if noted."""
+        new_at = self.effective_usage_reset_at()
+        if new_at is None:
+            return False
+        new_day, new_tod = renewal_from_usage_reset(new_at)
+        old_day: int | None = None
+        if previous_effective_at is not None:
+            old_day, _ = renewal_from_usage_reset(previous_effective_at)
+        if old_day is not None and old_day == new_day:
+            return False
+        if self.renewal_boundary_history and self.renewal_boundary_history[-1].day == new_day:
+            return False
+        stamp = float(since if since is not None else new_at)
+        self.renewal_boundary_history.append(
+            RenewalBoundaryEntry(
+                day=new_day,
+                time=new_tod.strftime("%H:%M:%S"),
+                since=stamp,
+            )
+        )
+        return True
+
     def set_usage_reset_day_time(self, day: int, hour: int, minute: int) -> None:
         """Persist a manual day/time boundary and disable auto-discover."""
+        prev = self.effective_usage_reset_at()
         self.usage_reset_at_manual = usage_reset_stamp_from_day_time(day, hour, minute)
         self.usage_reset_auto_discover = False
+        self.note_renewal_boundary_change(previous_effective_at=prev)
         self.save()
 
     def set_usage_reset_auto_discover(self, enabled: bool) -> None:
+        prev = self.effective_usage_reset_at()
         self.usage_reset_auto_discover = bool(enabled)
         # Seed manual from auto (or default) the first time the user leaves auto.
         if not enabled and self.usage_reset_at_manual is None:
@@ -380,6 +424,7 @@ class UsageSnapshot(BaseModel):
                 if self.usage_reset_at_auto is not None
                 else default_usage_reset_at()
             )
+        self.note_renewal_boundary_change(previous_effective_at=prev)
         self.save()
 
     def save(self) -> None:

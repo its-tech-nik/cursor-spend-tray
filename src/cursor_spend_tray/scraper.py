@@ -529,6 +529,7 @@ class SpendingScraper:
                     flush=True,
                 )
             fetched_at = time.time()
+            prev_effective = prev.effective_usage_reset_at()
             usage_reset_at_auto = resolve_usage_reset_at(
                 prev_cursor_pct=prev.cursor_models_pct,
                 new_cursor_pct=cursor_pct,
@@ -544,10 +545,14 @@ class SpendingScraper:
                 usage_reset_at_auto=usage_reset_at_auto,
                 usage_reset_at_manual=prev.usage_reset_at_manual,
                 usage_reset_auto_discover=prev.usage_reset_auto_discover,
+                renewal_boundary_history=list(prev.renewal_boundary_history),
                 fetched_at=fetched_at,
                 source=source,
                 raw_hint=data.get("hint"),
                 **account,
+            )
+            snap.note_renewal_boundary_change(
+                previous_effective_at=prev_effective, since=fetched_at
             )
             snap.save()
             print(
