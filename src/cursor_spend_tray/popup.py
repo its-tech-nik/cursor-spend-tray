@@ -3955,13 +3955,26 @@ class SpendPopup(QFrame):
         self.pin_button = PinButton(self)
         self.pin_button.toggled.connect(self.set_keep_open)
 
+        # Same footprint as CountdownLabel so swapping them doesn't resize the popup.
         self.status = QLabel("")
         status_font = QFont()
         status_font.setPointSize(9)
         self.status.setFont(status_font)
-        self.status.setStyleSheet("color: #777; background: transparent; border: none;")
+        self.status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.status.setStyleSheet(
+            """
+            QLabel {
+                color: #A0A0A0;
+                padding: 8px 12px;
+                border-radius: 8px;
+                background: transparent;
+                border: none;
+            }
+            """
+        )
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status.setFixedHeight(self.countdown.height())
         self.status.hide()
 
         root = QVBoxLayout(self)
@@ -4557,18 +4570,24 @@ class SpendPopup(QFrame):
         self.adjustSize()
 
     def _sync_countdown_visibility(self) -> None:
-        hide = bool(
-            getattr(self, "_browser_inaccessible", False)
+        """Show either the countdown or the status line — never both — in one slot."""
+        has_status = bool(self.status.text().strip())
+        hide_countdown = bool(
+            has_status
+            or getattr(self, "_browser_inaccessible", False)
             or getattr(self, "_awaiting_login", False)
         )
-        self.countdown.setVisible(not hide)
+        self.countdown.setVisible(not hide_countdown)
+        self.status.setVisible(has_status)
+        if has_status:
+            # Keep the status row the same height as the countdown button.
+            self.status.setFixedHeight(self.countdown.sizeHint().height())
 
     def set_status(self, text: str) -> None:
         clean = (text or "").strip()
         self.status.setText(clean)
-        self.status.setVisible(bool(clean))
-        if not clean:
-            self.adjustSize()
+        self._sync_countdown_visibility()
+        self.adjustSize()
 
     def set_remaining(self, seconds: int) -> None:
         self.countdown.set_remaining(seconds, refreshing=self._refreshing)
