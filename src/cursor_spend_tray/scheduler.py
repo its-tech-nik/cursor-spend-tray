@@ -149,6 +149,18 @@ class RefreshScheduler(QObject):
         self._warmup_fired = True
         self._emit_seconds()
 
+    def pause(self) -> None:
+        """Stop the poll countdown (e.g. while Auto browser launch benchmarks run)."""
+        self._paused = True
+        self._stop_probe()
+        self._warmup_fired = True
+        self._awaiting_ready = False
+        self._emit_seconds()
+
+    def resume(self) -> None:
+        """Clear pause and re-arm the next poll deadline."""
+        self._arm_next()
+
     def refresh(self) -> None:
         if self._worker and self._worker.isRunning():
             self.status_changed.emit("Refresh already in progress…")

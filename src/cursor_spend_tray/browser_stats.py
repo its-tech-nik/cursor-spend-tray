@@ -181,6 +181,49 @@ def format_run_tooltip(run: BrowserRunStats) -> str:
     )
 
 
+def efficiency_score(run: BrowserRunStats) -> float:
+    """Lower is better. Peak memory (MB) plus a CPU penalty (~25 MB per 1% of all cores)."""
+    mem_mb = run.peak_mem_bytes / (1024 * 1024)
+    return mem_mb + run.avg_cpu_pct * 25.0
+
+
+def average_runs(runs: list[BrowserRunStats]) -> BrowserRunStats | None:
+    """Mean of usable runs (for Auto browser pick after multiple scrape passes)."""
+    usable = [r for r in runs if r.usable]
+    if not usable:
+        return None
+    n = len(usable)
+    started = min(r.started_at for r in usable)
+    last = max(r.last_sample_at for r in usable)
+    return BrowserRunStats(
+        started_at=started,
+        last_sample_at=last,
+        cpu_seconds=sum(r.cpu_seconds for r in usable) / n,
+        wall_seconds=sum(r.wall_seconds for r in usable) / n,
+        peak_cpu_pct=sum(r.peak_cpu_pct for r in usable) / n,
+        peak_mem_bytes=int(sum(r.peak_mem_bytes for r in usable) / n),
+        mem_bytes_sum=int(sum(r.mem_bytes_sum for r in usable) / n),
+        samples=max(r.samples for r in usable),
+    )
+
+
+def pick_most_efficient(
+    runs_by_key: dict[str, list[BrowserRunStats]],
+) -> tuple[str, BrowserRunStats] | None:
+    """Return (browser_key, averaged_run) for the lowest efficiency_score, or None."""
+    best: tuple[str, BrowserRunStats, float] | None = None
+    for key, runs in runs_by_key.items():
+        avg = average_runs(runs)
+        if avg is None:
+            continue
+        score = efficiency_score(avg)
+        if best is None or score < best[2]:
+            best = (key, avg, score)
+    if best is None:
+        return None
+    return best[0], best[1]
+
+
 class BrowserResourceMonitor(QObject):
     """Samples the headless automation browser's process tree while a scrape runs."""
 
@@ -199,31 +242,47 @@ class BrowserResourceMonitor(QObject):
     def last_run(self, browser_key: str) -> BrowserRunStats | None:
         return self._stats.get(browser_key)
 
-    def begin_scrape(self) -> None:
+    def begin_run(self, *, require_headless: bool = True) -> bool:
+        """Start sampling the automation browser process tree. False if not running."""
         self._discard_run()
         info = self._config.browser
         procs = automation_main_procs(info, app_name=APP_NAME)
+        if not procs:
+            return False
         # Some Chromium forks rewrite argv into a single string; match on the join.
-        if not any("--headless" in " ".join(parts) for _pid, parts in procs):
-            return
+        if require_headless and not any(
+            "--headless" in " ".join(parts) for _pid, parts in procs
+        ):
+            return False
         now = time.time()
         self._run_key = info.key
         self._run = BrowserRunStats(started_at=now, last_sample_at=now)
         self._prev_at = now
         self._sample(baseline=True)
         self._timer.start()
+        return True
 
-    def end_scrape(self) -> None:
+    def end_run(self, *, persist: bool = True) -> BrowserRunStats | None:
+        """Stop sampling; optionally persist a usable run. Returns that run, else None."""
         if self._run is None:
-            return
+            return None
         self._timer.stop()
         self._sample()
         run, key = self._run, self._run_key
         self._discard_run()
         if run is None or key is None or not run.usable:
-            return
-        self._stats[key] = run
-        _save_stats(self._stats)
+            return None
+        if persist:
+            self._stats[key] = run
+            _save_stats(self._stats)
+        return run
+
+    def begin_scrape(self) -> None:
+        self.begin_run(require_headless=True)
+
+    def end_scrape(self) -> BrowserRunStats | None:
+        """Stop sampling and persist a usable run. Returns that run, else None."""
+        return self.end_run(persist=True)
 
     def stop(self) -> None:
         self._discard_run()

@@ -41,7 +41,13 @@ from PyQt6.QtWidgets import (
 
 from . import autostart
 from .auth_detect import snapshot_needs_login
-from .browser_stats import BrowserResourceMonitor, format_run_summary, format_run_tooltip
+from .browser_stats import (
+    BrowserResourceMonitor,
+    BrowserRunStats,
+    format_run_summary,
+    format_run_tooltip,
+    pick_most_efficient,
+)
 from .config import (
     APP_NAME,
     POLL_INTERVAL_MINUTES,
@@ -79,6 +85,12 @@ _SPIN_INTERVAL_MS = 80        # icon animation frame interval (~12 fps)
 # After wiping the profile for auth 429, ignore further wipes for this long.
 _LOGIN_RATE_LIMIT_COOLDOWN_S = 15 * 60
 # Keep in sync with scheduler.BROWSER_WARMUP_SECONDS / quit-between pre-launch.
+# Auto browser pick: launch each installed browser this many times, average usage.
+_AUTO_BROWSER_PASSES = 2
+_AUTO_BENCH_SAMPLE_MS = 8_000  # sample CPU/mem while the launched browser is up
+_AUTO_BENCH_GAP_MS = 10_000  # idle gap between launch tests
+_AUTO_BENCH_SETTLE_MS = 1_000  # wait for the process to appear after Popen
+_AUTO_BENCH_SETTLE_TRIES = 10
 _CTX_ROW_STYLE = """
 QFrame#ctxRow {
     background: transparent;
@@ -1135,6 +1147,19 @@ class TrayApp(QWidget):
         )
         self._view_browser_action.triggered.connect(self._on_view_browser)
 
+        self._auto_browser_action: QAction | None = None
+        self._auto_bench_active = False
+        self._auto_bench_queue: list[str] = []
+        self._auto_bench_total = 0
+        self._auto_bench_results: dict[str, list[BrowserRunStats]] = {}
+        self._auto_bench_current_key: str | None = None
+        self._auto_bench_prev_key: str | None = None
+        self._auto_bench_settle_tries = 0
+        self._auto_bench_phase: str | None = None
+        self._auto_bench_timer = QTimer(self)
+        self._auto_bench_timer.setSingleShot(True)
+        self._auto_bench_timer.timeout.connect(self._on_auto_bench_timer)
+
         self._avatar_url_cached: str | None = None
         self._avatar_pixmap = QPixmap()
 
@@ -1475,7 +1500,7 @@ class TrayApp(QWidget):
             else:
                 self._headless_switch_pending = False
                 self._stop_logout_network_watch()
-                if self.config.between_scrapes == "quit":
+                if self.config.between_scrapes == "quit" and not self._auto_bench_active:
                     QTimer.singleShot(0, self._quit_browser_between_scrapes)
 
     def _prompt_login_if_needed(self, snap: UsageSnapshot) -> bool:
@@ -1858,10 +1883,34 @@ class TrayApp(QWidget):
             self._browser_group.removeAction(action)
             action.deleteLater()
         self._browser_actions.clear()
+        if self._auto_browser_action is not None:
+            self._browser_group.removeAction(self._auto_browser_action)
+            self._auto_browser_action.deleteLater()
+            self._auto_browser_action = None
         self._automation_menu.clear_actions()
 
         browsers = self.config.installed_browsers()
         current_key = self.config.browser.key
+        auto = QAction("Auto", self)
+        auto.setCheckable(True)
+        auto.setEnabled(bool(browsers))
+        auto.setToolTip(
+            "Launch each installed browser twice, average launch CPU/memory, then "
+            "select the lightest. No sign-in required."
+        )
+        if self._auto_bench_active and self._auto_bench_total > 0:
+            done = self._auto_bench_total - len(self._auto_bench_queue)
+            auto.setProperty("ctxDetail", f"{done}/{self._auto_bench_total}")
+            auto.setProperty(
+                "ctxDetailTip",
+                "Launching each browser twice to measure startup resource use, "
+                "then averaging and picking the lightest.",
+            )
+        auto.triggered.connect(self._on_auto_browser_chosen)
+        self._browser_group.addAction(auto)
+        self._auto_browser_action = auto
+        self._automation_menu.add_action(auto)
+        self._set_action_checked(auto, self._auto_bench_active)
         if not browsers:
             empty = QAction("No supported browsers found", self)
             empty.setEnabled(False)
@@ -1884,7 +1933,9 @@ class TrayApp(QWidget):
             self._browser_group.addAction(action)
             self._browser_actions.append(action)
             self._automation_menu.add_action(action)
-            self._set_action_checked(action, info.key == current_key)
+            self._set_action_checked(
+                action, (not self._auto_bench_active) and info.key == current_key
+            )
 
     def _sync_between_scrapes_actions(self) -> None:
         mode = self.config.between_scrapes
@@ -1947,9 +1998,247 @@ class TrayApp(QWidget):
         )
 
     def _on_browser_chosen(self, key: str) -> None:
+        if self._auto_bench_active:
+            self._cancel_auto_browser_bench("Cancelled — switched to a specific browser")
         if self.config.browser.key == key:
             self._rebuild_browser_actions()
             return
+        self._switch_automation_browser(key)
+
+    def _on_auto_browser_chosen(self) -> None:
+        """Warn, then launch each browser twice, average usage, pick the lightest."""
+        if self._auto_bench_active:
+            self._rebuild_browser_actions()
+            return
+        browsers = self.config.installed_browsers()
+        if not browsers:
+            self._rebuild_browser_actions()
+            return
+        names = ", ".join(info.display_name for info in browsers)
+        gap_s = _AUTO_BENCH_GAP_MS // 1000
+        reply = QMessageBox.warning(
+            None,
+            "Auto browser selection",
+            (
+                "Auto will launch each installed automation browser headless "
+                f"({_AUTO_BROWSER_PASSES} times each), measure CPU and memory "
+                f"during startup, wait {gap_s}s between tests, average the two "
+                "runs, then select the lightest.\n\n"
+                f"Browsers: {names}\n\n"
+                "No sign-in is required — browsers are only opened and closed."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            self._rebuild_browser_actions()
+            return
+        keys = [info.key for info in browsers]
+        self._auto_bench_prev_key = self.config.browser.key
+        self._auto_bench_queue = keys * _AUTO_BROWSER_PASSES
+        self._auto_bench_total = len(self._auto_bench_queue)
+        self._auto_bench_results = {key: [] for key in keys}
+        self._auto_bench_current_key = None
+        self._auto_bench_settle_tries = 0
+        self._auto_bench_active = True
+        self._viewing_browser = False
+        self._login_launch_pending = False
+        self._headless_switch_pending = False
+        self._stop_login_network_watch()
+        self._stop_logout_network_watch()
+        self.scheduler.pause()
+        self.scheduler.cancel_awaiting_ready()
+        if hasattr(self, "_launch_retry_timer"):
+            self._launch_retry_timer.stop()
+        self._resource_monitor.stop()
+        if self.config.browser_is_running():
+            self.config.stop_browser(timeout=8.0)
+        self._rebuild_browser_actions()
+        self.popup.set_status(
+            f"Auto browser pick: launching {len(keys)} browsers "
+            f"× {_AUTO_BROWSER_PASSES} (avg of two)…"
+        )
+        self._auto_bench_advance()
+
+    def _cancel_auto_browser_bench(self, status: str | None = None) -> None:
+        was_active = self._auto_bench_active
+        prev = self._auto_bench_prev_key
+        self._auto_bench_timer.stop()
+        self._auto_bench_phase = None
+        self._auto_bench_active = False
+        self._auto_bench_queue.clear()
+        self._auto_bench_total = 0
+        self._auto_bench_results.clear()
+        self._auto_bench_current_key = None
+        self._auto_bench_prev_key = None
+        self._auto_bench_settle_tries = 0
+        self._resource_monitor.stop()
+        if was_active:
+            if self.config.browser_is_running():
+                self.config.stop_browser(timeout=8.0)
+            if prev and self.config.browser.key != prev:
+                self.config.set_browser_key(prev)
+            self.scheduler.resume()
+            if status:
+                self.popup.set_status(status)
+
+    def _auto_bench_progress_label(self) -> str:
+        done = self._auto_bench_total - len(self._auto_bench_queue)
+        return f"{done}/{self._auto_bench_total}"
+
+    def _auto_bench_arm(self, phase: str, ms: int) -> None:
+        self._auto_bench_phase = phase
+        self._auto_bench_timer.start(ms)
+
+    def _on_auto_bench_timer(self) -> None:
+        phase = self._auto_bench_phase
+        self._auto_bench_phase = None
+        if not self._auto_bench_active:
+            return
+        if phase == "settle":
+            self._auto_bench_after_launch_settle()
+        elif phase == "sample":
+            self._auto_bench_end_sample()
+        elif phase == "gap":
+            self._auto_bench_advance()
+
+    def _auto_bench_advance(self) -> None:
+        """Launch the next queued browser for a startup resource sample."""
+        if not self._auto_bench_active:
+            return
+        if not self._auto_bench_queue:
+            self._finish_auto_browser_bench()
+            return
+        key = self._auto_bench_queue[0]
+        self._auto_bench_current_key = key
+        self._auto_bench_settle_tries = 0
+        info = self.config.set_browser_key(key)
+        progress = self._auto_bench_progress_label()
+        self._rebuild_browser_actions()
+        if self.config.browser_is_running():
+            self.config.stop_browser(timeout=8.0)
+        self.popup.set_status(
+            f"Auto browser pick ({progress}): launching {info.display_name}…"
+        )
+        argv = self.config.browser_launch_argv(headless=True)
+        try:
+            subprocess.Popen(
+                argv,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            log.exception("Auto browser pick failed to launch %s", info.display_name)
+            self.popup.set_status(
+                f"Auto browser pick ({progress}): could not launch "
+                f"{info.display_name} — skipping…"
+            )
+            self._auto_bench_queue.pop(0)
+            self._auto_bench_arm("gap", _AUTO_BENCH_GAP_MS)
+            return
+        self._auto_bench_arm("settle", _AUTO_BENCH_SETTLE_MS)
+
+    def _auto_bench_after_launch_settle(self) -> None:
+        """Once the process is up, sample resources for a fixed window."""
+        if not self._auto_bench_active:
+            return
+        if not self._resource_monitor.begin_run(require_headless=True):
+            self._auto_bench_settle_tries += 1
+            if self._auto_bench_settle_tries < _AUTO_BENCH_SETTLE_TRIES:
+                self._auto_bench_arm("settle", _AUTO_BENCH_SETTLE_MS)
+                return
+            progress = self._auto_bench_progress_label()
+            name = self.config.browser.display_name
+            log.warning("Auto browser pick: %s never became sampleable", name)
+            self.popup.set_status(
+                f"Auto browser pick ({progress}): {name} did not start — skipping…"
+            )
+            if self.config.browser_is_running():
+                self.config.stop_browser(timeout=8.0)
+            if self._auto_bench_queue:
+                self._auto_bench_queue.pop(0)
+            self._auto_bench_arm("gap", _AUTO_BENCH_GAP_MS)
+            return
+        progress = self._auto_bench_progress_label()
+        name = self.config.browser.display_name
+        self.popup.set_status(
+            f"Auto browser pick ({progress}): measuring {name} launch…"
+        )
+        self._auto_bench_arm("sample", _AUTO_BENCH_SAMPLE_MS)
+
+    def _auto_bench_end_sample(self) -> None:
+        """Persist the launch sample, quit the browser, then wait the gap."""
+        if not self._auto_bench_active:
+            return
+        key = self._auto_bench_current_key or self.config.browser.key
+        run = self._resource_monitor.end_run(persist=True)
+        if self.config.browser_is_running():
+            self.config.stop_browser(timeout=8.0)
+        progress = self._auto_bench_progress_label()
+        gap_s = _AUTO_BENCH_GAP_MS // 1000
+        if run is not None and run.usable:
+            self._auto_bench_results.setdefault(key, []).append(run)
+            self.popup.set_status(
+                f"Auto browser pick ({progress}): recorded "
+                f"{format_run_summary(run)} — waiting {gap_s}s…"
+            )
+        else:
+            self.popup.set_status(
+                f"Auto browser pick ({progress}): no usable stats — waiting {gap_s}s…"
+            )
+        if self._auto_bench_queue and self._auto_bench_queue[0] == key:
+            self._auto_bench_queue.pop(0)
+        self._rebuild_browser_actions()
+        self._auto_bench_arm("gap", _AUTO_BENCH_GAP_MS)
+
+    def _finish_auto_browser_bench(self) -> None:
+        results = dict(self._auto_bench_results)
+        prev = self._auto_bench_prev_key
+        self._auto_bench_timer.stop()
+        self._auto_bench_phase = None
+        self._auto_bench_active = False
+        self._auto_bench_queue.clear()
+        self._auto_bench_total = 0
+        self._auto_bench_results.clear()
+        self._auto_bench_current_key = None
+        self._auto_bench_prev_key = None
+        self._resource_monitor.stop()
+        if self.config.browser_is_running():
+            self.config.stop_browser(timeout=8.0)
+
+        picked = pick_most_efficient(results)
+        if picked is None:
+            if prev:
+                self.config.set_browser_key(prev)
+            self._rebuild_browser_actions()
+            self.scheduler.resume()
+            self.popup.set_status(
+                "Auto browser pick failed — could not measure any browser"
+            )
+            return
+
+        key, avg = picked
+        info = self.config.set_browser_key(key)
+        summary = format_run_summary(avg)
+        self._rebuild_browser_actions()
+        self.popup.set_status(f"Auto selected {info.display_name} ({summary})")
+        log.info(
+            "Auto browser pick chose %s (%s) from %s measured keys",
+            info.display_name,
+            summary,
+            sorted(results),
+        )
+        self.scheduler.resume()
+        # Warm the winning browser the same way a normal selection would.
+        if self._prompt_login_if_no_session_cookie():
+            return
+        self.scheduler.refresh()
+
+    def _switch_automation_browser(
+        self, key: str, *, status: str | None = None
+    ) -> None:
+        """Stop the current automation browser, switch profile key, scrape or login."""
         if self.config.browser_is_running():
             self.config.stop_browser(timeout=8.0)
         info = self.config.set_browser_key(key)
@@ -1961,9 +2250,12 @@ class TrayApp(QWidget):
         self._viewing_browser = False
         self._stop_logout_network_watch()
         if self._prompt_login_if_no_session_cookie():
+            if status:
+                self.popup.set_status(status)
             return
         self.popup.set_status(
-            f"Automation browser: {info.display_name} — checking sign-in…"
+            status
+            or f"Automation browser: {info.display_name} — checking sign-in…"
         )
         self.scheduler.refresh()
 
@@ -2357,7 +2649,8 @@ class TrayApp(QWidget):
         if hasattr(self, "_ctx") and self._ctx.isVisible():
             self._ctx.hide()
 
-        # 6. Browser resource sampler
+        # 6. Browser resource sampler / Auto pick
+        self._cancel_auto_browser_bench()
         if hasattr(self, "_resource_monitor"):
             self._resource_monitor.stop()
 
