@@ -1,9 +1,13 @@
 """Watch browser network traffic for session transitions (login / logout).
 
-Login watch: active during the headed sign-in wait. Only a real session cookie
-(``WorkosCursorSessionToken``) counts as success — not dashboard HTML loads or
-opportunistic ``/api/dashboard`` calls during Cloudflare / OAuth hops. When the
-cookie appears, the tray switches to headless and scrapes without a manual refresh.
+Login watch: active during the headed sign-in wait. Success requires a real
+session cookie (``WorkosCursorSessionToken``) *and* at least one dashboard page
+target, confirmed across consecutive polls. A cookie left in the profile DB
+alone is not enough — that previously closed the headed window when ``/spending``
+redirected to sign-in. Leftover authenticator tabs after OAuth are fine as long
+as a dashboard tab is open. Dashboard HTML loads or opportunistic
+``/api/dashboard`` calls during Cloudflare / OAuth hops also do not count. On
+success the tray switches to headless and scrapes without a manual refresh.
 
 Logout watch: active only while View Browser keeps a headed window open. Auth /
 logout navigation (or a 401/403 on the dashboard API) flips the tray to signed-out
@@ -60,6 +64,10 @@ _CONNECT_RETRY_SECONDS = 90.0
 _CONNECT_RETRY_SLEEP = 1.0
 # How often to re-check for WorkosCursorSessionToken while awaiting sign-in.
 _SESSION_COOKIE_POLL_SECONDS = 1.0
+# Consecutive successful polls before treating login as finished. Survives the
+# brief spending-URL flash when LOGIN_URL (= /dashboard/spending) redirects to
+# authenticator with a stale session cookie still in the profile.
+_LOGIN_SUCCESS_STREAK = 2
 
 
 def url_looks_like_auth(url: str) -> bool:
@@ -82,6 +90,18 @@ def url_looks_like_dashboard_page(url: str) -> bool:
     if host not in {"cursor.com", "www.cursor.com"}:
         return False
     return any(marker in lowered for marker in _DASHBOARD_PAGE_MARKERS)
+
+
+def page_urls_look_signed_in(urls: list[str] | tuple[str, ...]) -> bool:
+    """True when at least one open page is a Cursor dashboard URL.
+
+    Auth tabs left open after OAuth (authenticator.cursor.sh) must not block
+    success — only the absence of any dashboard target should. The stale-cookie
+    redirect case is handled separately: after bounce to authenticator there is
+    no dashboard URL, and login success still requires a consecutive poll streak
+    so the brief spending launch URL cannot false-trigger alone.
+    """
+    return any(url_looks_like_dashboard_page(u) for u in urls)
 
 
 def url_looks_like_logout(url: str) -> bool:
@@ -316,11 +336,15 @@ class _SessionNetworkWatchThread(QThread):
         *,
         poll: Any,
     ) -> str:
-        """Wait until ``fired`` or ``poll()`` reports the session cookie.
+        """Wait until ``fired`` or ``poll()`` reports settled sign-in.
 
         ``poll`` is an async callable returning a trigger string when the session
-        cookie is present, else ``\"\"``.
+        looks finished on this tick, else ``\"\"``. Requires
+        ``_LOGIN_SUCCESS_STREAK`` consecutive hits so a stale cookie plus the
+        spending launch URL cannot close the window during an auth redirect.
         """
+        streak = 0
+        last_trigger = ""
         while not self._stop.is_set() and not fired.is_set():
             try:
                 trigger = await poll()
@@ -328,25 +352,22 @@ class _SessionNetworkWatchThread(QThread):
                 log.debug("Session cookie poll failed", exc_info=True)
                 trigger = ""
             if trigger:
-                return str(trigger)
+                streak += 1
+                last_trigger = str(trigger)
+                if streak >= _LOGIN_SUCCESS_STREAK:
+                    return last_trigger
+            else:
+                streak = 0
+                last_trigger = ""
             await self._wait_stop_or_timeout(_SESSION_COOKIE_POLL_SECONDS)
         return ""
 
-    async def _cdp_on_dashboard_page(self, client: CdpClient) -> bool:
-        """True when a page target is on the Cursor dashboard (not authenticator)."""
-        try:
-            targets = await client.list_page_targets()
-        except CdpError as exc:
-            log.debug("list_page_targets failed: %s", exc)
-            return False
-        return any(url_looks_like_dashboard_page(str(t.get("url") or "")) for t in targets)
-
     async def _cdp_session_cookie_present(self, client: CdpClient) -> str:
-        """Return a trigger when session cookie exists *and* dashboard is open.
+        """Return a trigger when session cookie exists and dashboard is settled.
 
-        Cookie alone is not enough: partial OAuth / authenticator traffic can
-        look like a session. Closing only after the dashboard URL is visible
-        matches a finished human login.
+        Cookie alone is not enough: a leftover WorkosCursorSessionToken after a
+        failed /spending load must not count. Require at least one dashboard
+        page target (authenticator tabs left open after OAuth are ignored).
         """
         try:
             result = await client.call("Network.getAllCookies")
@@ -355,18 +376,41 @@ class _SessionNetworkWatchThread(QThread):
             return ""
         if not cookies_include_session(result.get("cookies")):
             return ""
-        if not await self._cdp_on_dashboard_page(client):
+        try:
+            targets = await client.list_page_targets()
+        except CdpError as exc:
+            log.debug("list_page_targets failed: %s", exc)
+            return ""
+        urls = [str(t.get("url") or "") for t in targets]
+        if not page_urls_look_signed_in(urls):
             return ""
         return CURSOR_SESSION_COOKIE
 
-    def _profile_session_cookie_present(self) -> str:
-        """Return a trigger label when the dedicated profile DB has the cookie."""
+    def _profile_session_cookie_present(self) -> bool:
+        """True when the dedicated profile DB has WorkosCursorSessionToken."""
         try:
-            if profile_has_cursor_session_cookie(self._config.browser):
-                return CURSOR_SESSION_COOKIE
+            return bool(profile_has_cursor_session_cookie(self._config.browser))
         except Exception:
             log.debug("Profile session cookie check failed", exc_info=True)
-        return ""
+            return False
+
+    async def _bidi_session_ready(self, client: BidiClient) -> str:
+        """Return a trigger when Firefox contexts show a settled signed-in UI.
+
+        BiDi has no getAllCookies equivalent here, so the profile DB supplies the
+        cookie check — but only together with non-auth dashboard context URLs.
+        """
+        try:
+            contexts = await client.get_contexts()
+        except BidiError as exc:
+            log.debug("browsingContext.getTree failed: %s", exc)
+            return ""
+        urls = [str(c.get("url") or "") for c in contexts]
+        if not page_urls_look_signed_in(urls):
+            return ""
+        if not await asyncio.to_thread(self._profile_session_cookie_present):
+            return ""
+        return CURSOR_SESSION_COOKIE
 
     def _emit_watch_result(self, *, mode: WatchMode, trigger_url: str) -> None:
         if self._stop.is_set():
@@ -468,16 +512,9 @@ class _SessionNetworkWatchThread(QThread):
                     log.debug("Attach/Network.enable: %s", exc)
 
             if mode == "login":
-
-                async def _poll_cdp_or_profile() -> str:
-                    return (
-                        await self._cdp_session_cookie_present(client)
-                        or await asyncio.to_thread(self._profile_session_cookie_present)
-                    )
-
                 poll_trigger = await self._watch_until_with_cookie_poll(
                     fired,
-                    poll=_poll_cdp_or_profile,
+                    poll=lambda: self._cdp_session_cookie_present(client),
                 )
                 if poll_trigger and not self._rate_limited:
                     trigger_url = trigger_url or poll_trigger
@@ -576,13 +613,9 @@ class _SessionNetworkWatchThread(QThread):
                 )
 
             if mode == "login":
-
-                async def _poll_profile() -> str:
-                    return await asyncio.to_thread(self._profile_session_cookie_present)
-
                 poll_trigger = await self._watch_until_with_cookie_poll(
                     fired,
-                    poll=_poll_profile,
+                    poll=lambda: self._bidi_session_ready(client),
                 )
                 if poll_trigger and not self._rate_limited:
                     trigger_url = trigger_url or poll_trigger

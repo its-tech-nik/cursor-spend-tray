@@ -5,6 +5,7 @@ from __future__ import annotations
 from cursor_spend_tray.login_network_watch import (
     cookies_include_session,
     headers_carry_session_cookie,
+    page_urls_look_signed_in,
     response_suggests_auth_rate_limit,
     response_suggests_authenticated_session,
     response_suggests_logout,
@@ -103,3 +104,17 @@ def test_auth_rate_limit_detects_authenticator_429() -> None:
         "https://example.com/sign-up",
         429,
     )
+
+
+def test_page_urls_look_signed_in_requires_dashboard() -> None:
+    spending = "https://cursor.com/dashboard/spending"
+    auth = "https://authenticator.cursor.sh/?client_id=x"
+    assert page_urls_look_signed_in([spending])
+    assert page_urls_look_signed_in(["https://www.cursor.com/dashboard/usage"])
+    # OAuth often leaves an authenticator tab open next to the dashboard.
+    assert page_urls_look_signed_in([spending, auth])
+    # Stale cookie + bounce to authenticator only: no dashboard target.
+    assert not page_urls_look_signed_in([auth])
+    assert not page_urls_look_signed_in([])
+    assert not page_urls_look_signed_in(["about:blank"])
+    assert not page_urls_look_signed_in(["https://cursor.com/"])
