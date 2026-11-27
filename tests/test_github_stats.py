@@ -28,6 +28,7 @@ from cursor_spend_tray.github_stats import (
     github_preview_for_day,
     normalize_branch_preference,
     peek_cached_github_habits_preview,
+    refresh_github_project_branch,
     resolve_track_branch,
 )
 
@@ -484,6 +485,128 @@ class GithubPreviewForDayTests(unittest.TestCase):
         empty = github_preview_for_day(preview, "2026-10-22")
         self.assertEqual(empty.total_commits, 0)
         self.assertEqual(empty.projects, ())
+
+
+class RefreshGithubProjectBranchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+        self._data_dir = patch(
+            "cursor_spend_tray.github_stats.data_dir", return_value=self.root
+        )
+        self._data_dir.start()
+        self.base = GithubHabitsPreview(
+            available=True,
+            login="dev",
+            period_label="Oct 19 – Nov 18",
+            period_start=date(2026, 10, 19).isoformat(),
+            period_end=date(2026, 11, 18).isoformat(),
+            projects=(
+                GithubProjectRow(
+                    name="alpha",
+                    full_name="acme/alpha",
+                    commit_count=5,
+                    pr_count=2,
+                    additions=40,
+                    deletions=4,
+                    branch_preference=BRANCH_PREF_MAIN,
+                    default_branch="main",
+                    track_branch="main",
+                    day_stats=(
+                        GithubDayStat(
+                            day="2026-10-20",
+                            commit_count=5,
+                            additions=40,
+                            deletions=4,
+                        ),
+                    ),
+                ),
+                GithubProjectRow(
+                    name="beta",
+                    full_name="acme/beta",
+                    commit_count=1,
+                    pr_count=0,
+                    additions=5,
+                    deletions=0,
+                    branch_preference=BRANCH_PREF_MAIN,
+                    default_branch="main",
+                    track_branch="main",
+                    day_stats=(
+                        GithubDayStat(
+                            day="2026-10-21",
+                            commit_count=1,
+                            additions=5,
+                            deletions=0,
+                        ),
+                    ),
+                ),
+            ),
+            total_commits=6,
+            total_prs=2,
+            total_additions=45,
+            total_deletions=4,
+        )
+
+    def tearDown(self) -> None:
+        self._data_dir.stop()
+        self._tmpdir.cleanup()
+
+    def test_refreshes_only_the_requested_project(self) -> None:
+        with (
+            patch(
+                "cursor_spend_tray.github_stats._viewer_login",
+                return_value="dev",
+            ),
+            patch(
+                "cursor_spend_tray.github_stats._project_from_branch",
+                return_value=(
+                    GithubProjectRow(
+                        name="alpha",
+                        full_name="acme/alpha",
+                        commit_count=9,
+                        pr_count=2,
+                        additions=90,
+                        deletions=10,
+                        branch_preference=BRANCH_PREF_DEV,
+                        default_branch="main",
+                        track_branch="dev",
+                        day_stats=(
+                            GithubDayStat(
+                                day="2026-10-20",
+                                commit_count=9,
+                                additions=90,
+                                deletions=10,
+                            ),
+                        ),
+                    ),
+                    {},
+                ),
+            ) as activity,
+        ):
+            updated = refresh_github_project_branch(
+                base=self.base,
+                full_name="acme/alpha",
+                preference=BRANCH_PREF_DEV,
+                renewal_day=19,
+                renewal_time=time(20, 0),
+                now=datetime(2026, 10, 22, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(updated.available)
+        self.assertEqual([p.name for p in updated.projects], ["alpha", "beta"])
+        alpha = updated.projects[0]
+        beta = updated.projects[1]
+        self.assertEqual(alpha.commit_count, 9)
+        self.assertEqual(alpha.branch_preference, BRANCH_PREF_DEV)
+        self.assertEqual(alpha.pr_count, 2)
+        self.assertEqual(beta.commit_count, 1)
+        self.assertEqual(beta.additions, 5)
+        self.assertEqual(updated.total_commits, 10)
+        self.assertEqual(updated.total_additions, 95)
+        self.assertEqual(updated.total_deletions, 10)
+        activity.assert_called_once()
+        self.assertEqual(activity.call_args.kwargs["full_name"], "acme/alpha")
+        self.assertEqual(activity.call_args.kwargs["preference"], BRANCH_PREF_DEV)
 
 
 if __name__ == "__main__":

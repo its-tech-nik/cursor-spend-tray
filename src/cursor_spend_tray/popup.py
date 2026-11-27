@@ -53,14 +53,21 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import (
+    DEFAULT_GITHUB_PROJECT_SORT,
     DEFAULT_POPUP_OPEN_ANIMATION,
     DEFAULT_TRAY_METRIC,
+    GITHUB_PROJECT_SORT_LABELS,
+    GITHUB_PROJECT_SORTS,
     TRAY_METRICS,
+    GithubProjectSort,
     PopupOpenAnimation,
     TrayMetric,
     UsageSnapshot,
     format_usage_reset_label,
+    load_github_project_sort,
     load_popup_panel_order,
+    normalize_github_project_sort,
+    save_github_project_sort,
     save_popup_panel_order,
 )
 from .billing import period_label as billing_period_label
@@ -73,6 +80,7 @@ from .github_stats import (
     collect_github_habits_preview,
     github_preview_for_day,
     peek_cached_github_habits_preview,
+    refresh_github_project_branch,
     save_github_branch_pref,
 )
 from .qt_threads import stop_qthread
@@ -3752,6 +3760,151 @@ def _github_owner_repo(full_name: str, fallback_name: str = "") -> tuple[str, st
     return "", name
 
 
+def _sort_github_projects(
+    projects: tuple[GithubProjectRow, ...] | list[GithubProjectRow],
+    sort: GithubProjectSort | str,
+) -> list[GithubProjectRow]:
+    """Order project cards by commits, PRs, or lines changed (desc)."""
+    mode = normalize_github_project_sort(sort)
+
+    def key(row: GithubProjectRow) -> tuple:
+        name = row.name.lower()
+        if mode == "prs":
+            return (-row.pr_count, -row.commit_count, -row.additions, name)
+        if mode == "lines":
+            churn = row.additions + row.deletions
+            return (-churn, -row.commit_count, -row.pr_count, name)
+        return (-row.commit_count, -row.pr_count, -row.additions, name)
+
+    return sorted(projects, key=key)
+
+
+class GithubProjectSortDropdown(QLabel):
+    """Sort control for GitHub project cards — click opens commits/PRs/lines menu."""
+
+    changed = pyqtSignal(str)
+
+    _OPTIONS: tuple[tuple[GithubProjectSort, str], ...] = tuple(
+        (key, GITHUB_PROJECT_SORT_LABELS[key]) for key in GITHUB_PROJECT_SORTS
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._sort: GithubProjectSort = DEFAULT_GITHUB_PROJECT_SORT
+        font = QFont()
+        font.setPointSize(8)
+        font.setWeight(QFont.Weight.DemiBold)
+        self.setFont(font)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.setToolTip("Sort projects by commits, PRs, or lines changed")
+        self.setStyleSheet(
+            """
+            QLabel {
+                color: #C5CEDA;
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }
+            QLabel:hover {
+                color: #F2F4F8;
+                text-decoration: underline;
+            }
+            """
+        )
+        self._apply()
+
+    def sort_mode(self) -> GithubProjectSort:
+        return self._sort
+
+    def set_sort_mode(self, sort: GithubProjectSort | str) -> None:
+        self._sort = normalize_github_project_sort(sort)
+        self._apply()
+
+    def _apply(self) -> None:
+        label = GITHUB_PROJECT_SORT_LABELS[self._sort]
+        self.setText(f"{label} ▾")
+        metrics = QFontMetrics(self.font())
+        self.setFixedWidth(metrics.horizontalAdvance(self.text()) + 2)
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001
+        font = QFont(self.font())
+        font.setUnderline(True)
+        self.setFont(font)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        font = QFont(self.font())
+        font.setUnderline(False)
+        self.setFont(font)
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self._show_menu()
+        super().mouseReleaseEvent(event)
+
+    def _parent_of_type(self, cls: type[QWidget]) -> QWidget | None:
+        current = self.parent()
+        while current is not None:
+            if isinstance(current, cls):
+                return current
+            current = current.parent()
+        return None
+
+    def _show_menu(self) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background: #1A1E24;
+                border: 1px solid #3A465A;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                color: #C5CEDA;
+                padding: 4px 14px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background: #2A3548;
+                color: #F2F4F8;
+            }
+            """
+        )
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        for value, label in self._OPTIONS:
+            action = QAction(label, menu)
+            action.setCheckable(True)
+            action.setChecked(value == self._sort)
+            action.setData(value)
+            group.addAction(action)
+            menu.addAction(action)
+
+        popup = self._parent_of_type(SpendPopup)
+        if isinstance(popup, SpendPopup):
+            popup.begin_nested_ui()
+        try:
+            chosen = menu.exec(self.mapToGlobal(self.rect().bottomRight()))
+        finally:
+            if isinstance(popup, SpendPopup):
+                popup.end_nested_ui()
+        if chosen is None:
+            return
+        value = normalize_github_project_sort(chosen.data())
+        if value == self._sort:
+            return
+        self.set_sort_mode(value)
+        self.changed.emit(value)
+
+
 def _github_metric_label(text: str, *, color: str) -> QLabel:
     """Plain colored metric text — no chip/bubble chrome."""
     lbl = QLabel(text)
@@ -3780,6 +3933,7 @@ class GithubProjectCard(QFrame):
         self._full_name = (project.full_name or "").strip()
         self._press_pos: QPoint | None = None
         self._suppress_repo_open = False
+        self._loading = False
         self.setObjectName("githubProjectCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
@@ -3839,34 +3993,48 @@ class GithubProjectCard(QFrame):
         full_name = project.full_name
 
         def _on_branch(branch: str, full: str = full_name) -> None:
+            if self._loading:
+                return
             save_github_branch_pref(full, branch)
             self.branch_changed.emit(full, branch)
 
         self._branch_toggle.changed.connect(_on_branch)
 
+        self._metric_commits = _github_metric_label(
+            f"{project.commit_count} commits", color="#E0C090"
+        )
+        self._metric_prs = _github_metric_label(
+            f"{project.pr_count} PRs", color="#9BB0C9"
+        )
+        self._metric_added = _github_metric_label(
+            _format_signed_lines(project.additions, positive=True),
+            color="#A8C3A4",
+        )
+        self._metric_removed = _github_metric_label(
+            _format_signed_lines(project.deletions, positive=False),
+            color="#D9897A",
+        )
+        self._fetching = QLabel("Fetching…")
+        fetch_font = QFont()
+        fetch_font.setPointSize(8)
+        fetch_font.setWeight(QFont.Weight.DemiBold)
+        self._fetching.setFont(fetch_font)
+        self._fetching.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._fetching.setStyleSheet(
+            "color: #7E8694; background: transparent; border: none;"
+        )
+        self._fetching.hide()
+
         metrics = QHBoxLayout()
         metrics.setContentsMargins(0, 0, 0, 0)
         metrics.setSpacing(8)
-        metrics.addWidget(
-            _github_metric_label(
-                f"{project.commit_count} commits", color="#E0C090"
-            )
-        )
-        metrics.addWidget(
-            _github_metric_label(f"{project.pr_count} PRs", color="#9BB0C9")
-        )
-        metrics.addWidget(
-            _github_metric_label(
-                _format_signed_lines(project.additions, positive=True),
-                color="#A8C3A4",
-            )
-        )
-        metrics.addWidget(
-            _github_metric_label(
-                _format_signed_lines(project.deletions, positive=False),
-                color="#D9897A",
-            )
-        )
+        metrics.addWidget(self._metric_commits)
+        metrics.addWidget(self._metric_prs)
+        metrics.addWidget(self._metric_added)
+        metrics.addWidget(self._metric_removed)
+        metrics.addWidget(self._fetching)
 
         right_col = QVBoxLayout()
         right_col.setContentsMargins(0, 0, 0, 0)
@@ -3894,6 +4062,28 @@ class GithubProjectCard(QFrame):
         for child in self.findChildren(QWidget):
             if child is not self._branch_toggle:
                 child.installEventFilter(self)
+
+    @property
+    def full_name(self) -> str:
+        return self._full_name
+
+    def set_loading(self, loading: bool, *, branch: str | None = None) -> None:
+        """Show a per-card fetch state without removing sibling projects."""
+        self._loading = bool(loading)
+        if branch is not None:
+            self._branch_toggle.set_branch(branch)
+        self._branch_toggle.setEnabled(not self._loading)
+        self._fetching.setVisible(self._loading)
+        self._metric_commits.setVisible(not self._loading)
+        self._metric_prs.setVisible(not self._loading)
+        self._metric_added.setVisible(not self._loading)
+        self._metric_removed.setVisible(not self._loading)
+        if self._loading:
+            pref = branch or self._branch_toggle.branch()
+            self._fetching.setText(f"Fetching details from {pref}…")
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def _is_branch_toggle(self, widget: QObject | None) -> bool:
         current = widget
@@ -4052,6 +4242,11 @@ class GithubSummaryPreview(QFrame):
         self._chip_removed = _habits_chip(
             "−—", fg="#D9897A", bg="#241A1A", border="#46302F"
         )
+        self._sort_mode: GithubProjectSort = load_github_project_sort()
+        self._preview: GithubHabitsPreview | None = None
+        self._sort_dropdown = GithubProjectSortDropdown()
+        self._sort_dropdown.set_sort_mode(self._sort_mode)
+        self._sort_dropdown.changed.connect(self._on_sort_changed)
         chips = QHBoxLayout()
         chips.setContentsMargins(0, 0, 0, 0)
         chips.setSpacing(4)
@@ -4060,6 +4255,7 @@ class GithubSummaryPreview(QFrame):
         chips.addWidget(self._chip_added, stretch=0)
         chips.addWidget(self._chip_removed, stretch=0)
         chips.addStretch(1)
+        chips.addWidget(self._sort_dropdown, stretch=0)
 
         self._cards_host = QWidget()
         self._cards_host.setObjectName("githubCardsHost")
@@ -4252,6 +4448,7 @@ class GithubSummaryPreview(QFrame):
             if label
             else "Collecting commits for this billing period…"
         )
+        self._preview = None
         self._clear_cards()
         self._fallback.hide()
         self._content.show()
@@ -4273,7 +4470,28 @@ class GithubSummaryPreview(QFrame):
         self._cards_layout.addWidget(placeholder)
         self._apply_fixed_cards_viewport(card_count=0)
 
+    def _on_sort_changed(self, sort: str) -> None:
+        self._sort_mode = normalize_github_project_sort(sort)
+        save_github_project_sort(self._sort_mode)
+        if self._preview is not None and self._preview.available:
+            self.apply_preview(self._preview)
+
+    def set_project_loading(
+        self, full_name: str, loading: bool, *, branch: str | None = None
+    ) -> None:
+        """Mark one project card as fetching; leave the rest of the list alone."""
+        target = (full_name or "").strip()
+        if not target:
+            return
+        for i in range(self._cards_layout.count()):
+            item = self._cards_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if isinstance(w, GithubProjectCard) and w.full_name == target:
+                w.set_loading(loading, branch=branch)
+                return
+
     def apply_preview(self, preview: GithubHabitsPreview) -> None:
+        self._preview = preview
         self._clear_cards()
         if not preview.available:
             self._content.hide()
@@ -4326,7 +4544,7 @@ class GithubSummaryPreview(QFrame):
             )
             return
 
-        for project in preview.projects:
+        for project in _sort_github_projects(preview.projects, self._sort_mode):
             card = GithubProjectCard(project)
             card.branch_changed.connect(self.branch_preference_changed.emit)
             self._cards_layout.addWidget(card)
@@ -4399,6 +4617,7 @@ class DraggablePanel(QFrame):
                     SegmentedToggle,
                     PeriodNavButton,
                     GithubBranchDropdown,
+                    GithubProjectSortDropdown,
                     QScrollBar,
                 ),
             ):
@@ -4686,6 +4905,43 @@ class _GithubPeriodLoadWorker(QThread):
             self.finished_err.emit(str(exc))
 
 
+class _GithubProjectBranchWorker(QThread):
+    """Re-count a single repo after the user flips main/dev."""
+
+    finished_ok = pyqtSignal(object)
+    finished_err = pyqtSignal(str)
+
+    def __init__(
+        self,
+        *,
+        base: GithubHabitsPreview,
+        full_name: str,
+        preference: str,
+        renewal_day: int,
+        renewal_time: time_of_day | None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._base = base
+        self._full_name = full_name
+        self._preference = preference
+        self._renewal_day = renewal_day
+        self._renewal_time = renewal_time
+
+    def run(self) -> None:
+        try:
+            github = refresh_github_project_branch(
+                base=self._base,
+                full_name=self._full_name,
+                preference=self._preference,
+                renewal_day=self._renewal_day,
+                renewal_time=self._renewal_time,
+            )
+            self.finished_ok.emit(github)
+        except Exception as exc:  # noqa: BLE001 — surfaced to popup
+            self.finished_err.emit(str(exc))
+
+
 def _renewal_boundary_key(
     renewal_day: int, renewal_time: time_of_day | None
 ) -> tuple[int, str]:
@@ -4719,6 +4975,10 @@ class SpendPopup(QFrame):
         self._focused_github_day: str | None = None
         self._github_period_worker: _GithubPeriodLoadWorker | None = None
         self._github_period_gen = 0
+        self._github_branch_worker: _GithubProjectBranchWorker | None = None
+        self._github_branch_gen = 0
+        self._github_branch_pending: tuple[str, str] | None = None
+        self._github_branch_loading: str = ""
         self._github_period_pending: (
             tuple[str, int, time_of_day | None, bool] | None
         ) = None
@@ -4737,6 +4997,8 @@ class SpendPopup(QFrame):
         self._dismiss_armed = False
         self._keep_open = False
         self._nested_ui_depth = 0
+        # Hold dismiss briefly after a child QMenu closes (focus blip on Plasma).
+        self._nested_ui_grace_until = 0.0
         self._awaiting_login = False
         self._browser_inaccessible = False
         self._open_animation: PopupOpenAnimation = DEFAULT_POPUP_OPEN_ANIMATION
@@ -4746,6 +5008,9 @@ class SpendPopup(QFrame):
         self._arm_timer = QTimer(self)
         self._arm_timer.setSingleShot(True)
         self._arm_timer.timeout.connect(self._arm_dismiss)
+        self._status_clear_timer = QTimer(self)
+        self._status_clear_timer.setSingleShot(True)
+        self._status_clear_timer.timeout.connect(self._clear_ephemeral_status)
         self._outside_filter = _OutsideClickFilter(self)
 
         # Tool (not Popup): under Plasma/XWayland, Popup often never deactivates on
@@ -5010,6 +5275,9 @@ class SpendPopup(QFrame):
             self.github_summary.apply_preview(cached)
             if day and not cached.has_day_stats():
                 self._request_github_day_stats_upgrade(period)
+        loading = self._github_branch_loading
+        if loading:
+            self.github_summary.set_project_loading(loading, True)
         self.adjustSize()
 
     def _request_github_day_stats_upgrade(self, period_start: str) -> None:
@@ -5271,22 +5539,115 @@ class SpendPopup(QFrame):
     def _on_github_branch_preference_changed(
         self, full_name: str, preference: str
     ) -> None:
-        """Reload stats after the row toggle persists a main/dev choice."""
-        short = full_name.split("/")[-1] if "/" in full_name else full_name
-        self.set_status(f"Counting {short} on {preference}…")
-        self._github_by_period.clear()
-        self._github_fetch_started.clear()
-        self._github_backoff_until.clear()
+        """Refresh only the flipped repo; keep sibling project cards visible."""
+        full = (full_name or "").strip()
+        pref = (preference or "").strip().lower()
+        if not full or pref not in (BRANCH_PREF_MAIN, BRANCH_PREF_DEV):
+            return
+        short = full.split("/")[-1] if "/" in full else full
+        self.set_status(f"Fetching {short} from {pref}…")
+        self.github_summary.set_project_loading(full, True, branch=pref)
+        self._github_branch_loading = full
+        self._start_github_branch_worker(full, pref)
+
+    def _start_github_branch_worker(self, full_name: str, preference: str) -> None:
         meta = self.composer_history.focused_period_meta()
-        if meta is not None:
-            period_start, renewal_day, renewal_time = meta
+        if meta is None:
+            self._clear_github_branch_loading(full_name)
+            self.set_status("No billing period focused")
+            return
+        period_start, renewal_day, renewal_time = meta
+        base = self._github_preview_for(period_start)
+        if base is None or not base.available:
+            # No in-memory/disk period yet — fall back to a full collect once.
+            self._clear_github_branch_loading(full_name)
             self._sync_github_for_period(
                 period_start,
                 renewal_day=renewal_day,
                 renewal_time=renewal_time,
                 force=True,
             )
-        self.refresh_habits(force=True, status_when_done="")
+            return
+
+        worker = self._github_branch_worker
+        if worker is not None and worker.isRunning():
+            self._github_branch_pending = (full_name, preference)
+            return
+
+        self._github_branch_gen += 1
+        gen = self._github_branch_gen
+        self._github_branch_pending = None
+        worker = _GithubProjectBranchWorker(
+            base=base,
+            full_name=full_name,
+            preference=preference,
+            renewal_day=renewal_day,
+            renewal_time=renewal_time,
+            parent=self,
+        )
+        worker.finished_ok.connect(
+            lambda github, g=gen, full=full_name: self._on_github_branch_loaded(
+                g, full, github
+            )
+        )
+        worker.finished_err.connect(
+            lambda message, g=gen, full=full_name: self._on_github_branch_failed(
+                g, full, message
+            )
+        )
+        worker.finished.connect(
+            lambda w=worker: self._on_github_branch_worker_finished(w)
+        )
+        self._github_branch_worker = worker
+        worker.start()
+
+    def _clear_github_branch_loading(self, full_name: str = "") -> None:
+        target = (full_name or self._github_branch_loading or "").strip()
+        if target:
+            self.github_summary.set_project_loading(target, False)
+        if not full_name or full_name == self._github_branch_loading:
+            self._github_branch_loading = ""
+
+    def _on_github_branch_loaded(
+        self, gen: int, full_name: str, github: object
+    ) -> None:
+        if gen != self._github_branch_gen:
+            return
+        assert isinstance(github, GithubHabitsPreview)
+        self._clear_github_branch_loading(full_name)
+        if not github.available:
+            self.set_status(github.error_message or "GitHub refresh failed")
+            return
+        self._remember_github_preview(github)
+        if github.period_start == self._focused_github_period:
+            self._paint_github_for_focus()
+        short = full_name.split("/")[-1] if "/" in full_name else full_name
+        self.set_status(f"Updated {short}", clear_after_ms=3000)
+
+    def _on_github_branch_failed(
+        self, gen: int, full_name: str, message: str
+    ) -> None:
+        if gen != self._github_branch_gen:
+            return
+        self._clear_github_branch_loading(full_name)
+        self.set_status(message or "GitHub refresh failed")
+
+    def _on_github_branch_worker_finished(
+        self, worker: _GithubProjectBranchWorker
+    ) -> None:
+        if self._github_branch_worker is worker:
+            self._github_branch_worker = None
+        worker.deleteLater()
+        pending = self._github_branch_pending
+        if pending is None:
+            return
+        self._github_branch_pending = None
+        full_name, preference = pending
+        self.github_summary.set_project_loading(
+            full_name, True, branch=preference
+        )
+        self._github_branch_loading = full_name
+        self._start_github_branch_worker(full_name, preference)
 
     def stop_habits_worker(self, *, timeout_ms: int = 8_000) -> None:
         """Halt the background habits loader before Qt tears down this popup.
@@ -5298,12 +5659,28 @@ class SpendPopup(QFrame):
         self._habits_pending = None
         self._habits_gen += 1
         self._github_period_pending = None
+        self._github_branch_pending = None
         self._github_sync_request = None
         self._github_sync_timer.stop()
         self._github_period_gen += 1
+        self._github_branch_gen += 1
         github_worker = self._github_period_worker
         self._github_period_worker = None
         self._github_period_running = None
+        branch_worker = self._github_branch_worker
+        self._github_branch_worker = None
+        self._github_branch_loading = ""
+        if branch_worker is not None:
+            stop_qthread(
+                branch_worker,
+                wait_ms=timeout_ms,
+                label="github branch worker",
+                signals=(
+                    branch_worker.finished_ok,
+                    branch_worker.finished_err,
+                    branch_worker.finished,
+                ),
+            )
         if github_worker is not None:
             stop_qthread(
                 github_worker,
@@ -5709,12 +6086,23 @@ class SpendPopup(QFrame):
     def begin_nested_ui(self) -> None:
         """Keep the unpinned popup open while a child QMenu (etc.) has focus."""
         self._nested_ui_depth += 1
+        self._nested_ui_grace_until = 0.0
 
     def end_nested_ui(self) -> None:
         self._nested_ui_depth = max(0, self._nested_ui_depth - 1)
+        if self._nested_ui_depth > 0:
+            return
+        # QMenu teardown often fires focusWindowChanged(None) / WindowDeactivate
+        # before focus returns here — absorb that blip so the tray panel stays up.
+        self._nested_ui_grace_until = monotonic() + 0.4
+        if self.isVisible():
+            self.raise_()
+            self.activateWindow()
 
     def _nested_ui_open(self) -> bool:
-        return self._nested_ui_depth > 0
+        if self._nested_ui_depth > 0:
+            return True
+        return monotonic() < self._nested_ui_grace_until
 
     def _active_child_popup(self) -> QWidget | None:
         """QMenu (or similar) owned by this panel — e.g. the GitHub branch picker."""
@@ -5735,6 +6123,10 @@ class SpendPopup(QFrame):
         return child is not None and window is child.windowHandle()
 
     def _contains_global(self, global_pos: QPoint) -> bool:
+        # While a nested menu is up (or just closed), treat presses as inside so
+        # the outside-click filter does not dismiss on the menu click itself.
+        if self._nested_ui_open():
+            return True
         if self.frameGeometry().contains(global_pos):
             return True
         child = self._active_child_popup()
@@ -5777,10 +6169,12 @@ class SpendPopup(QFrame):
 
     def hideEvent(self, event) -> None:  # noqa: ANN001
         self._arm_timer.stop()
+        self._status_clear_timer.stop()
         self._stop_open_animation()
         self._dismiss_armed = False
         self._keep_open = False
         self._nested_ui_depth = 0
+        self._nested_ui_grace_until = 0.0
         self.pin_button.set_checked(False)
         self.composer_history.clear_period_selection()
         BubbleTip.hide_shared()
@@ -5864,11 +6258,18 @@ class SpendPopup(QFrame):
             # Keep the status row the same height as the countdown button.
             self.status.setFixedHeight(self.countdown.sizeHint().height())
 
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, *, clear_after_ms: int | None = None) -> None:
         clean = (text or "").strip()
+        self._status_clear_timer.stop()
         self.status.setText(clean)
         self._sync_countdown_visibility()
         self.adjustSize()
+        if clean and clear_after_ms is not None and clear_after_ms > 0:
+            self._status_clear_timer.start(int(clear_after_ms))
+
+    def _clear_ephemeral_status(self) -> None:
+        """Drop a timed status line so the countdown / refresh control returns."""
+        self.set_status("")
 
     def set_remaining(self, seconds: int) -> None:
         self.countdown.set_remaining(seconds, refreshing=self._refreshing)
@@ -5894,6 +6295,7 @@ class _OutsideClickFilter(QObject):
             not self._popup.isVisible()
             or self._popup._keep_open
             or not self._popup._dismiss_armed
+            or self._popup._nested_ui_open()
         ):
             return False
         # Global coordinates — works for presses on other top-levels too.

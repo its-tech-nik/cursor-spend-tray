@@ -107,6 +107,49 @@ def save_popup_panel_order(order: list[str]) -> None:
     panel_order_path().write_text(json.dumps(cleaned, indent=2), encoding="utf-8")
 
 
+GithubProjectSort = Literal["commits", "prs", "lines"]
+GITHUB_PROJECT_SORTS: tuple[GithubProjectSort, ...] = ("commits", "prs", "lines")
+DEFAULT_GITHUB_PROJECT_SORT: GithubProjectSort = "commits"
+GITHUB_PROJECT_SORT_LABELS: dict[GithubProjectSort, str] = {
+    "commits": "commits",
+    "prs": "PRs",
+    "lines": "lines",
+}
+
+
+def github_project_sort_path() -> Path:
+    return data_dir() / "github_project_sort.json"
+
+
+def normalize_github_project_sort(value: object) -> GithubProjectSort:
+    text = str(value or "").strip().lower()
+    if text in GITHUB_PROJECT_SORTS:
+        return text  # type: ignore[return-value]
+    return DEFAULT_GITHUB_PROJECT_SORT
+
+
+def load_github_project_sort() -> GithubProjectSort:
+    """Return how GitHub activity project cards should be ordered."""
+    path = github_project_sort_path()
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return normalize_github_project_sort(raw.get("sort"))
+            return normalize_github_project_sort(raw)
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    return DEFAULT_GITHUB_PROJECT_SORT
+
+
+def save_github_project_sort(sort: GithubProjectSort | str) -> None:
+    cleaned = normalize_github_project_sort(sort)
+    data_dir().mkdir(parents=True, exist_ok=True)
+    github_project_sort_path().write_text(
+        json.dumps({"sort": cleaned}, indent=2), encoding="utf-8"
+    )
+
+
 def zen_is_running() -> bool:
     """True when the dedicated automation browser profile is running."""
     return browser_is_running(resolve_automation_browser(), app_name=APP_NAME)

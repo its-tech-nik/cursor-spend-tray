@@ -190,7 +190,11 @@ def load_github_branch_prefs() -> dict[str, str]:
 
 
 def save_github_branch_pref(full_name: str, preference: str) -> None:
-    """Persist one repo's ``main``/``dev`` choice and invalidate the summary cache."""
+    """Persist one repo's ``main``/``dev`` choice.
+
+    Does not wipe the multi-period habits cache — callers refresh the affected
+    project and rewrite that period (and the prefs fingerprint) in place.
+    """
     full = str(full_name).strip()
     if not full or "/" not in full:
         return
@@ -205,7 +209,6 @@ def save_github_branch_pref(full_name: str, preference: str) -> None:
         )
     except OSError as exc:
         log.debug("Could not write github branch prefs: %s", exc)
-    invalidate_github_habits_cache()
 
 
 def _prefs_fingerprint(prefs: dict[str, str]) -> str:
@@ -493,6 +496,7 @@ def _save_cache(
     renewal_time: time_of_day | None,
     prefs_fingerprint: str,
     fetched_at: float | None = None,
+    keep_sibling_periods: bool = False,
 ) -> None:
     """Merge one period into the on-disk multi-period cache (keeps siblings)."""
     if not preview.available or not preview.period_start:
@@ -502,9 +506,9 @@ def _save_cache(
         stamp = float(time.time() if fetched_at is None else fetched_at)
         existing = _read_cache_payload()
         periods: dict[str, Any] = {}
-        if (
-            existing is not None
-            and existing.get("prefs_fingerprint") == prefs_fingerprint
+        if existing is not None and (
+            keep_sibling_periods
+            or existing.get("prefs_fingerprint") == prefs_fingerprint
         ):
             raw_periods = existing.get("periods")
             if isinstance(raw_periods, dict):
@@ -1062,6 +1066,148 @@ def _coerce_period_start(value: date | str) -> date:
         return date.fromisoformat(text)
     except ValueError as exc:
         raise ValueError(f"Invalid period start: {value}") from exc
+
+
+def _prefs_fingerprint_from_disk() -> str:
+    raw = load_github_branch_prefs()
+    prefs = {
+        k: v
+        for k, v in (
+            (str(key).strip(), str(val).strip().lower())
+            for key, val in raw.items()
+        )
+        if k and "/" in k and v in BRANCH_PREFS
+    }
+    return _prefs_fingerprint(prefs)
+
+
+def _daily_commits_from_projects(
+    projects: list[GithubProjectRow] | tuple[GithubProjectRow, ...],
+) -> dict[date, int]:
+    by_day: dict[date, int] = {}
+    for project in projects:
+        for stat in project.day_stats:
+            try:
+                day = date.fromisoformat(stat.day)
+            except ValueError:
+                continue
+            by_day[day] = by_day.get(day, 0) + int(stat.commit_count)
+    return by_day
+
+
+def refresh_github_project_branch(
+    *,
+    base: GithubHabitsPreview,
+    full_name: str,
+    preference: str,
+    renewal_day: int,
+    renewal_time: time_of_day | None = None,
+    now: datetime | None = None,
+) -> GithubHabitsPreview:
+    """Re-count one repo on a new branch; leave sibling projects untouched.
+
+    Updates the on-disk period entry (and prefs fingerprint) without a full
+    habits recollect.
+    """
+    if not base.available or not base.period_start:
+        return GithubHabitsPreview.unavailable("No GitHub period to refresh")
+    full = str(full_name or "").strip()
+    if not full or "/" not in full:
+        return GithubHabitsPreview.unavailable("Invalid repository")
+
+    projects = list(base.projects)
+    idx = next((i for i, p in enumerate(projects) if p.full_name == full), None)
+    if idx is None:
+        return GithubHabitsPreview.unavailable(f"Project not in period: {full}")
+
+    existing = projects[idx]
+    try:
+        start = date.fromisoformat(base.period_start)
+    except ValueError:
+        return GithubHabitsPreview.unavailable(
+            f"Invalid period start: {base.period_start}"
+        )
+    if base.period_end:
+        try:
+            end = date.fromisoformat(base.period_end)
+        except ValueError:
+            end = period_end_for(
+                start, renewal_day=renewal_day, renewal_time=renewal_time
+            )
+    else:
+        end = period_end_for(start, renewal_day=renewal_day, renewal_time=renewal_time)
+
+    when = now or datetime.now().astimezone()
+    today = when.astimezone().date()
+    t0 = time.perf_counter()
+    try:
+        login = (base.login or "").strip() or _viewer_login()
+        default_branch = (existing.default_branch or "").strip() or _repo_default_branch(
+            full
+        )
+        short = full.split("/")[-1]
+        row, _by_day = _project_from_branch(
+            full_name=full,
+            short_name=short,
+            login=login,
+            preference=preference,
+            default_branch=default_branch,
+            pr_count=existing.pr_count,
+            period_start=start,
+            period_end=end,
+        )
+        projects[idx] = GithubProjectRow(
+            name=existing.name,
+            full_name=row.full_name,
+            commit_count=row.commit_count,
+            pr_count=row.pr_count,
+            additions=row.additions,
+            deletions=row.deletions,
+            branch_preference=row.branch_preference,
+            default_branch=row.default_branch,
+            track_branch=row.track_branch,
+            day_stats=row.day_stats,
+        )
+        projects.sort(
+            key=lambda r: (-r.commit_count, -r.pr_count, -r.additions, r.name.lower())
+        )
+        day_labels, daily_commits, cumulative_commits = _build_daily_commit_series(
+            _daily_commits_from_projects(projects),
+            period_start=start,
+            period_end=end,
+            as_of=today,
+        )
+    except RuntimeError as exc:
+        return GithubHabitsPreview.unavailable(str(exc))
+    except Exception as exc:  # noqa: BLE001 — surfaced in popup
+        log.debug("GitHub project branch refresh failed", exc_info=True)
+        return GithubHabitsPreview.unavailable(str(exc))
+
+    preview = GithubHabitsPreview(
+        available=True,
+        login=login,
+        period_label=base.period_label
+        or period_label(start, renewal_day=renewal_day, renewal_time=renewal_time),
+        period_start=start.isoformat(),
+        period_end=end.isoformat(),
+        projects=tuple(projects),
+        total_commits=sum(p.commit_count for p in projects),
+        total_prs=sum(p.pr_count for p in projects),
+        total_additions=sum(p.additions for p in projects),
+        total_deletions=sum(p.deletions for p in projects),
+        day_labels=day_labels,
+        daily_commits=daily_commits,
+        cumulative_commits=cumulative_commits,
+        elapsed_ms=int((time.perf_counter() - t0) * 1000),
+    )
+    _save_cache(
+        preview,
+        renewal_day=renewal_day,
+        renewal_time=renewal_time,
+        prefs_fingerprint=_prefs_fingerprint_from_disk(),
+        keep_sibling_periods=True,
+    )
+    return preview
 
 
 def collect_github_habits_preview(
